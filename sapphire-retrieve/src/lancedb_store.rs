@@ -249,8 +249,8 @@ impl LanceDbVectorStore {
     pub fn vec_info(&self, sqlite_conn: &rusqlite::Connection) -> Result<VecInfo> {
         let vector_count = self.rt.block_on(self.inner.embedded_count());
         let chunk_count: u64 = sqlite_conn
-            .query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))
-            .unwrap_or(0);
+            .query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get::<_, i64>(0))
+            .unwrap_or(0) as u64;
         Ok(VecInfo {
             embedding_dim: self.inner.dim as u32,
             vector_count,

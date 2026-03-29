@@ -410,11 +410,11 @@ impl RetrieveDb {
                 drop(guard);
                 let conn = self.open_conn()?;
                 let vector_count: u64 = conn
-                    .query_row("SELECT COUNT(*) FROM chunk_vectors", [], |row| row.get(0))
-                    .unwrap_or(0);
+                    .query_row("SELECT COUNT(*) FROM chunk_vectors", [], |row| row.get::<_, i64>(0))
+                    .unwrap_or(0) as u64;
                 let chunk_count: u64 = conn
-                    .query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))
-                    .unwrap_or(0);
+                    .query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get::<_, i64>(0))
+                    .unwrap_or(0) as u64;
                 Ok(VecInfo {
                     embedding_dim: dim,
                     vector_count,
@@ -446,7 +446,7 @@ impl RetrieveDb {
     pub fn document_count(&self) -> Result<u64> {
         let conn = self.open_conn()?;
         let count: u64 =
-            conn.query_row("SELECT COUNT(*) FROM documents", [], |row| row.get(0))?;
+            conn.query_row("SELECT COUNT(*) FROM documents", [], |row| row.get::<_, i64>(0))? as u64;
         Ok(count)
     }
 
