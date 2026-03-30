@@ -1,13 +1,8 @@
 //! Vector store abstraction.
 //!
-//! [`VectorStore`] is a **synchronous** trait that abstracts over the supported
-//! vector backends:
-//!
-//! - [`SqliteVecStore`] (used internally by [`crate::db::RetrieveDb`]) — stores
-//!   chunk vectors inside the retrieve SQLite database via the sqlite-vec extension.
-//! - `LanceDbVectorStore` (in `lancedb_store`) — stores chunk vectors in a
-//!   separate LanceDB directory; async LanceDB calls are wrapped in an internal
-//!   Tokio runtime so the trait remains sync.
+//! [`VectorStore`] is a **synchronous** trait used internally by the SQLite vec
+//! backend of [`crate::db::RetrieveDb`].  The LanceDB full backend
+//! (`lancedb_store`) does not use this trait.
 //!
 //! # Chunk identity
 //!

@@ -13,6 +13,9 @@ pub enum Error {
          delete the retrieve DB file and re-sync"
     )]
     SchemaTooNew { db_version: i32, app_version: i32 },
+    #[cfg(feature = "lancedb-store")]
+    #[error("LanceDB error: {0}")]
+    LanceDb(#[from] lancedb::Error),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

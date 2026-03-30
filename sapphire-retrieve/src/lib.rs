@@ -2,6 +2,7 @@ pub mod chunker;
 pub mod db;
 pub mod embed;
 pub mod error;
+#[cfg(feature = "lancedb-store")]
 pub mod lancedb_store;
 pub mod vector_store;
 

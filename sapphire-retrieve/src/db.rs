@@ -1,27 +1,31 @@
-//! Unified retrieve database: FTS5 + vector search in a single SQLite file.
+//! Unified retrieve database: FTS5 + vector search.
 //!
-//! [`RetrieveDb`] manages its own SQLite database that is separate from any
-//! application cache.  It stores:
+//! [`RetrieveDb`] manages the retrieve backend, which is either a SQLite database
+//! or (when the `lancedb-store` feature is enabled and [`RetrieveDb::init_lancedb`]
+//! is called) a set of four LanceDB tables that replace SQLite entirely.
 //!
+//! The database stores:
+//!
+//! - `files` — file path + mtime for change detection.
 //! - `documents` — the full text corpus (id, title, body, path).
-//! - `documents_fts` — FTS5 trigram index over title + body.
-//! - `chunks` — paragraph-level chunks derived from each document body.
-//! - `chunk_vectors` (optional) — vec0 virtual table for approximate similarity
-//!   search via the sqlite-vec extension.
+//! - `documents_fts` / LanceDB FTS index — searchable text index.
+//! - `chunks` / `chunks_meta` — paragraph-level chunks derived from each body.
+//! - `chunk_vectors` — approximate similarity search via sqlite-vec or LanceDB.
 //!
 //! # Vector backends
 //!
 //! Call [`RetrieveDb::init_sqlite_vec`] or [`RetrieveDb::init_lancedb`] after
 //! opening to enable vector search.  Without a vector backend, only FTS is
-//! available.
+//! available.  When `init_lancedb` is used, all data lives in LanceDB — no SQLite
+//! file is created.
 //!
 //! # Thread safety
 //!
-//! [`RetrieveDb`] is `Send + Sync`.  Each public method opens a short-lived
-//! SQLite connection internally and drops it when done.
+//! [`RetrieveDb`] is `Send + Sync`.  Each public method acquires internal state
+//! briefly, then operates on an independent connection/handle.
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -35,12 +39,20 @@ use crate::{
     vector_store::{Chunk, ChunkSearchResult, VecInfo, vec_serialize},
 };
 
+#[cfg(feature = "lancedb-store")]
+use crate::lancedb_store::LanceDbBackend;
+
 // ── schema ────────────────────────────────────────────────────────────────────
 
 /// Stored in `PRAGMA user_version` of the retrieve DB.
-pub const SCHEMA_VERSION: i32 = 1;
+pub const SCHEMA_VERSION: i32 = 2;
 
 const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS files (
+    path       TEXT    PRIMARY KEY,
+    file_mtime INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS documents (
     id    INTEGER PRIMARY KEY,
     title TEXT    NOT NULL DEFAULT '',
@@ -81,12 +93,13 @@ fn init_sqlite_vec_extension() {
     });
 }
 
-// ── vector backend ────────────────────────────────────────────────────────────
+// ── backend state ─────────────────────────────────────────────────────────────
 
-enum VecBackend {
+enum BackendState {
+    None,
     SqliteVec { dim: u32 },
     #[cfg(feature = "lancedb-store")]
-    LanceDb(Arc<Mutex<crate::lancedb_store::LanceDbVectorStore>>),
+    LanceDb(Arc<LanceDbBackend>),
 }
 
 // ── public types ──────────────────────────────────────────────────────────────
@@ -121,32 +134,29 @@ pub struct SearchResult {
 
 // ── RetrieveDb ────────────────────────────────────────────────────────────────
 
-/// Manages a SQLite database for full-text and (optionally) vector search.
+/// Manages the retrieve backend for full-text and (optionally) vector search.
 ///
 /// Create with [`RetrieveDb::open`], then call:
 /// - [`upsert_document`](Self::upsert_document) / [`remove_document`](Self::remove_document) to keep the index in sync.
 /// - [`rebuild_fts`](Self::rebuild_fts) after a batch of upserts/removes.
-/// - [`search_fts`](Self::search_fts) for trigram full-text search.
+/// - [`search_fts`](Self::search_fts) for full-text search.
 /// - Optionally call [`init_sqlite_vec`](Self::init_sqlite_vec) or
 ///   [`init_lancedb`](Self::init_lancedb), then use
 ///   [`embed_pending`](Self::embed_pending) and
 ///   [`search_similar`](Self::search_similar) for vector search.
 pub struct RetrieveDb {
     db_path: PathBuf,
-    vec_backend: Mutex<Option<VecBackend>>,
+    backend: Mutex<BackendState>,
 }
 
 impl RetrieveDb {
-    /// Open (or create) the retrieve database at `db_path`.
+    /// Open the retrieve database at `db_path`.
     ///
-    /// FTS is always available after this call.  To enable vector search,
-    /// call [`init_sqlite_vec`](Self::init_sqlite_vec) or
-    /// [`init_lancedb`](Self::init_lancedb) afterwards.
+    /// The SQLite file is created lazily on first use; if `init_lancedb` is
+    /// called instead of `init_sqlite_vec`, no SQLite file is ever created.
     pub fn open(db_path: &Path) -> Result<Self> {
         std::fs::create_dir_all(db_path.parent().unwrap_or(Path::new(".")))?;
-        let conn = open_or_init(db_path)?;
-        drop(conn);
-        Ok(Self { db_path: db_path.to_owned(), vec_backend: Mutex::new(None) })
+        Ok(Self { db_path: db_path.to_owned(), backend: Mutex::new(BackendState::None) })
     }
 
     /// Delete the existing database and create a fresh one.
@@ -160,28 +170,27 @@ impl RetrieveDb {
     /// Enable the sqlite-vec vector backend with `embedding_dim` dimensions.
     ///
     /// Idempotent — if the backend is already initialised this is a no-op.
-    /// Returns an error only if the dimension changes (requires a rebuild).
     pub fn init_sqlite_vec(&self, embedding_dim: u32) -> Result<()> {
-        let mut guard = self.vec_backend.lock().unwrap();
-        if guard.is_none() {
+        let mut guard = self.backend.lock().unwrap();
+        if matches!(*guard, BackendState::None) {
             init_sqlite_vec_extension();
             let conn = open_or_init(&self.db_path)?;
             ensure_vec_tables(&conn, embedding_dim)?;
-            *guard = Some(VecBackend::SqliteVec { dim: embedding_dim });
+            *guard = BackendState::SqliteVec { dim: embedding_dim };
         }
         Ok(())
     }
 
-    /// Enable the LanceDB vector backend.
+    /// Enable the LanceDB full backend (files + documents + chunks + vectors).
     ///
-    /// `lancedb_dir` is the directory in which LanceDB stores its data.
-    /// Idempotent — if the backend is already initialised this is a no-op.
+    /// When active, all data lives in LanceDB tables under `lancedb_dir`.
+    /// No SQLite file is created.  Idempotent.
     #[cfg(feature = "lancedb-store")]
     pub fn init_lancedb(&self, lancedb_dir: &Path, embedding_dim: u32) -> Result<()> {
-        let mut guard = self.vec_backend.lock().unwrap();
-        if guard.is_none() {
-            let store = crate::lancedb_store::LanceDbVectorStore::new(lancedb_dir, embedding_dim)?;
-            *guard = Some(VecBackend::LanceDb(Arc::new(Mutex::new(store))));
+        let mut guard = self.backend.lock().unwrap();
+        if matches!(*guard, BackendState::None) {
+            let backend = LanceDbBackend::new(lancedb_dir, embedding_dim)?;
+            *guard = BackendState::LanceDb(Arc::new(backend));
         }
         Ok(())
     }
@@ -190,21 +199,28 @@ impl RetrieveDb {
 
     /// Insert or replace a document in the retrieve database.
     ///
-    /// Also re-chunks the document body and updates the `chunks` table.
-    /// Stale embeddings for changed chunks are removed automatically when the
-    /// sqlite-vec backend is active.
+    /// Also re-chunks the document body and updates the chunks table.
+    /// Stale embeddings for changed chunks are removed automatically.
     ///
     /// Call [`rebuild_fts`](Self::rebuild_fts) after a batch of upserts.
     pub fn upsert_document(&self, doc: &Document) -> Result<()> {
-        let conn = self.open_conn()?;
+        #[cfg(feature = "lancedb-store")]
+        {
+            let guard = self.backend.lock().unwrap();
+            if let BackendState::LanceDb(lb) = &*guard {
+                let lb = Arc::clone(lb);
+                drop(guard);
+                return lb.upsert_document(doc);
+            }
+        }
 
+        let conn = self.open_conn_sqlite()?;
         conn.execute(
             "INSERT OR REPLACE INTO documents (id, title, body, path) \
              VALUES (?1, ?2, ?3, ?4)",
             params![doc.id, doc.title, doc.body, doc.path],
         )?;
-
-        let has_vec = matches!(*self.vec_backend.lock().unwrap(), Some(VecBackend::SqliteVec { .. }));
+        let has_vec = matches!(*self.backend.lock().unwrap(), BackendState::SqliteVec { .. });
         upsert_chunks(&conn, doc, has_vec)?;
         Ok(())
     }
@@ -214,7 +230,17 @@ impl RetrieveDb {
     /// Performs an incremental FTS5 delete so a full rebuild is not needed
     /// for single removals.
     pub fn remove_document(&self, id: i64) -> Result<()> {
-        let conn = self.open_conn()?;
+        #[cfg(feature = "lancedb-store")]
+        {
+            let guard = self.backend.lock().unwrap();
+            if let BackendState::LanceDb(lb) = &*guard {
+                let lb = Arc::clone(lb);
+                drop(guard);
+                return lb.remove_document(id);
+            }
+        }
+
+        let conn = self.open_conn_sqlite()?;
 
         let fts_data: Option<(String, String)> = conn
             .query_row(
@@ -224,7 +250,7 @@ impl RetrieveDb {
             )
             .ok();
 
-        let has_vec = matches!(*self.vec_backend.lock().unwrap(), Some(VecBackend::SqliteVec { .. }));
+        let has_vec = matches!(*self.backend.lock().unwrap(), BackendState::SqliteVec { .. });
         if has_vec {
             conn.execute(
                 "DELETE FROM chunk_vectors WHERE chunk_id IN \
@@ -246,24 +272,44 @@ impl RetrieveDb {
         Ok(())
     }
 
-    /// Rebuild the FTS5 index from the current `documents` table.
+    /// Rebuild the FTS index from the current `documents` table.
     ///
     /// Call this after a batch of [`upsert_document`](Self::upsert_document)
     /// calls or whenever the FTS index may be out of date.
     pub fn rebuild_fts(&self) -> Result<()> {
-        let conn = self.open_conn()?;
+        #[cfg(feature = "lancedb-store")]
+        {
+            let guard = self.backend.lock().unwrap();
+            if let BackendState::LanceDb(lb) = &*guard {
+                let lb = Arc::clone(lb);
+                drop(guard);
+                return lb.rebuild_fts();
+            }
+        }
+
+        let conn = self.open_conn_sqlite()?;
         conn.execute_batch("INSERT INTO documents_fts(documents_fts) VALUES('rebuild')")?;
         Ok(())
     }
 
     // ── search ────────────────────────────────────────────────────────────────
 
-    /// Full-text search using the FTS5 trigram index.
+    /// Full-text search.
     ///
-    /// Returns up to `limit` documents matching `query`, ordered by relevance.
-    /// The trigram tokenizer supports substring and CJK queries.
+    /// SQLite mode uses the FTS5 trigram index (substring / CJK aware).
+    /// LanceDB mode uses the tantivy word tokenizer (better BM25 ranking).
     pub fn search_fts(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
-        let conn = self.open_conn()?;
+        #[cfg(feature = "lancedb-store")]
+        {
+            let guard = self.backend.lock().unwrap();
+            if let BackendState::LanceDb(lb) = &*guard {
+                let lb = Arc::clone(lb);
+                drop(guard);
+                return lb.search_fts(query, limit);
+            }
+        }
+
+        let conn = self.open_conn_sqlite()?;
         let mut stmt = conn.prepare(
             "SELECT d.id, d.title, d.path, fts.rank
              FROM documents_fts fts
@@ -293,12 +339,12 @@ impl RetrieveDb {
         query_vec: &[f32],
         limit: usize,
     ) -> Result<Vec<ChunkSearchResult>> {
-        let guard = self.vec_backend.lock().unwrap();
+        let guard = self.backend.lock().unwrap();
         match &*guard {
-            None => Ok(Vec::new()),
-            Some(VecBackend::SqliteVec { .. }) => {
+            BackendState::None => Ok(Vec::new()),
+            BackendState::SqliteVec { .. } => {
                 drop(guard);
-                let conn = self.open_conn()?;
+                let conn = self.open_conn_sqlite()?;
                 let blob = vec_serialize(query_vec);
                 let mut stmt = conn.prepare(
                     "SELECT d.id, d.title, d.path, c.chunk_index, c.text, cv.distance
@@ -323,11 +369,10 @@ impl RetrieveDb {
                 Ok(results)
             }
             #[cfg(feature = "lancedb-store")]
-            Some(VecBackend::LanceDb(store_arc)) => {
-                let store_arc = Arc::clone(store_arc);
+            BackendState::LanceDb(lb) => {
+                let lb = Arc::clone(lb);
                 drop(guard);
-                let store = store_arc.lock().unwrap();
-                crate::vector_store::VectorStore::search_similar(&*store, query_vec, limit)
+                lb.search_similar(query_vec, limit)
             }
         }
     }
@@ -383,32 +428,31 @@ impl RetrieveDb {
         embedder: &dyn Embedder,
         on_progress: impl Fn(usize, usize),
     ) -> Result<usize> {
-        let guard = self.vec_backend.lock().unwrap();
+        let guard = self.backend.lock().unwrap();
         match &*guard {
-            None => Ok(0),
-            Some(VecBackend::SqliteVec { .. }) => {
+            BackendState::None => Ok(0),
+            BackendState::SqliteVec { .. } => {
                 drop(guard);
                 self.embed_pending_sqlite_vec(embedder, on_progress)
             }
             #[cfg(feature = "lancedb-store")]
-            Some(VecBackend::LanceDb(store_arc)) => {
-                let store_arc = Arc::clone(store_arc);
+            BackendState::LanceDb(lb) => {
+                let lb = Arc::clone(lb);
                 drop(guard);
-                let store = store_arc.lock().unwrap();
-                self.embed_pending_lancedb(&*store, embedder, on_progress)
+                lb.embed_pending(embedder, on_progress)
             }
         }
     }
 
     /// Read vector index statistics.
     pub fn vec_info(&self) -> Result<VecInfo> {
-        let guard = self.vec_backend.lock().unwrap();
+        let guard = self.backend.lock().unwrap();
         match &*guard {
-            None => Ok(VecInfo { embedding_dim: 0, vector_count: 0, pending_count: 0 }),
-            Some(VecBackend::SqliteVec { dim }) => {
+            BackendState::None => Ok(VecInfo { embedding_dim: 0, vector_count: 0, pending_count: 0 }),
+            BackendState::SqliteVec { dim } => {
                 let dim = *dim;
                 drop(guard);
-                let conn = self.open_conn()?;
+                let conn = self.open_conn_sqlite()?;
                 let vector_count: u64 = conn
                     .query_row("SELECT COUNT(*) FROM chunk_vectors", [], |row| row.get::<_, i64>(0))
                     .unwrap_or(0) as u64;
@@ -422,19 +466,27 @@ impl RetrieveDb {
                 })
             }
             #[cfg(feature = "lancedb-store")]
-            Some(VecBackend::LanceDb(store_arc)) => {
-                let store_arc = Arc::clone(store_arc);
+            BackendState::LanceDb(lb) => {
+                let lb = Arc::clone(lb);
                 drop(guard);
-                let conn = self.open_conn()?;
-                let store = store_arc.lock().unwrap();
-                store.vec_info(&conn)
+                lb.vec_info()
             }
         }
     }
 
     /// Return the IDs of all documents in the database.
     pub fn document_ids(&self) -> Result<Vec<i64>> {
-        let conn = self.open_conn()?;
+        #[cfg(feature = "lancedb-store")]
+        {
+            let guard = self.backend.lock().unwrap();
+            if let BackendState::LanceDb(lb) = &*guard {
+                let lb = Arc::clone(lb);
+                drop(guard);
+                return lb.document_ids();
+            }
+        }
+
+        let conn = self.open_conn_sqlite()?;
         let mut stmt = conn.prepare("SELECT id FROM documents")?;
         let ids = stmt
             .query_map([], |row| row.get::<_, i64>(0))?
@@ -444,23 +496,109 @@ impl RetrieveDb {
 
     /// Return the total number of documents in the database.
     pub fn document_count(&self) -> Result<u64> {
-        let conn = self.open_conn()?;
+        #[cfg(feature = "lancedb-store")]
+        {
+            let guard = self.backend.lock().unwrap();
+            if let BackendState::LanceDb(lb) = &*guard {
+                let lb = Arc::clone(lb);
+                drop(guard);
+                return lb.document_count();
+            }
+        }
+
+        let conn = self.open_conn_sqlite()?;
         let count: u64 =
             conn.query_row("SELECT COUNT(*) FROM documents", [], |row| row.get::<_, i64>(0))? as u64;
         Ok(count)
     }
 
+    // ── file tracking ─────────────────────────────────────────────────────────
+
+    /// Return all tracked (path, file_mtime) pairs.
+    pub fn file_mtimes(&self) -> Result<HashMap<String, i64>> {
+        #[cfg(feature = "lancedb-store")]
+        {
+            let guard = self.backend.lock().unwrap();
+            if let BackendState::LanceDb(lb) = &*guard {
+                let lb = Arc::clone(lb);
+                drop(guard);
+                return lb.file_mtimes();
+            }
+        }
+
+        let conn = self.open_conn_sqlite()?;
+        let mut stmt = conn.prepare("SELECT path, file_mtime FROM files")?;
+        let result = stmt
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?
+            .collect::<rusqlite::Result<HashMap<_, _>>>()?;
+        Ok(result)
+    }
+
+    /// Insert or replace a file record.
+    pub fn upsert_file(&self, path: &str, mtime: i64) -> Result<()> {
+        #[cfg(feature = "lancedb-store")]
+        {
+            let guard = self.backend.lock().unwrap();
+            if let BackendState::LanceDb(lb) = &*guard {
+                let lb = Arc::clone(lb);
+                drop(guard);
+                return lb.upsert_file(path, mtime);
+            }
+        }
+
+        let conn = self.open_conn_sqlite()?;
+        conn.execute(
+            "INSERT OR REPLACE INTO files (path, file_mtime) VALUES (?1, ?2)",
+            params![path, mtime],
+        )?;
+        Ok(())
+    }
+
+    /// Delete a file record.
+    pub fn remove_file(&self, path: &str) -> Result<()> {
+        #[cfg(feature = "lancedb-store")]
+        {
+            let guard = self.backend.lock().unwrap();
+            if let BackendState::LanceDb(lb) = &*guard {
+                let lb = Arc::clone(lb);
+                drop(guard);
+                return lb.remove_file(path);
+            }
+        }
+
+        let conn = self.open_conn_sqlite()?;
+        conn.execute("DELETE FROM files WHERE path = ?1", [path])?;
+        Ok(())
+    }
+
+    /// Return the total number of tracked files.
+    pub fn file_count(&self) -> Result<u64> {
+        #[cfg(feature = "lancedb-store")]
+        {
+            let guard = self.backend.lock().unwrap();
+            if let BackendState::LanceDb(lb) = &*guard {
+                let lb = Arc::clone(lb);
+                drop(guard);
+                return lb.file_count();
+            }
+        }
+
+        let conn = self.open_conn_sqlite()?;
+        let count: u64 =
+            conn.query_row("SELECT COUNT(*) FROM files", [], |row| row.get::<_, i64>(0))? as u64;
+        Ok(count)
+    }
+
     // ── private helpers ───────────────────────────────────────────────────────
 
-    fn open_conn(&self) -> Result<Connection> {
+    fn open_conn_sqlite(&self) -> Result<Connection> {
         // If sqlite-vec is active, ensure the extension is registered globally
         // (a process-global once-only registration is sufficient).
-        if matches!(*self.vec_backend.lock().unwrap(), Some(VecBackend::SqliteVec { .. })) {
+        if matches!(*self.backend.lock().unwrap(), BackendState::SqliteVec { .. }) {
             init_sqlite_vec_extension();
         }
-        let conn = Connection::open(&self.db_path)?;
-        conn.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL;")?;
-        Ok(conn)
+        // open_or_init creates the schema on first call (lazy init).
+        open_or_init(&self.db_path)
     }
 
     fn embed_pending_sqlite_vec(
@@ -468,7 +606,7 @@ impl RetrieveDb {
         embedder: &dyn Embedder,
         on_progress: impl Fn(usize, usize),
     ) -> Result<usize> {
-        let conn = self.open_conn()?;
+        let conn = self.open_conn_sqlite()?;
         let embedded_keys = sqlite_vec_embedded_keys(&conn)?;
         let pending = collect_pending_chunks(&conn, &embedded_keys)?;
         let total = pending.len();
@@ -478,31 +616,6 @@ impl RetrieveDb {
             let texts: Vec<&str> = batch.iter().map(|c| c.text.as_str()).collect();
             let embeddings = embedder.embed_texts(&texts)?;
             sqlite_vec_insert_embeddings(&conn, batch, &embeddings)?;
-            done += batch.len();
-            on_progress(done, total);
-        }
-        Ok(total)
-    }
-
-    #[cfg(feature = "lancedb-store")]
-    fn embed_pending_lancedb(
-        &self,
-        store: &crate::lancedb_store::LanceDbVectorStore,
-        embedder: &dyn Embedder,
-        on_progress: impl Fn(usize, usize),
-    ) -> Result<usize> {
-        use crate::vector_store::VectorStore as _;
-
-        let conn = self.open_conn()?;
-        let embedded_keys = store.embedded_chunk_keys()?;
-        let pending = collect_pending_chunks(&conn, &embedded_keys)?;
-        let total = pending.len();
-        let mut done = 0;
-
-        for batch in pending.chunks(100) {
-            let texts: Vec<&str> = batch.iter().map(|c| c.text.as_str()).collect();
-            let embeddings = embedder.embed_texts(&texts)?;
-            store.insert_embeddings(batch, &embeddings)?;
             done += batch.len();
             on_progress(done, total);
         }

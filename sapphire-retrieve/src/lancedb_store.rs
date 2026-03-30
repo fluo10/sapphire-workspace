@@ -1,28 +1,27 @@
 #![cfg(feature = "lancedb-store")]
-//! LanceDB vector store backend.
+//! Full LanceDB backend for [`RetrieveDb`].
 //!
-//! Stores chunk embeddings in a LanceDB database at a caller-specified directory.
+//! When LanceDB is selected as the vector backend, this module provides an
+//! implementation that stores *all* data — files, documents, chunks, and
+//! embeddings — in LanceDB, with no SQLite dependency.
 //!
-//! # Chunk table schema
+//! # Tables
 //!
-//! | column        | type                        | notes                        |
-//! |---------------|-----------------------------|------------------------------|
-//! | `doc_id`      | `Int64`                     | stable document ID           |
-//! | `chunk_index` | `Int32`                     | paragraph position (0-based) |
-//! | `doc_title`   | `Utf8`                      | denormalised for display     |
-//! | `doc_path`    | `Utf8`                      | absolute file path           |
-//! | `text`        | `Utf8`                      | embeddable chunk text        |
-//! | `embedding`   | `FixedSizeList<Float32, N>` | N = embedding_dim            |
+//! | table           | columns                                                       | purpose                         |
+//! |-----------------|---------------------------------------------------------------|---------------------------------|
+//! | `files`         | `path Utf8, mtime Int64`                                      | file mtime tracking             |
+//! | `documents`     | `id Int64, title Utf8, body Utf8, path Utf8`                  | FTS index source                |
+//! | `chunks_meta`   | `doc_id Int64, chunk_index Int32, text Utf8, doc_title Utf8, doc_path Utf8` | pending-embedding tracking |
+//! | `chunk_vectors` | `doc_id Int64, chunk_index Int32, doc_title Utf8, doc_path Utf8, text Utf8, embedding FixedSizeList<Float32>` | vector search |
 //!
-//! # Async boundary
+//! # Directory layout
 //!
-//! All LanceDB operations are inherently async.  [`LanceDbVectorStore`]
-//! wraps them in an internal `tokio::runtime::Runtime` so that the
-//! [`VectorStore`] trait remains synchronous.
+//! All tables live inside `{root}/lancedb_full_v{SCHEMA_VERSION}/`.
+//! This is distinct from the old hybrid-mode directory `lancedb_v1/`.
 
 use std::{
     collections::HashSet,
-    path::Path,
+    path::{Path, PathBuf},
     sync::Arc,
 };
 
@@ -32,130 +31,327 @@ use arrow_array::{
 };
 use arrow_schema::{DataType, Field, Schema};
 use futures::TryStreamExt as _;
-use lancedb::query::{ExecutableQuery, QueryBase};
-
-use crate::{
-    error::{Error, Result},
-    vector_store::{Chunk, ChunkSearchResult, VecInfo, VectorStore},
+use lancedb::{
+    index::{Index, scalar::{FtsIndexBuilder, FullTextSearchQuery}},
+    query::{ExecutableQuery, QueryBase, Select},
 };
 
-const TABLE_NAME: &str = "chunks";
+use crate::{
+    chunker::chunk_document,
+    db::{Document, SearchResult},
+    embed::Embedder,
+    error::{Error, Result},
+    vector_store::{Chunk, ChunkSearchResult, VecInfo},
+};
 
-/// Schema version for the LanceDB store.
-///
-/// Used to compute the versioned subdirectory:
-/// `{root}/lancedb_v{LANCEDB_SCHEMA_VERSION}/`.  Bump whenever the Arrow
-/// table schema changes so old data is preserved until explicitly removed.
-pub const LANCEDB_SCHEMA_VERSION: i32 = 1;
+// ── versioning ────────────────────────────────────────────────────────────────
 
-/// Returns the active LanceDB store directory for the given root.
-pub fn versioned_dir(root: &Path) -> std::path::PathBuf {
-    root.join(format!("lancedb_v{LANCEDB_SCHEMA_VERSION}"))
+/// Schema version encoded in the directory name.
+pub const SCHEMA_VERSION: i32 = 1;
+
+/// Returns the full-backend LanceDB directory for the given cache root.
+pub fn data_dir(root: &Path) -> PathBuf {
+    root.join(format!("lancedb_full_v{SCHEMA_VERSION}"))
+}
+
+// ── table names ───────────────────────────────────────────────────────────────
+
+const TBL_FILES: &str = "files";
+const TBL_DOCUMENTS: &str = "documents";
+const TBL_CHUNKS_META: &str = "chunks_meta";
+const TBL_CHUNK_VECTORS: &str = "chunk_vectors";
+
+// ── Arrow schemas ─────────────────────────────────────────────────────────────
+
+fn files_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(vec![
+        Field::new("path", DataType::Utf8, false),
+        Field::new("mtime", DataType::Int64, false),
+    ]))
+}
+
+fn documents_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("title", DataType::Utf8, false),
+        Field::new("body", DataType::Utf8, false),
+        Field::new("path", DataType::Utf8, false),
+    ]))
+}
+
+fn chunks_meta_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(vec![
+        Field::new("doc_id", DataType::Int64, false),
+        Field::new("chunk_index", DataType::Int32, false),
+        Field::new("text", DataType::Utf8, false),
+        Field::new("doc_title", DataType::Utf8, false),
+        Field::new("doc_path", DataType::Utf8, false),
+    ]))
+}
+
+fn chunk_vectors_schema(dim: i32) -> Arc<Schema> {
+    Arc::new(Schema::new(vec![
+        Field::new("doc_id", DataType::Int64, false),
+        Field::new("chunk_index", DataType::Int32, false),
+        Field::new("doc_title", DataType::Utf8, false),
+        Field::new("doc_path", DataType::Utf8, false),
+        Field::new("text", DataType::Utf8, false),
+        Field::new(
+            "embedding",
+            DataType::FixedSizeList(
+                Arc::new(Field::new("item", DataType::Float32, true)),
+                dim,
+            ),
+            false,
+        ),
+    ]))
+}
+
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+fn escape_sql_string(s: &str) -> String {
+    s.replace('\'', "''")
+}
+
+async fn open_or_create(
+    db: &lancedb::Connection,
+    name: &str,
+    schema: Arc<Schema>,
+) -> Result<lancedb::Table> {
+    let names = db.table_names().execute().await?;
+    if names.contains(&name.to_string()) {
+        Ok(db.open_table(name).execute().await?)
+    } else {
+        let empty = RecordBatch::new_empty(schema);
+        Ok(db
+            .create_table(name, empty)
+            .execute()
+            .await?)
+    }
+}
+
+fn make_embedding_array(embeddings: &[Vec<f32>], dim: i32) -> Result<FixedSizeListArray> {
+    let flat: Vec<f32> = embeddings.iter().flat_map(|v| v.iter().copied()).collect();
+    let values = Arc::new(Float32Array::from(flat));
+    FixedSizeListArray::try_new(
+        Arc::new(Field::new("item", DataType::Float32, true)),
+        dim,
+        values,
+        None,
+    )
+    .map_err(|e| Error::Embed(e.to_string()))
 }
 
 // ── async inner ───────────────────────────────────────────────────────────────
 
-struct LanceStore {
-    table: lancedb::Table,
+struct LanceFullStore {
+    files: lancedb::Table,
+    documents: lancedb::Table,
+    chunks_meta: lancedb::Table,
+    chunk_vectors: lancedb::Table,
     dim: i32,
 }
 
-impl LanceStore {
+impl LanceFullStore {
     async fn open(data_dir: &Path, embedding_dim: u32) -> Result<Self> {
         std::fs::create_dir_all(data_dir)?;
         let db = lancedb::connect(data_dir.to_str().unwrap_or_default())
             .execute()
-            .await
-            .map_err(|e| Error::Embed(e.to_string()))?;
-
+            .await?;
         let dim = embedding_dim as i32;
-        let names = db
-            .table_names()
-            .execute()
-            .await
-            .map_err(|e| Error::Embed(e.to_string()))?;
 
-        let table = if names.contains(&TABLE_NAME.to_string()) {
-            db.open_table(TABLE_NAME)
-                .execute()
-                .await
-                .map_err(|e| Error::Embed(e.to_string()))?
-        } else {
-            let schema = make_schema(dim);
-            let empty = RecordBatch::new_empty(schema.clone());
-            db.create_table(TABLE_NAME, RecordBatchIterator::new(vec![Ok(empty)], schema))
-                .execute()
-                .await
-                .map_err(|e| Error::Embed(e.to_string()))?
-        };
+        let files = open_or_create(&db, TBL_FILES, files_schema()).await?;
+        let documents = open_or_create(&db, TBL_DOCUMENTS, documents_schema()).await?;
+        let chunks_meta = open_or_create(&db, TBL_CHUNKS_META, chunks_meta_schema()).await?;
+        let chunk_vectors =
+            open_or_create(&db, TBL_CHUNK_VECTORS, chunk_vectors_schema(dim)).await?;
 
-        Ok(LanceStore { table, dim })
+        Ok(Self { files, documents, chunks_meta, chunk_vectors, dim })
     }
 
-    async fn embedded_chunk_keys(&self) -> Result<HashSet<(i64, usize)>> {
-        let batches: Vec<RecordBatch> = self
-            .table
-            .query()
-            .select(lancedb::query::Select::Columns(vec![
-                "doc_id".to_string(),
-                "chunk_index".to_string(),
-            ]))
-            .execute()
-            .await
-            .map_err(|e| Error::Embed(e.to_string()))?
-            .try_collect()
-            .await
-            .map_err(|e| Error::Embed(e.to_string()))?;
+    // ── file tracking ─────────────────────────────────────────────────────────
 
-        let mut keys = HashSet::new();
+    async fn file_mtimes(&self) -> Result<std::collections::HashMap<String, i64>> {
+        let batches: Vec<RecordBatch> = self
+            .files
+            .query()
+            .execute()
+            .await?
+            .try_collect()
+            .await?;
+
+        let mut map = std::collections::HashMap::new();
         for batch in &batches {
-            let doc_ids = batch
-                .column_by_name("doc_id")
+            let paths = batch
+                .column_by_name("path")
+                .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+            let mtimes = batch
+                .column_by_name("mtime")
                 .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
-            let chunk_idxs = batch
-                .column_by_name("chunk_index")
-                .and_then(|c| c.as_any().downcast_ref::<Int32Array>());
-            if let (Some(dids), Some(cidxs)) = (doc_ids, chunk_idxs) {
+            if let (Some(ps), Some(ms)) = (paths, mtimes) {
                 for i in 0..batch.num_rows() {
-                    keys.insert((dids.value(i), cidxs.value(i) as usize));
+                    map.insert(ps.value(i).to_owned(), ms.value(i));
                 }
             }
         }
-        Ok(keys)
+        Ok(map)
     }
 
-    async fn insert_embeddings(&self, chunks: &[Chunk], embeddings: &[Vec<f32>]) -> Result<()> {
-        if chunks.is_empty() {
+    async fn upsert_file(&self, path: &str, mtime: i64) -> Result<()> {
+        let schema = files_schema();
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec![path])),
+                Arc::new(Int64Array::from(vec![mtime])),
+            ],
+        )
+        .map_err(|e| Error::Embed(e.to_string()))?;
+
+        let mut merge = self.files.merge_insert(&["path"]);
+        merge.when_matched_update_all(None).when_not_matched_insert_all();
+        merge
+            .execute(Box::new(RecordBatchIterator::new(vec![Ok(batch)], schema)))
+            .await?;
+        Ok(())
+    }
+
+    async fn remove_file(&self, path: &str) -> Result<()> {
+        let safe = escape_sql_string(path);
+        self.files.delete(&format!("path = '{safe}'")).await?;
+        Ok(())
+    }
+
+    async fn file_count(&self) -> Result<u64> {
+        Ok(self.files.count_rows(None).await? as u64)
+    }
+
+    // ── document management ───────────────────────────────────────────────────
+
+    async fn upsert_document(&self, doc: &Document) -> Result<()> {
+        // Upsert into documents table.
+        let schema = documents_schema();
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(vec![doc.id])),
+                Arc::new(StringArray::from(vec![doc.title.as_str()])),
+                Arc::new(StringArray::from(vec![doc.body.as_str()])),
+                Arc::new(StringArray::from(vec![doc.path.as_str()])),
+            ],
+        )
+        .map_err(|e| Error::Embed(e.to_string()))?;
+
+        let mut merge = self.documents.merge_insert(&["id"]);
+        merge.when_matched_update_all(None).when_not_matched_insert_all();
+        merge
+            .execute(Box::new(RecordBatchIterator::new(vec![Ok(batch)], schema)))
+            .await?;
+
+        // Remove stale chunks.
+        self.chunks_meta.delete(&format!("doc_id = {}", doc.id)).await?;
+        self.chunk_vectors.delete(&format!("doc_id = {}", doc.id)).await?;
+
+        // Insert fresh chunks.
+        let chunk_texts = chunk_document(&doc.title, &doc.body);
+        if chunk_texts.is_empty() {
             return Ok(());
         }
-        let schema = make_schema(self.dim);
 
-        let doc_ids: Vec<i64> = chunks.iter().map(|c| c.doc_id).collect();
-        let chunk_idxs: Vec<i32> = chunks.iter().map(|c| c.chunk_index as i32).collect();
-        let titles: Vec<&str> = chunks.iter().map(|c| c.doc_title.as_str()).collect();
-        let paths: Vec<&str> = chunks.iter().map(|c| c.doc_path.as_str()).collect();
-        let texts: Vec<&str> = chunks.iter().map(|c| c.text.as_str()).collect();
+        let schema = chunks_meta_schema();
+        let n = chunk_texts.len();
+        let doc_ids = vec![doc.id; n];
+        let chunk_idxs: Vec<i32> = (0..n as i32).collect();
+        let titles = vec![doc.title.as_str(); n];
+        let paths = vec![doc.path.as_str(); n];
+        let texts: Vec<&str> = chunk_texts.iter().map(String::as_str).collect();
 
         let batch = RecordBatch::try_new(
             schema.clone(),
             vec![
                 Arc::new(Int64Array::from(doc_ids)),
                 Arc::new(Int32Array::from(chunk_idxs)),
+                Arc::new(StringArray::from(texts)),
                 Arc::new(StringArray::from(titles)),
                 Arc::new(StringArray::from(paths)),
-                Arc::new(StringArray::from(texts)),
-                Arc::new(make_embedding_array(embeddings, self.dim)?),
             ],
         )
         .map_err(|e| Error::Embed(e.to_string()))?;
 
-        self.table
-            .add(RecordBatchIterator::new(vec![Ok(batch)], schema))
+        self.chunks_meta
+            .add(vec![batch])
             .execute()
-            .await
-            .map_err(|e| Error::Embed(e.to_string()))?;
+            .await?;
+
         Ok(())
     }
+
+    async fn remove_document(&self, id: i64) -> Result<()> {
+        self.documents.delete(&format!("id = {id}")).await?;
+        self.chunks_meta.delete(&format!("doc_id = {id}")).await?;
+        self.chunk_vectors.delete(&format!("doc_id = {id}")).await?;
+        Ok(())
+    }
+
+    async fn rebuild_fts(&self) -> Result<()> {
+        self.documents
+            .create_index(
+                &["title", "body"],
+                Index::FTS(FtsIndexBuilder::default().base_tokenizer("ngram".to_owned())),
+            )
+            .replace(true)
+            .execute()
+            .await?;
+        Ok(())
+    }
+
+    async fn search_fts(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
+        let batches: Vec<RecordBatch> = self
+            .documents
+            .query()
+            .full_text_search(FullTextSearchQuery::new(query.to_owned()))
+            .select(Select::Columns(vec![
+                "id".to_string(),
+                "title".to_string(),
+                "path".to_string(),
+            ]))
+            .limit(limit)
+            .execute()
+            .await?
+            .try_collect()
+            .await?;
+
+        let mut results = Vec::new();
+        for batch in &batches {
+            let ids = batch
+                .column_by_name("id")
+                .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
+            let titles = batch
+                .column_by_name("title")
+                .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+            let paths = batch
+                .column_by_name("path")
+                .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+            // _score is positive BM25 score (higher = more relevant)
+            let scores = batch
+                .column_by_name("_score")
+                .and_then(|c| c.as_any().downcast_ref::<Float32Array>());
+
+            if let (Some(ids), Some(titles), Some(paths)) = (ids, titles, paths) {
+                for i in 0..batch.num_rows() {
+                    results.push(SearchResult {
+                        id: ids.value(i),
+                        title: titles.value(i).to_owned(),
+                        path: paths.value(i).to_owned(),
+                        score: scores.map_or(0.0, |s| s.value(i) as f64),
+                    });
+                }
+            }
+        }
+        Ok(results)
+    }
+
+    // ── vector search ─────────────────────────────────────────────────────────
 
     async fn search_similar(
         &self,
@@ -163,17 +359,15 @@ impl LanceStore {
         limit: usize,
     ) -> Result<Vec<ChunkSearchResult>> {
         let batches: Vec<RecordBatch> = self
-            .table
+            .chunk_vectors
             .vector_search(query_vec)
             .map_err(|e| Error::Embed(e.to_string()))?
             .column("embedding")
             .limit(limit)
             .execute()
-            .await
-            .map_err(|e| Error::Embed(e.to_string()))?
+            .await?
             .try_collect()
-            .await
-            .map_err(|e| Error::Embed(e.to_string()))?;
+            .await?;
 
         let mut results = Vec::new();
         for batch in &batches {
@@ -216,91 +410,250 @@ impl LanceStore {
         Ok(results)
     }
 
-    async fn embedded_count(&self) -> u64 {
-        self.table.count_rows(None).await.unwrap_or(0) as u64
+    // ── embedding ─────────────────────────────────────────────────────────────
+
+    async fn embedded_chunk_keys(&self) -> Result<HashSet<(i64, usize)>> {
+        let batches: Vec<RecordBatch> = self
+            .chunk_vectors
+            .query()
+            .select(Select::Columns(vec![
+                "doc_id".to_string(),
+                "chunk_index".to_string(),
+            ]))
+            .execute()
+            .await?
+            .try_collect()
+            .await?;
+
+        let mut keys = HashSet::new();
+        for batch in &batches {
+            let doc_ids = batch
+                .column_by_name("doc_id")
+                .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
+            let chunk_idxs = batch
+                .column_by_name("chunk_index")
+                .and_then(|c| c.as_any().downcast_ref::<Int32Array>());
+            if let (Some(dids), Some(cidxs)) = (doc_ids, chunk_idxs) {
+                for i in 0..batch.num_rows() {
+                    keys.insert((dids.value(i), cidxs.value(i) as usize));
+                }
+            }
+        }
+        Ok(keys)
+    }
+
+    async fn pending_chunks(&self, embedded: &HashSet<(i64, usize)>) -> Result<Vec<Chunk>> {
+        let batches: Vec<RecordBatch> = self
+            .chunks_meta
+            .query()
+            .execute()
+            .await?
+            .try_collect()
+            .await?;
+
+        let mut chunks = Vec::new();
+        for batch in &batches {
+            let doc_ids = batch
+                .column_by_name("doc_id")
+                .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
+            let chunk_idxs = batch
+                .column_by_name("chunk_index")
+                .and_then(|c| c.as_any().downcast_ref::<Int32Array>());
+            let texts = batch
+                .column_by_name("text")
+                .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+            let titles = batch
+                .column_by_name("doc_title")
+                .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+            let paths = batch
+                .column_by_name("doc_path")
+                .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+
+            if let (Some(dids), Some(cidxs), Some(txts), Some(ttls), Some(pths)) =
+                (doc_ids, chunk_idxs, texts, titles, paths)
+            {
+                for i in 0..batch.num_rows() {
+                    let key = (dids.value(i), cidxs.value(i) as usize);
+                    if !embedded.contains(&key) {
+                        chunks.push(Chunk {
+                            doc_id: key.0,
+                            chunk_index: key.1,
+                            text: txts.value(i).to_owned(),
+                            doc_title: ttls.value(i).to_owned(),
+                            doc_path: pths.value(i).to_owned(),
+                        });
+                    }
+                }
+            }
+        }
+        Ok(chunks)
+    }
+
+    async fn insert_embeddings(&self, chunks: &[Chunk], embeddings: &[Vec<f32>]) -> Result<()> {
+        if chunks.is_empty() {
+            return Ok(());
+        }
+        let schema = chunk_vectors_schema(self.dim);
+        let doc_ids: Vec<i64> = chunks.iter().map(|c| c.doc_id).collect();
+        let chunk_idxs: Vec<i32> = chunks.iter().map(|c| c.chunk_index as i32).collect();
+        let titles: Vec<&str> = chunks.iter().map(|c| c.doc_title.as_str()).collect();
+        let paths: Vec<&str> = chunks.iter().map(|c| c.doc_path.as_str()).collect();
+        let texts: Vec<&str> = chunks.iter().map(|c| c.text.as_str()).collect();
+
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(doc_ids)),
+                Arc::new(Int32Array::from(chunk_idxs)),
+                Arc::new(StringArray::from(titles)),
+                Arc::new(StringArray::from(paths)),
+                Arc::new(StringArray::from(texts)),
+                Arc::new(make_embedding_array(embeddings, self.dim)?),
+            ],
+        )
+        .map_err(|e| Error::Embed(e.to_string()))?;
+
+        self.chunk_vectors
+            .add(vec![batch])
+            .execute()
+            .await?;
+        Ok(())
+    }
+
+    // ── info ──────────────────────────────────────────────────────────────────
+
+    async fn vec_info(&self, dim: u32) -> Result<VecInfo> {
+        let chunk_count = self.chunks_meta.count_rows(None).await? as u64;
+        let vector_count = self.chunk_vectors.count_rows(None).await? as u64;
+        Ok(VecInfo {
+            embedding_dim: dim,
+            vector_count,
+            pending_count: chunk_count.saturating_sub(vector_count),
+        })
+    }
+
+    async fn document_ids(&self) -> Result<Vec<i64>> {
+        let batches: Vec<RecordBatch> = self
+            .documents
+            .query()
+            .select(Select::Columns(vec!["id".to_string()]))
+            .execute()
+            .await?
+            .try_collect()
+            .await?;
+
+        let mut ids = Vec::new();
+        for batch in &batches {
+            if let Some(col) = batch
+                .column_by_name("id")
+                .and_then(|c| c.as_any().downcast_ref::<Int64Array>())
+            {
+                for i in 0..batch.num_rows() {
+                    ids.push(col.value(i));
+                }
+            }
+        }
+        Ok(ids)
+    }
+
+    async fn document_count(&self) -> Result<u64> {
+        Ok(self.documents.count_rows(None).await? as u64)
     }
 }
 
 // ── public sync wrapper ───────────────────────────────────────────────────────
 
-/// Vector store backed by LanceDB.
-///
-/// Wraps the async [`LanceStore`] in an internal Tokio runtime so that it
-/// implements the synchronous [`VectorStore`] trait.
-pub struct LanceDbVectorStore {
-    inner: LanceStore,
+/// Full LanceDB backend: stores files, documents, chunks, and embeddings
+/// entirely within LanceDB — no SQLite required.
+pub(crate) struct LanceDbBackend {
+    inner: LanceFullStore,
     rt: tokio::runtime::Runtime,
+    dim: u32,
 }
 
-impl LanceDbVectorStore {
-    /// Open (or create) the LanceDB vector store at `data_dir` with
-    /// `embedding_dim` dimensions.
+impl LanceDbBackend {
     pub fn new(data_dir: &Path, embedding_dim: u32) -> Result<Self> {
         let rt = tokio::runtime::Runtime::new()
             .map_err(|e| Error::Embed(format!("failed to create Tokio runtime: {e}")))?;
-        let inner = rt.block_on(LanceStore::open(data_dir, embedding_dim))?;
-        Ok(Self { inner, rt })
+        let inner = rt.block_on(LanceFullStore::open(data_dir, embedding_dim))?;
+        Ok(Self { inner, rt, dim: embedding_dim })
     }
 
-    /// Read vector index statistics.
-    ///
-    /// `sqlite_conn` must be a connection to the retrieve SQLite database
-    /// (which holds the `chunks` table used to compute the pending count).
-    pub fn vec_info(&self, sqlite_conn: &rusqlite::Connection) -> Result<VecInfo> {
-        let vector_count = self.rt.block_on(self.inner.embedded_count());
-        let chunk_count: u64 = sqlite_conn
-            .query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get::<_, i64>(0))
-            .unwrap_or(0) as u64;
-        Ok(VecInfo {
-            embedding_dim: self.inner.dim as u32,
-            vector_count,
-            pending_count: chunk_count.saturating_sub(vector_count),
-        })
-    }
-}
+    // ── file tracking ─────────────────────────────────────────────────────────
 
-impl VectorStore for LanceDbVectorStore {
-    fn embedded_chunk_keys(&self) -> Result<HashSet<(i64, usize)>> {
-        self.rt.block_on(self.inner.embedded_chunk_keys())
+    pub fn file_mtimes(&self) -> Result<std::collections::HashMap<String, i64>> {
+        self.rt.block_on(self.inner.file_mtimes())
     }
 
-    fn insert_embeddings(&self, chunks: &[Chunk], embeddings: &[Vec<f32>]) -> Result<()> {
-        self.rt.block_on(self.inner.insert_embeddings(chunks, embeddings))
+    pub fn upsert_file(&self, path: &str, mtime: i64) -> Result<()> {
+        self.rt.block_on(self.inner.upsert_file(path, mtime))
     }
 
-    fn search_similar(&self, query_vec: &[f32], limit: usize) -> Result<Vec<ChunkSearchResult>> {
+    pub fn remove_file(&self, path: &str) -> Result<()> {
+        self.rt.block_on(self.inner.remove_file(path))
+    }
+
+    pub fn file_count(&self) -> Result<u64> {
+        self.rt.block_on(self.inner.file_count())
+    }
+
+    // ── document management ───────────────────────────────────────────────────
+
+    pub fn upsert_document(&self, doc: &Document) -> Result<()> {
+        self.rt.block_on(self.inner.upsert_document(doc))
+    }
+
+    pub fn remove_document(&self, id: i64) -> Result<()> {
+        self.rt.block_on(self.inner.remove_document(id))
+    }
+
+    pub fn rebuild_fts(&self) -> Result<()> {
+        self.rt.block_on(self.inner.rebuild_fts())
+    }
+
+    pub fn search_fts(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
+        self.rt.block_on(self.inner.search_fts(query, limit))
+    }
+
+    // ── vector search ─────────────────────────────────────────────────────────
+
+    pub fn search_similar(&self, query_vec: &[f32], limit: usize) -> Result<Vec<ChunkSearchResult>> {
         self.rt.block_on(self.inner.search_similar(query_vec, limit))
     }
-}
 
-// ── Arrow helpers ─────────────────────────────────────────────────────────────
+    // ── embedding ─────────────────────────────────────────────────────────────
 
-fn make_schema(dim: i32) -> Arc<Schema> {
-    Arc::new(Schema::new(vec![
-        Field::new("doc_id", DataType::Int64, false),
-        Field::new("chunk_index", DataType::Int32, false),
-        Field::new("doc_title", DataType::Utf8, false),
-        Field::new("doc_path", DataType::Utf8, false),
-        Field::new("text", DataType::Utf8, false),
-        Field::new(
-            "embedding",
-            DataType::FixedSizeList(
-                Arc::new(Field::new("item", DataType::Float32, true)),
-                dim,
-            ),
-            false,
-        ),
-    ]))
-}
+    pub fn embed_pending(
+        &self,
+        embedder: &dyn Embedder,
+        on_progress: impl Fn(usize, usize),
+    ) -> Result<usize> {
+        let embedded = self.rt.block_on(self.inner.embedded_chunk_keys())?;
+        let pending = self.rt.block_on(self.inner.pending_chunks(&embedded))?;
+        let total = pending.len();
+        let mut done = 0;
 
-fn make_embedding_array(embeddings: &[Vec<f32>], dim: i32) -> Result<FixedSizeListArray> {
-    let flat: Vec<f32> = embeddings.iter().flat_map(|v| v.iter().copied()).collect();
-    let values = Arc::new(Float32Array::from(flat));
-    FixedSizeListArray::try_new(
-        Arc::new(Field::new("item", DataType::Float32, true)),
-        dim,
-        values,
-        None,
-    )
-    .map_err(|e| Error::Embed(e.to_string()))
+        for batch in pending.chunks(100) {
+            let texts: Vec<&str> = batch.iter().map(|c| c.text.as_str()).collect();
+            let embeddings = embedder.embed_texts(&texts)?;
+            self.rt.block_on(self.inner.insert_embeddings(batch, &embeddings))?;
+            done += batch.len();
+            on_progress(done, total);
+        }
+        Ok(total)
+    }
+
+    // ── info ──────────────────────────────────────────────────────────────────
+
+    pub fn vec_info(&self) -> Result<VecInfo> {
+        self.rt.block_on(self.inner.vec_info(self.dim))
+    }
+
+    pub fn document_ids(&self) -> Result<Vec<i64>> {
+        self.rt.block_on(self.inner.document_ids())
+    }
+
+    pub fn document_count(&self) -> Result<u64> {
+        self.rt.block_on(self.inner.document_count())
+    }
 }
