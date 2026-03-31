@@ -47,11 +47,11 @@ use crate::{
 // ── versioning ────────────────────────────────────────────────────────────────
 
 /// Schema version encoded in the directory name.
-pub const SCHEMA_VERSION: i32 = 1;
+pub const SCHEMA_VERSION: i32 = 2;
 
 /// Returns the full-backend LanceDB directory for the given cache root.
 pub fn data_dir(root: &Path) -> PathBuf {
-    root.join(format!("lancedb_full_v{SCHEMA_VERSION}"))
+    root.join(format!("lancedb_v{SCHEMA_VERSION}"))
 }
 
 // ── table names ───────────────────────────────────────────────────────────────
