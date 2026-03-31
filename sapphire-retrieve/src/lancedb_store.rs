@@ -38,9 +38,9 @@ use lancedb::{
 
 use crate::{
     chunker::chunk_document,
-    db::{Document, SearchResult},
     embed::Embedder,
     error::{Error, Result},
+    retrieve_store::{Document, RetrieveStore, SearchResult},
     vector_store::{Chunk, ChunkSearchResult, VecInfo},
 };
 
@@ -573,52 +573,79 @@ pub(crate) struct LanceDbBackend {
 
 impl LanceDbBackend {
     pub fn new(data_dir: &Path, embedding_dim: u32) -> Result<Self> {
-        let rt = tokio::runtime::Runtime::new()
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
             .map_err(|e| Error::Embed(format!("failed to create Tokio runtime: {e}")))?;
-        let inner = rt.block_on(LanceFullStore::open(data_dir, embedding_dim))?;
+        let inner = Self::block_on_with(&rt, LanceFullStore::open(data_dir, embedding_dim))?;
         Ok(Self { inner, rt, dim: embedding_dim })
+    }
+
+    /// Run a future to completion, safely handling the case where we are
+    /// already executing inside a Tokio runtime.
+    ///
+    /// - **Outside a runtime**: delegates to `rt.block_on(f)`.
+    /// - **Inside a multi-thread runtime**: uses `tokio::task::block_in_place`
+    ///   so that other tasks on the thread pool can continue running while
+    ///   this thread blocks.
+    ///
+    /// Note: `block_in_place` panics when the *outer* runtime uses
+    /// `flavor = "current_thread"`.  In that case callers should move the
+    /// call to `spawn_blocking` before reaching this code.
+    fn block_on_with<F: std::future::Future>(
+        rt: &tokio::runtime::Runtime,
+        f: F,
+    ) -> F::Output {
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => tokio::task::block_in_place(|| handle.block_on(f)),
+            Err(_) => rt.block_on(f),
+        }
+    }
+
+    fn block_on<F: std::future::Future>(&self, f: F) -> F::Output {
+        Self::block_on_with(&self.rt, f)
     }
 
     // ── file tracking ─────────────────────────────────────────────────────────
 
     pub fn file_mtimes(&self) -> Result<std::collections::HashMap<String, i64>> {
-        self.rt.block_on(self.inner.file_mtimes())
+        self.block_on(self.inner.file_mtimes())
     }
 
     pub fn upsert_file(&self, path: &str, mtime: i64) -> Result<()> {
-        self.rt.block_on(self.inner.upsert_file(path, mtime))
+        self.block_on(self.inner.upsert_file(path, mtime))
     }
 
     pub fn remove_file(&self, path: &str) -> Result<()> {
-        self.rt.block_on(self.inner.remove_file(path))
+        self.block_on(self.inner.remove_file(path))
     }
 
     pub fn file_count(&self) -> Result<u64> {
-        self.rt.block_on(self.inner.file_count())
+        self.block_on(self.inner.file_count())
     }
 
     // ── document management ───────────────────────────────────────────────────
 
     pub fn upsert_document(&self, doc: &Document) -> Result<()> {
-        self.rt.block_on(self.inner.upsert_document(doc))
+        self.block_on(self.inner.upsert_document(doc))
     }
 
     pub fn remove_document(&self, id: i64) -> Result<()> {
-        self.rt.block_on(self.inner.remove_document(id))
+        self.block_on(self.inner.remove_document(id))
     }
 
     pub fn rebuild_fts(&self) -> Result<()> {
-        self.rt.block_on(self.inner.rebuild_fts())
+        self.block_on(self.inner.rebuild_fts())
     }
 
     pub fn search_fts(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
-        self.rt.block_on(self.inner.search_fts(query, limit))
+        self.block_on(self.inner.search_fts(query, limit))
     }
 
     // ── vector search ─────────────────────────────────────────────────────────
 
     pub fn search_similar(&self, query_vec: &[f32], limit: usize) -> Result<Vec<ChunkSearchResult>> {
-        self.rt.block_on(self.inner.search_similar(query_vec, limit))
+        self.block_on(self.inner.search_similar(query_vec, limit))
     }
 
     // ── embedding ─────────────────────────────────────────────────────────────
@@ -628,15 +655,15 @@ impl LanceDbBackend {
         embedder: &dyn Embedder,
         on_progress: impl Fn(usize, usize),
     ) -> Result<usize> {
-        let embedded = self.rt.block_on(self.inner.embedded_chunk_keys())?;
-        let pending = self.rt.block_on(self.inner.pending_chunks(&embedded))?;
+        let embedded = self.block_on(self.inner.embedded_chunk_keys())?;
+        let pending = self.block_on(self.inner.pending_chunks(&embedded))?;
         let total = pending.len();
         let mut done = 0;
 
         for batch in pending.chunks(100) {
             let texts: Vec<&str> = batch.iter().map(|c| c.text.as_str()).collect();
             let embeddings = embedder.embed_texts(&texts)?;
-            self.rt.block_on(self.inner.insert_embeddings(batch, &embeddings))?;
+            self.block_on(self.inner.insert_embeddings(batch, &embeddings))?;
             done += batch.len();
             on_progress(done, total);
         }
@@ -646,14 +673,74 @@ impl LanceDbBackend {
     // ── info ──────────────────────────────────────────────────────────────────
 
     pub fn vec_info(&self) -> Result<VecInfo> {
-        self.rt.block_on(self.inner.vec_info(self.dim))
+        self.block_on(self.inner.vec_info(self.dim))
     }
 
     pub fn document_ids(&self) -> Result<Vec<i64>> {
-        self.rt.block_on(self.inner.document_ids())
+        self.block_on(self.inner.document_ids())
     }
 
     pub fn document_count(&self) -> Result<u64> {
-        self.rt.block_on(self.inner.document_count())
+        self.block_on(self.inner.document_count())
+    }
+}
+
+// ── RetrieveStore impl ────────────────────────────────────────────────────────
+
+impl RetrieveStore for LanceDbBackend {
+    fn file_mtimes(&self) -> Result<std::collections::HashMap<String, i64>> {
+        self.file_mtimes()
+    }
+
+    fn upsert_file(&self, path: &str, mtime: i64) -> Result<()> {
+        self.upsert_file(path, mtime)
+    }
+
+    fn remove_file(&self, path: &str) -> Result<()> {
+        self.remove_file(path)
+    }
+
+    fn file_count(&self) -> Result<u64> {
+        self.file_count()
+    }
+
+    fn upsert_document(&self, doc: &Document) -> Result<()> {
+        self.upsert_document(doc)
+    }
+
+    fn remove_document(&self, id: i64) -> Result<()> {
+        self.remove_document(id)
+    }
+
+    fn rebuild_fts(&self) -> Result<()> {
+        self.rebuild_fts()
+    }
+
+    fn search_fts(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
+        self.search_fts(query, limit)
+    }
+
+    fn document_ids(&self) -> Result<Vec<i64>> {
+        self.document_ids()
+    }
+
+    fn document_count(&self) -> Result<u64> {
+        self.document_count()
+    }
+
+    fn embed_pending(
+        &self,
+        embedder: &dyn Embedder,
+        on_progress: &dyn Fn(usize, usize),
+    ) -> Result<usize> {
+        self.embed_pending(embedder, on_progress)
+    }
+
+    fn vec_info(&self) -> Result<VecInfo> {
+        self.vec_info()
+    }
+
+    fn search_similar(&self, query_vec: &[f32], limit: usize) -> Result<Vec<ChunkSearchResult>> {
+        self.search_similar(query_vec, limit)
     }
 }
