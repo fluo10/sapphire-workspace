@@ -1,0 +1,23 @@
+[package]
+name = "sapphire-workspace"
+edition.workspace = true
+version = "0.1.0"
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["lancedb-store", "fastembed-embed", "git-sync"]
+lancedb-store   = ["sapphire-retrieve/lancedb-store"]
+fastembed-embed = ["sapphire-retrieve/fastembed-embed"]
+git-sync        = ["sapphire-sync/git"]
+
+[dependencies]
+sapphire-retrieve = { version = "0.1.1", path = "../sapphire-retrieve", default-features = false }
+sapphire-sync     = { version = "0.1.0", path = "../sapphire-sync", default-features = false }
+thiserror.workspace = true
+serde.workspace = true
+toml.workspace = true
+tokio = { workspace = true, features = ["full"] }
+indexmap.workspace = true
+walkdir = "2"

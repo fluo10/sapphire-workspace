@@ -1,0 +1,15 @@
+[package]
+name = "sapphire-sync"
+edition.workspace = true
+version = "0.1.0"
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["git"]
+git = ["dep:git2"]
+
+[dependencies]
+thiserror.workspace = true
+git2 = { version = "0.20", optional = true }
