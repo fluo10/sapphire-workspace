@@ -1,7 +1,7 @@
 [package]
 name = "sapphire-workspace"
 edition.workspace = true
-version = "0.1.0"
+version = "0.2.0"
 description = "Workspace management library for indexing, search, and sync of markdown documents"
 license.workspace = true
 repository.workspace = true
@@ -16,8 +16,8 @@ fastembed-embed = ["sapphire-retrieve/fastembed-embed"]
 git-sync        = ["sapphire-sync/git"]
 
 [dependencies]
-sapphire-retrieve = { version = "0.1.1", path = "../sapphire-retrieve", default-features = false }
-sapphire-sync     = { version = "0.1.0", path = "../sapphire-sync", default-features = false }
+sapphire-retrieve = { version = "0.2.0", path = "../sapphire-retrieve", default-features = false }
+sapphire-sync     = { version = "0.2.0", path = "../sapphire-sync", default-features = false }
 thiserror.workspace = true
 serde.workspace = true
 toml.workspace = true
