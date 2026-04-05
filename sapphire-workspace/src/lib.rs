@@ -17,6 +17,7 @@ pub use sapphire_retrieve::{
     Chunk, ChunkSearchResult, Document, Embedder, EmbeddingConfig as RetrieveEmbedConfig,
     Error as RetrieveError, RetrieveDb, SearchResult, VecInfo, build_embedder,
 };
+#[cfg(feature = "sqlite-store")]
 pub use sapphire_retrieve::db::SCHEMA_VERSION as RETRIEVE_SCHEMA_VERSION;
 #[cfg(feature = "lancedb-store")]
 pub use sapphire_retrieve::lancedb_store;

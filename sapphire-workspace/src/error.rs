@@ -36,6 +36,10 @@ pub enum Error {
     #[error("lancedb support is not compiled in (enable the `lancedb-store` feature)")]
     LanceDbNotEnabled,
 
+    /// SQLite store feature not compiled in.
+    #[error("sqlite-store support is not compiled in (enable the `sqlite-store` feature)")]
+    SqliteStoreNotEnabled,
+
     #[error(transparent)]
     Io(#[from] std::io::Error),
 

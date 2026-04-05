@@ -8,6 +8,7 @@ repository.workspace = true
 
 [features]
 default = ["lancedb-store", "fastembed-embed", "git-sync"]
+sqlite-store    = ["sapphire-retrieve/sqlite-store"]
 lancedb-store   = ["sapphire-retrieve/lancedb-store"]
 fastembed-embed = ["sapphire-retrieve/fastembed-embed"]
 git-sync        = ["sapphire-sync/git"]

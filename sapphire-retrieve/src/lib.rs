@@ -5,6 +5,7 @@ pub mod error;
 #[cfg(feature = "lancedb-store")]
 pub mod lancedb_store;
 pub mod retrieve_store;
+#[cfg(feature = "sqlite-store")]
 pub mod sqlite_store;
 pub mod vector_store;
 

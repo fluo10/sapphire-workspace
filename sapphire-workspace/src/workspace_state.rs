@@ -1,11 +1,13 @@
 use std::path::{Path, PathBuf};
 
-use sapphire_retrieve::{Document, Embedder, RetrieveDb, db::SCHEMA_VERSION};
+use sapphire_retrieve::{Document, Embedder, RetrieveDb};
+#[cfg(feature = "sqlite-store")]
+use sapphire_retrieve::db::SCHEMA_VERSION;
 use tokio::sync::OnceCell;
 
 use crate::{
     config::{UserConfig, VectorDb, WorkspaceConfig},
-    error::Result,
+    error::{Error, Result},
     indexer::{path_to_doc_id, sync_workspace},
     workspace::Workspace,
 };
@@ -273,8 +275,13 @@ impl WorkspaceState {
     fn init_vector_backend(&self, vector_db: VectorDb, dim: u32) -> Result<()> {
         match vector_db {
             VectorDb::None => {}
+            #[cfg(feature = "sqlite-store")]
             VectorDb::SqliteVec => {
                 self.retrieve_db.init_sqlite_vec(dim)?;
+            }
+            #[cfg(not(feature = "sqlite-store"))]
+            VectorDb::SqliteVec => {
+                return Err(crate::error::Error::SqliteStoreNotEnabled);
             }
             #[cfg(feature = "lancedb-store")]
             VectorDb::LanceDb => {
@@ -388,7 +395,10 @@ impl WorkspaceState {
             });
         Ok(DbInfo {
             db_path,
+            #[cfg(feature = "sqlite-store")]
             schema_version: SCHEMA_VERSION,
+            #[cfg(not(feature = "sqlite-store"))]
+            schema_version: 0,
             document_count,
             embedding_dim: vec_info.embedding_dim,
             vector_count: vec_info.vector_count,

@@ -1,7 +1,6 @@
 use std::io::IsTerminal as _;
 use std::path::{Path, PathBuf};
 
-use sapphire_retrieve::db::SCHEMA_VERSION;
 
 use crate::error::{Error, Result};
 
@@ -140,10 +139,20 @@ impl Workspace {
             .join(format!("{:016x}-{}", hash, basename))
     }
 
-    /// `cache_dir()/retrieve_v{SCHEMA_VERSION}.db`
+    /// Path to the SQLite retrieve database file.
+    ///
+    /// The filename is versioned when the `sqlite-store` feature is enabled so
+    /// that schema upgrades are detected automatically.  When only `lancedb-store`
+    /// (or no storage feature) is compiled in, the file is never actually opened
+    /// for SQLite, so a fixed name is used.
     pub fn retrieve_db_path(&self) -> PathBuf {
-        self.cache_dir()
-            .join(format!("retrieve_v{SCHEMA_VERSION}.db"))
+        #[cfg(feature = "sqlite-store")]
+        {
+            use sapphire_retrieve::db::SCHEMA_VERSION;
+            return self.cache_dir().join(format!("retrieve_v{SCHEMA_VERSION}.db"));
+        }
+        #[cfg(not(feature = "sqlite-store"))]
+        self.cache_dir().join("retrieve.db")
     }
 }
 
