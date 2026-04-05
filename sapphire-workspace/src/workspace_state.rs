@@ -5,7 +5,7 @@ use tokio::sync::OnceCell;
 
 use crate::{
     config::{UserConfig, VectorDb, WorkspaceConfig},
-    error::{Error, Result},
+    error::Result,
     indexer::{path_to_doc_id, sync_workspace},
     workspace::Workspace,
 };
@@ -183,6 +183,51 @@ impl WorkspaceState {
         }
 
         Ok(())
+    }
+
+    // ── workspace-relative file operations ───────────────────────────────────
+    //
+    // These methods accept paths relative to the workspace root, perform the
+    // corresponding filesystem operation, and then update the retrieve index
+    // (and sync backend) automatically.
+
+    /// Write `content` to a workspace-relative file and update the index.
+    ///
+    /// Creates any missing parent directories automatically.
+    /// Overwrites the file if it already exists.
+    pub fn write_file(&self, relative: &Path, content: &str) -> Result<()> {
+        let abs = self.workspace.root.join(relative);
+        if let Some(parent) = abs.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&abs, content)?;
+        self.on_file_updated(&abs)
+    }
+
+    /// Append `content` to a workspace-relative file and update the index.
+    ///
+    /// Creates the file (and any missing parent directories) if it does not
+    /// exist yet.
+    pub fn append_file(&self, relative: &Path, content: &str) -> Result<()> {
+        use std::io::Write as _;
+        let abs = self.workspace.root.join(relative);
+        if let Some(parent) = abs.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&abs)?;
+        file.write_all(content.as_bytes())?;
+        drop(file);
+        self.on_file_updated(&abs)
+    }
+
+    /// Delete a workspace-relative file from disk and remove it from the index.
+    pub fn delete_file(&self, relative: &Path) -> Result<()> {
+        let abs = self.workspace.root.join(relative);
+        std::fs::remove_file(&abs)?;
+        self.on_file_deleted(&abs)
     }
 
     // ── vector backend ────────────────────────────────────────────────────────
