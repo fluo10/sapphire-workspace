@@ -10,11 +10,13 @@
 //!
 //! | Method | Backend | Notes |
 //! |--------|---------|-------|
-//! | *(none)* | SQLite FTS only | Default; no vector search |
-//! | [`init_sqlite_vec`](Self::init_sqlite_vec) | SQLite + sqlite-vec | Lightweight, always available |
+//! | *(none)* | SQLite FTS only | Default when `sqlite-store` is enabled |
+//! | [`init_sqlite_vec`](Self::init_sqlite_vec) | SQLite + sqlite-vec | Lightweight; requires `sqlite-store` |
 //! | [`init_lancedb`](Self::init_lancedb) | LanceDB (full) | Requires `lancedb-store` feature; no SQLite file |
 //!
-//! Without calling an `init_*` method, only FTS is available via SQLite.
+//! When neither `sqlite-store` nor `lancedb-store` is compiled in, an
+//! in-memory backend is used: documents are stored in a `HashMap` and
+//! a simple substring search is available.  Data is not persisted to disk.
 //!
 //! # Thread safety
 //!
@@ -31,23 +33,139 @@ use crate::{
     embed::Embedder,
     error::Result,
     retrieve_store::RetrieveStore,
-    sqlite_store::SqliteStore,
     vector_store::{ChunkSearchResult, VecInfo},
 };
+
+pub use crate::retrieve_store::{Document, SearchResult};
+
+#[cfg(feature = "sqlite-store")]
+use crate::sqlite_store::SqliteStore;
 
 #[cfg(feature = "lancedb-store")]
 use crate::lancedb_store::LanceDbBackend;
 
-// Re-export types that live in retrieve_store so callers using the `db` module
-// path continue to find them here.
-pub use crate::retrieve_store::{Document, SearchResult};
 // Re-export the SQLite schema version (used by workspace helpers and the CLI).
+#[cfg(feature = "sqlite-store")]
 pub use crate::sqlite_store::SCHEMA_VERSION;
+
+// ── in-memory backend ─────────────────────────────────────────────────────────
+
+/// In-memory backend used when no persistent storage feature is compiled in.
+///
+/// All data lives in `HashMap`s and is lost when the process exits.
+/// FTS is implemented as a simple case-insensitive substring scan.
+/// This backend is also the *initial* state when the [`lancedb-store`] feature
+/// is enabled but [`RetrieveDb::init_lancedb`] has not yet been called.
+struct InMemoryStore {
+    state: Mutex<InMemoryState>,
+}
+
+#[derive(Default)]
+struct InMemoryState {
+    files: HashMap<String, i64>,
+    documents: HashMap<i64, Document>,
+}
+
+impl InMemoryStore {
+    fn new() -> Self {
+        Self { state: Mutex::new(InMemoryState::default()) }
+    }
+}
+
+impl RetrieveStore for InMemoryStore {
+    fn file_mtimes(&self) -> Result<HashMap<String, i64>> {
+        Ok(self.state.lock().unwrap().files.clone())
+    }
+
+    fn upsert_file(&self, path: &str, mtime: i64) -> Result<()> {
+        self.state.lock().unwrap().files.insert(path.to_owned(), mtime);
+        Ok(())
+    }
+
+    fn remove_file(&self, path: &str) -> Result<()> {
+        self.state.lock().unwrap().files.remove(path);
+        Ok(())
+    }
+
+    fn file_count(&self) -> Result<u64> {
+        Ok(self.state.lock().unwrap().files.len() as u64)
+    }
+
+    fn upsert_document(&self, doc: &Document) -> Result<()> {
+        self.state.lock().unwrap().documents.insert(doc.id, doc.clone());
+        Ok(())
+    }
+
+    fn remove_document(&self, id: i64) -> Result<()> {
+        self.state.lock().unwrap().documents.remove(&id);
+        Ok(())
+    }
+
+    fn rebuild_fts(&self) -> Result<()> {
+        Ok(())
+    }
+
+    fn search_fts(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
+        let state = self.state.lock().unwrap();
+        let q = query.to_lowercase();
+        let mut results: Vec<SearchResult> = state
+            .documents
+            .values()
+            .filter(|doc| {
+                doc.title.to_lowercase().contains(&q)
+                    || doc.body.to_lowercase().contains(&q)
+            })
+            .take(limit)
+            .map(|doc| SearchResult {
+                id: doc.id,
+                title: doc.title.clone(),
+                path: doc.path.clone(),
+                score: 0.0,
+            })
+            .collect();
+        results.sort_by(|a, b| a.title.cmp(&b.title));
+        Ok(results)
+    }
+
+    fn document_ids(&self) -> Result<Vec<i64>> {
+        Ok(self.state.lock().unwrap().documents.keys().copied().collect())
+    }
+
+    fn document_count(&self) -> Result<u64> {
+        Ok(self.state.lock().unwrap().documents.len() as u64)
+    }
+
+    fn embed_pending(
+        &self,
+        _embedder: &dyn Embedder,
+        _on_progress: &dyn Fn(usize, usize),
+    ) -> Result<usize> {
+        Ok(0)
+    }
+
+    fn vec_info(&self) -> Result<VecInfo> {
+        Ok(VecInfo { embedding_dim: 0, vector_count: 0, pending_count: 0 })
+    }
+
+    fn search_similar(
+        &self,
+        _query_vec: &[f32],
+        _limit: usize,
+    ) -> Result<Vec<ChunkSearchResult>> {
+        Ok(vec![])
+    }
+}
 
 // ── backend state ─────────────────────────────────────────────────────────────
 
 enum BackendState {
+    /// In-memory backend — data is not persisted.
+    ///
+    /// Used when neither `sqlite-store` nor `lancedb-store` is compiled in,
+    /// and as the initial state before [`RetrieveDb::init_lancedb`] is called.
+    InMemory(Arc<InMemoryStore>),
     /// SQLite backend (FTS only or FTS + sqlite-vec).
+    #[cfg(feature = "sqlite-store")]
     Sqlite(Arc<SqliteStore>),
     /// Full LanceDB backend.
     #[cfg(feature = "lancedb-store")]
@@ -58,14 +176,23 @@ impl BackendState {
     /// Return the underlying [`RetrieveStore`] as a cloned `Arc`.
     fn as_store(&self) -> Arc<dyn RetrieveStore> {
         match self {
+            BackendState::InMemory(s) => Arc::clone(s) as Arc<dyn RetrieveStore>,
+            #[cfg(feature = "sqlite-store")]
             BackendState::Sqlite(s) => Arc::clone(s) as Arc<dyn RetrieveStore>,
             #[cfg(feature = "lancedb-store")]
             BackendState::LanceDb(l) => Arc::clone(l) as Arc<dyn RetrieveStore>,
         }
     }
 
-    fn is_uninitialized_sqlite(&self) -> bool {
-        matches!(self, BackendState::Sqlite(s) if s.dim().is_none())
+    /// Returns `true` when the backend should be replaced by an `init_*` call.
+    fn needs_init(&self) -> bool {
+        match self {
+            BackendState::InMemory(_) => true,
+            #[cfg(feature = "sqlite-store")]
+            BackendState::Sqlite(s) => s.dim().is_none(),
+            #[cfg(feature = "lancedb-store")]
+            BackendState::LanceDb(_) => false,
+        }
     }
 }
 
@@ -89,19 +216,32 @@ pub struct RetrieveDb {
 impl RetrieveDb {
     /// Open the retrieve database at `db_path`.
     ///
-    /// Defaults to the SQLite FTS-only backend; the SQLite file is created
-    /// lazily on first use.  Call [`init_sqlite_vec`](Self::init_sqlite_vec)
-    /// or [`init_lancedb`](Self::init_lancedb) to enable vector search.
+    /// When `sqlite-store` is enabled, defaults to the SQLite FTS-only backend
+    /// (the SQLite file is created lazily on first use).  When no storage
+    /// feature is compiled in, opens an in-memory backend.
+    ///
+    /// Call [`init_sqlite_vec`](Self::init_sqlite_vec) or
+    /// [`init_lancedb`](Self::init_lancedb) to enable vector search.
     pub fn open(db_path: &Path) -> Result<Self> {
-        let store = SqliteStore::new_fts_only(db_path.to_owned());
+        #[cfg(feature = "sqlite-store")]
+        {
+            let store = SqliteStore::new_fts_only(db_path.to_owned());
+            return Ok(Self {
+                db_path: db_path.to_owned(),
+                backend: Mutex::new(BackendState::Sqlite(Arc::new(store))),
+            });
+        }
+
+        #[cfg(not(feature = "sqlite-store"))]
         Ok(Self {
             db_path: db_path.to_owned(),
-            backend: Mutex::new(BackendState::Sqlite(Arc::new(store))),
+            backend: Mutex::new(BackendState::InMemory(Arc::new(InMemoryStore::new()))),
         })
     }
 
     /// Delete the existing database and create a fresh one.
     pub fn rebuild(db_path: &Path) -> Result<Self> {
+        #[cfg(feature = "sqlite-store")]
         crate::sqlite_store::wipe_db_files(db_path);
         Self::open(db_path)
     }
@@ -111,9 +251,10 @@ impl RetrieveDb {
     /// Enable the sqlite-vec vector backend with `embedding_dim` dimensions.
     ///
     /// Idempotent — if the backend is already initialised this is a no-op.
+    #[cfg(feature = "sqlite-store")]
     pub fn init_sqlite_vec(&self, embedding_dim: u32) -> Result<()> {
         let mut guard = self.backend.lock().unwrap();
-        if guard.is_uninitialized_sqlite() {
+        if guard.needs_init() {
             let store = SqliteStore::new_with_vec(self.db_path.clone(), embedding_dim)?;
             *guard = BackendState::Sqlite(Arc::new(store));
         }
@@ -127,7 +268,7 @@ impl RetrieveDb {
     #[cfg(feature = "lancedb-store")]
     pub fn init_lancedb(&self, lancedb_dir: &Path, embedding_dim: u32) -> Result<()> {
         let mut guard = self.backend.lock().unwrap();
-        if guard.is_uninitialized_sqlite() {
+        if guard.needs_init() {
             let backend = LanceDbBackend::new(lancedb_dir, embedding_dim)?;
             *guard = BackendState::LanceDb(Arc::new(backend));
         }
@@ -175,6 +316,7 @@ impl RetrieveDb {
     ///
     /// SQLite mode uses the FTS5 trigram index (substring / CJK aware).
     /// LanceDB mode uses the ngram tokenizer (better BM25 ranking).
+    /// In-memory mode uses a simple case-insensitive substring scan.
     pub fn search_fts(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
         self.store().search_fts(query, limit)
     }

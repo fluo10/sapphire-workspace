@@ -2,6 +2,7 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum Error {
+    #[cfg(feature = "sqlite-store")]
     #[error("SQLite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
     #[error("embedding error: {0}")]
