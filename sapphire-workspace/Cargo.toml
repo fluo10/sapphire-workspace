@@ -2,9 +2,11 @@
 name = "sapphire-workspace"
 edition.workspace = true
 version = "0.1.0"
-description.workspace = true
+description = "Workspace management library for indexing, search, and sync of markdown documents"
 license.workspace = true
 repository.workspace = true
+keywords = ["workspace", "markdown", "search", "sync"]
+categories = ["filesystem", "database"]
 
 [features]
 default = ["lancedb-store", "fastembed-embed", "git-sync"]
