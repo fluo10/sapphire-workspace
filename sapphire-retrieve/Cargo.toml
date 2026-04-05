@@ -2,9 +2,11 @@
 name = "sapphire-retrieve"
 edition.workspace = true
 version = "0.1.1"
-description.workspace = true
+description = "Document retrieval and semantic search library with SQLite (FTS5/sqlite-vec) and LanceDB backends"
 license.workspace = true
 repository.workspace = true
+keywords = ["search", "retrieval", "embeddings", "sqlite", "lancedb"]
+categories = ["database"]
 
 [features]
 default = ["sqlite-store", "lancedb-store", "fastembed-embed"]

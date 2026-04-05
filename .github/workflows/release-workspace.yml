@@ -1,0 +1,52 @@
+name: Release Workspace
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+jobs:
+  publish:
+    if: github.event.pull_request.merged == true && startsWith(github.event.pull_request.head.ref, 'release/workspace/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+
+      - name: Extract version from branch name
+        id: version
+        run: |
+          BRANCH="${{ github.event.pull_request.head.ref }}"
+          VERSION="${BRANCH#release/workspace/}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Publish sapphire-retrieve
+        run: cargo publish -p sapphire-retrieve
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Publish sapphire-sync
+        run: cargo publish -p sapphire-sync
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Publish sapphire-workspace
+        run: cargo publish -p sapphire-workspace
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Create tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag workspace-v${{ steps.version.outputs.version }}
+          git push origin workspace-v${{ steps.version.outputs.version }}

@@ -1,0 +1,32 @@
+[package]
+name = "sapphire-workspace-cli"
+edition.workspace = true
+version = "0.1.0"
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "sapphire-workspace"
+path = "src/main.rs"
+
+[features]
+default = ["sqlite-store", "lancedb-store", "fastembed-embed", "git-sync"]
+sqlite-store    = ["sapphire-workspace/sqlite-store"]
+lancedb-store   = ["sapphire-workspace/lancedb-store"]
+fastembed-embed = ["sapphire-workspace/fastembed-embed"]
+git-sync        = ["sapphire-workspace/git-sync"]
+
+[dependencies]
+sapphire-workspace = { version = "0.1.0", path = "../..", default-features = false }
+clap.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["full"] }
+rmcp.workspace = true
+schemars.workspace = true
+tracing-subscriber.workspace = true
+notify = "7"
+notify-debouncer-mini = "0.4"

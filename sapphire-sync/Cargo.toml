@@ -2,9 +2,11 @@
 name = "sapphire-sync"
 edition.workspace = true
 version = "0.1.0"
-description.workspace = true
+description = "Git-based workspace synchronization library"
 license.workspace = true
 repository.workspace = true
+keywords = ["sync", "git", "workspace"]
+categories = ["filesystem"]
 
 [features]
 default = ["git"]
