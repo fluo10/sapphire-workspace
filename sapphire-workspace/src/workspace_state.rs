@@ -30,14 +30,23 @@ pub struct DbInfo {
 
 impl WorkspaceState {
     /// Open (or create) the retrieve DB for `workspace`.
+    ///
+    /// When the `git-sync` feature is enabled, automatically attaches a
+    /// [`sapphire_sync::GitSync`] backend if the workspace root is inside a
+    /// git repository.  Silently falls back to no backend if git is not found.
     pub fn open(workspace: Workspace) -> Result<Self> {
         let retrieve_db = RetrieveDb::open(&workspace.retrieve_db_path())?;
-        Ok(Self {
+        let mut state = Self {
             workspace,
             retrieve_db,
             embedder: OnceCell::new(),
             sync_backend: None,
-        })
+        };
+        #[cfg(feature = "git-sync")]
+        if let Ok(git) = sapphire_sync::GitSync::open(&state.workspace.root) {
+            state.set_sync_backend(Box::new(git));
+        }
+        Ok(state)
     }
 
     /// Delete and recreate the retrieve DB from scratch.
@@ -58,19 +67,32 @@ impl WorkspaceState {
 
     /// Open workspace and configure the sync backend from [`WorkspaceConfig`].
     ///
-    /// - `SyncBackendKind::Git` → initialises [`sapphire_sync::GitSync`] with the
-    ///   remote name from `config.sync`.
-    /// - `SyncBackendKind::None` → no sync backend (local-only).
+    /// - `SyncBackendKind::Auto` (default) — same as [`open`](Self::open):
+    ///   attach git if a repository is found, silently no-op otherwise.
+    /// - `SyncBackendKind::Git` — attach git with the configured remote;
+    ///   returns an error if no repository is found.
+    /// - `SyncBackendKind::None` — disable sync even inside a git repository.
     #[cfg(feature = "git-sync")]
     pub fn open_configured(workspace: Workspace, config: &WorkspaceConfig) -> Result<Self> {
         use crate::config::SyncBackendKind;
         let mut state = Self::open(workspace)?;
-        if config.sync.backend == SyncBackendKind::Git {
-            let git = sapphire_sync::GitSync::with_remote(
-                &state.workspace.root,
-                config.sync.remote(),
-            )?;
-            state.set_sync_backend(Box::new(git));
+        match config.sync.backend {
+            SyncBackendKind::Auto => {
+                // Already handled by `open`; nothing more to do.
+            }
+            SyncBackendKind::Git => {
+                // Explicit git: use the configured remote and fail hard if
+                // no repository is found.
+                let git = sapphire_sync::GitSync::with_remote(
+                    &state.workspace.root,
+                    config.sync.remote(),
+                )?;
+                state.set_sync_backend(Box::new(git));
+            }
+            SyncBackendKind::None => {
+                // Explicitly disabled: remove whatever `open` may have set.
+                state.sync_backend = None;
+            }
         }
         Ok(state)
     }

@@ -74,10 +74,13 @@ impl SyncConfig {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SyncBackendKind {
-    /// No sync backend — local-only.
+    /// Auto-detect: use git if the workspace is inside a git repository,
+    /// otherwise no sync (local-only).  This is the default.
     #[default]
+    Auto,
+    /// Explicitly disable sync — local-only even inside a git repository.
     None,
-    /// Git-based sync (commit → pull → push).
+    /// Git-based sync (commit → pull → push via `sapphire-workspace sync`).
     Git,
 }
 
