@@ -5,6 +5,14 @@ All notable changes to `sapphire-workspace` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-04-06
+
+### Added
+
+- `WorkspaceState::read_file(relative)` — read a workspace-relative text file and return its contents as a `String`.
+- `WorkspaceState::read_file_range(relative, start_line, end_line)` — read a line range from a workspace-relative text file (1-indexed, inclusive; `end_line: None` reads to EOF; out-of-bounds lines are silently clamped).
+- `WorkspaceState::list_dir(relative)` — list the direct children of a workspace-relative directory, returning `(workspace-relative path, is_dir)` pairs sorted alphabetically.
+
 ## [0.3.0] - 2026-04-06
 
 ### Added
@@ -40,5 +48,6 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - `fastembed-embed`, `lancedb-store`, `sqlite-store`, `git-sync` feature flags.
 - Re-exports of `sapphire-retrieve` and `sapphire-sync` public APIs.
 
+[0.4.0]: https://github.com/fluo10/sapphire-journal/compare/sapphire-workspace-v0.3.0...sapphire-workspace-v0.4.0
 [0.3.0]: https://github.com/fluo10/sapphire-journal/compare/sapphire-workspace-v0.2.0...sapphire-workspace-v0.3.0
 [0.2.0]: https://github.com/fluo10/sapphire-journal/releases/tag/sapphire-workspace-v0.2.0

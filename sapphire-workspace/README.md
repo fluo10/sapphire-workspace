@@ -18,7 +18,7 @@ Workspace management library for indexing, search, and sync of Markdown document
 
 ```toml
 [dependencies]
-sapphire-workspace = "0.3"
+sapphire-workspace = "0.4"
 ```
 
 ### Initialise a workspace
@@ -51,6 +51,23 @@ println!("{upserted} upserted, {removed} removed");
 let results = state.retrieve_db().search("my query", 10)?;
 for r in results {
     println!("{}: {}", r.path, r.score);
+}
+```
+
+### Read files
+
+```rust
+use std::path::Path;
+
+// Read a whole file
+let content = state.read_file(Path::new("notes/hello.md"))?;
+
+// Read lines 10–20 (1-indexed, inclusive)
+let excerpt = state.read_file_range(Path::new("notes/hello.md"), 10, Some(20))?;
+
+// List a directory
+for (path, is_dir) in state.list_dir(Path::new("notes"))? {
+    println!("{} {}", if is_dir { "d" } else { "-" }, path.display());
 }
 ```
 
