@@ -9,6 +9,7 @@ pub mod retrieve_store;
 pub mod sqlite_store;
 pub mod vector_store;
 
+pub use chunker::{Chunker, JsonChunker, MarkdownChunker, TextChunk};
 pub use db::{Document, RetrieveDb, SearchResult};
 pub use embed::{build_embedder, EmbeddingConfig, Embedder};
 pub use error::{Error, Result};

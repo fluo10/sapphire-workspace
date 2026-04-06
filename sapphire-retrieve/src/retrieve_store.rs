@@ -37,6 +37,22 @@ pub struct Document {
     pub body: String,
     /// Absolute file path (shown in search results).
     pub path: String,
+    /// Pre-computed text chunks with source-location positions.
+    ///
+    /// Each element is `(line, column, embed_text)` where:
+    ///
+    /// - `line` — 0-based source line number stored as the `line` column in the
+    ///   database.  Returned verbatim in
+    ///   [`ChunkSearchResult::line`](crate::vector_store::ChunkSearchResult::line)
+    ///   so a GUI can navigate directly to the source location.
+    /// - `column` — 0-based byte offset within `line`.
+    /// - `embed_text` — title-prepended chunk text used for vector embedding
+    ///   (the same format that [`crate::chunker::chunk_document`] produces).
+    ///
+    /// When `None`, the storage backend falls back to auto-chunking `body` via
+    /// [`crate::chunker::chunk_document`] with sequential 0-based `line` values.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunks: Option<Vec<(usize, usize, String)>>,
 }
 
 /// A search result from [`RetrieveStore::search_fts`] or a deduplicated
