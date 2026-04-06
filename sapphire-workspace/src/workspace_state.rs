@@ -7,7 +7,7 @@ use tokio::sync::OnceCell;
 
 use crate::{
     config::{UserConfig, VectorDb, WorkspaceConfig},
-    error::{Error, Result},
+    error::Result,
     indexer::{path_to_doc_id, sync_workspace},
     workspace::Workspace,
 };
@@ -193,6 +193,54 @@ impl WorkspaceState {
     // These methods accept paths relative to the workspace root, perform the
     // corresponding filesystem operation, and then update the retrieve index
     // (and sync backend) automatically.
+
+    /// Read a workspace-relative text file and return its contents as a `String`.
+    pub fn read_file(&self, relative: &Path) -> Result<String> {
+        let abs = self.workspace.root.join(relative);
+        Ok(std::fs::read_to_string(&abs)?)
+    }
+
+    /// Read a line range from a workspace-relative text file.
+    ///
+    /// `start_line` and `end_line` are **1-indexed** and **inclusive**.
+    /// `end_line: None` reads to the end of the file.
+    /// Lines beyond the end of the file are silently clamped.
+    pub fn read_file_range(
+        &self,
+        relative: &Path,
+        start_line: usize,
+        end_line: Option<usize>,
+    ) -> Result<String> {
+        let abs = self.workspace.root.join(relative);
+        let content = std::fs::read_to_string(&abs)?;
+        let start = start_line.saturating_sub(1); // convert to 0-indexed
+        let lines: Vec<&str> = content.lines().collect();
+        let end = end_line.map(|e| e.min(lines.len())).unwrap_or(lines.len());
+        let slice = if start >= lines.len() {
+            &[] as &[&str]
+        } else {
+            &lines[start..end]
+        };
+        Ok(slice.join("\n"))
+    }
+
+    /// List the direct children of a workspace-relative directory.
+    ///
+    /// Returns pairs of `(workspace-relative path, is_dir)`, sorted
+    /// alphabetically by path.
+    pub fn list_dir(&self, relative: &Path) -> Result<Vec<(PathBuf, bool)>> {
+        let abs = self.workspace.root.join(relative);
+        let mut entries: Vec<(PathBuf, bool)> = std::fs::read_dir(&abs)?
+            .filter_map(|e| e.ok())
+            .filter_map(|e| {
+                let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                let rel = e.path().strip_prefix(&self.workspace.root).ok()?.to_owned();
+                Some((rel, is_dir))
+            })
+            .collect();
+        entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        Ok(entries)
+    }
 
     /// Write `content` to a workspace-relative file and update the index.
     ///
