@@ -24,4 +24,5 @@ toml.workspace = true
 tokio = { workspace = true, features = ["full"] }
 indexmap.workspace = true
 walkdir = "2"
-uuid = { version = "1", features = ["v3"] }
+uuid = "1"
+md-5 = "0.10"

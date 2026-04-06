@@ -130,18 +130,31 @@ impl Workspace {
         Ok(Self { root, app_name: DEFAULT_APP_NAME })
     }
 
-    // ── cache / DB paths ──────────────────────────────────────────────────────
+    // ── identity / cache paths ────────────────────────────────────────────────
 
-    /// `$XDG_CACHE_HOME/{app_name}/{uuid_v3_of_root}/`
+    /// Stable UUIDv8 identifier derived from the canonicalized workspace root.
     ///
-    /// The UUID is a stable UUIDv3 derived from the canonicalized workspace
-    /// root path, so the same directory always maps to the same cache location.
-    /// The `app_name` component allows different host applications to keep
-    /// their caches under separate XDG namespaces (e.g. `sapphire-journal`).
+    /// The value is computed by taking the MD5 hash of the canonical path and
+    /// rewriting the version/variant nibbles to produce a valid UUIDv8.  This
+    /// gives a compact, collision-resistant, human-readable identifier that
+    /// does not depend on any external namespace constant.
+    ///
+    /// The UUID is never persisted — it is recomputed from the filesystem path
+    /// on every call.  It is stable for the lifetime of the root directory.
+    pub fn uuid(&self) -> uuid::Uuid {
+        path_uuid(&self.root)
+    }
+
+    /// `$XDG_CACHE_HOME/{app_name}/{uuid}/`
+    ///
+    /// The UUID is a stable UUIDv8 derived from the canonicalized workspace
+    /// root path (see [`uuid`](Self::uuid)).  The `app_name` component allows
+    /// different host applications to keep their caches under separate XDG
+    /// namespaces (e.g. `"sapphire-journal"`).
     pub fn cache_dir(&self) -> PathBuf {
         xdg_cache_home()
             .join(self.app_name)
-            .join(cache_uuid(&self.root).to_string())
+            .join(self.uuid().to_string())
     }
 
     /// Path to the SQLite retrieve database file.
@@ -179,15 +192,22 @@ fn resolve_cwd() -> Result<PathBuf> {
     Ok(cwd)
 }
 
-/// Stable UUIDv3 derived from the canonicalized workspace root path.
+/// Stable UUIDv8 derived from the MD5 hash of a canonicalized path.
 ///
-/// The namespace is sapphire-workspace-specific and must not change across
-/// versions to keep cache locations stable.
-fn cache_uuid(root: &Path) -> uuid::Uuid {
-    const NAMESPACE: uuid::Uuid =
-        uuid::uuid!("4630204d-be95-46b2-9d37-93cb897aac7e");
+/// The MD5 digest (128 bit) is rewritten with the UUIDv8 version nibble
+/// (`0x8`) and the RFC 4122 variant bits (`10xx`), producing a valid UUID
+/// without any external namespace constant.
+///
+/// This function is exported so that host applications (e.g.
+/// `sapphire-journal`) can compute the same stable identifier for a root
+/// directory without constructing a full [`Workspace`].
+pub fn path_uuid(root: &Path) -> uuid::Uuid {
+    use md5::{Digest as _, Md5};
     let canonical = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_owned());
-    uuid::Uuid::new_v3(&NAMESPACE, canonical.as_os_str().as_encoded_bytes())
+    let mut bytes: [u8; 16] = Md5::digest(canonical.as_os_str().as_encoded_bytes()).into();
+    bytes[6] = (bytes[6] & 0x0f) | 0x80; // version = 8
+    bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant = RFC 4122 (10xx)
+    uuid::Uuid::from_bytes(bytes)
 }
 
 fn xdg_cache_home() -> PathBuf {
