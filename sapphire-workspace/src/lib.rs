@@ -7,7 +7,7 @@ mod error;
 pub use error::{Error, Result};
 
 pub use config::{EmbeddingConfig, SyncBackendKind, SyncConfig, UserConfig, VectorDb, WorkspaceConfig};
-pub use workspace::DEFAULT_WORKSPACE_MARKER;
+pub use workspace::{DEFAULT_APP_NAME, DEFAULT_WORKSPACE_MARKER};
 pub use indexer::path_to_doc_id;
 pub use workspace::Workspace;
 pub use workspace_state::{DbInfo, WorkspaceState};

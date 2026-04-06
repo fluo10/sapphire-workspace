@@ -1,41 +1,55 @@
 use std::io::IsTerminal as _;
 use std::path::{Path, PathBuf};
 
-
 use crate::error::{Error, Result};
 
-/// Default marker directory name used for workspace root detection.
+/// Application name used by default when constructing a [`Workspace`].
+///
+/// The corresponding marker directory name is `".sapphire-workspace"`.
+pub const DEFAULT_APP_NAME: &str = "sapphire-workspace";
+
+/// Marker directory name used for workspace root detection (legacy; kept for
+/// code that constructs the marker directory directly, e.g. `init`).
+///
+/// Equal to `format!(".{DEFAULT_APP_NAME}")`.
 pub const DEFAULT_WORKSPACE_MARKER: &str = ".sapphire-workspace";
 
 /// A resolved workspace directory.
 pub struct Workspace {
     /// Canonicalized absolute path of the workspace root.
     pub root: PathBuf,
-    /// Marker directory name (e.g. `.sapphire-workspace`).
-    marker: String,
+    /// Application name (no leading dot).
+    ///
+    /// Determines:
+    /// - The marker directory: `{root}/.{app_name}/`
+    /// - The XDG cache subdirectory: `$XDG_CACHE_HOME/{app_name}/{uuid}/`
+    ///
+    /// Default value: [`DEFAULT_APP_NAME`] (`"sapphire-workspace"`).
+    /// Pass a different value via the `_with_app_name` construction methods
+    /// so that a host application stores caches under its own XDG namespace
+    /// (e.g. `"sapphire-journal"`).
+    app_name: &'static str,
 }
 
 impl Workspace {
     // ── marker-based discovery ────────────────────────────────────────────────
 
-    /// Walk up from `start` until a directory containing `marker` is found.
-    pub fn find_from_with_marker(start: &Path, marker: &str) -> Result<Self> {
+    /// Walk up from `start` until a directory containing `.{app_name}` is found.
+    pub fn find_from_with_app_name(start: &Path, app_name: &'static str) -> Result<Self> {
         let start = start
             .canonicalize()
             .map_err(|e| Error::Access { path: start.to_owned(), source: e })?;
+        let marker = format!(".{app_name}");
         let mut current = start.as_path();
         loop {
-            if current.join(marker).is_dir() {
-                return Ok(Self {
-                    root: current.to_owned(),
-                    marker: marker.to_owned(),
-                });
+            if current.join(&marker).is_dir() {
+                return Ok(Self { root: current.to_owned(), app_name });
             }
             match current.parent() {
                 Some(p) => current = p,
                 None => {
                     return Err(Error::MarkerNotFound {
-                        marker: marker.to_owned(),
+                        marker,
                         start: start.to_owned(),
                     })
                 }
@@ -43,58 +57,53 @@ impl Workspace {
         }
     }
 
-    /// Walk up from the current working directory using `marker`.
-    pub fn find_with_marker(marker: &str) -> Result<Self> {
-        Self::find_from_with_marker(&std::env::current_dir()?, marker)
+    /// Walk up from the current working directory using `.{app_name}` as the marker.
+    pub fn find_with_app_name(app_name: &'static str) -> Result<Self> {
+        Self::find_from_with_app_name(&std::env::current_dir()?, app_name)
     }
 
-    /// Walk up from `start` using the default marker (`.sapphire-workspace`).
+    /// Walk up from `start` using the default app name ([`DEFAULT_APP_NAME`]).
     pub fn find_from(start: &Path) -> Result<Self> {
-        Self::find_from_with_marker(start, DEFAULT_WORKSPACE_MARKER)
+        Self::find_from_with_app_name(start, DEFAULT_APP_NAME)
     }
 
-    /// Walk up from the current working directory using the default marker.
+    /// Walk up from the current working directory using the default app name.
     pub fn find() -> Result<Self> {
-        Self::find_with_marker(DEFAULT_WORKSPACE_MARKER)
+        Self::find_with_app_name(DEFAULT_APP_NAME)
     }
 
-    /// Open a workspace at `root` that already has `marker` dir present.
+    /// Open a workspace at `root` that already has `.{app_name}` dir present.
     ///
     /// Returns an error if the marker directory does not exist.
-    pub fn from_root_with_marker(root: &Path, marker: &str) -> Result<Self> {
+    pub fn from_root_with_app_name(root: &Path, app_name: &'static str) -> Result<Self> {
         let root = root
             .canonicalize()
             .map_err(|e| Error::Access { path: root.to_owned(), source: e })?;
-        if !root.join(marker).is_dir() {
-            return Err(Error::MarkerDirMissing {
-                marker: marker.to_owned(),
-                root,
-            });
+        let marker = format!(".{app_name}");
+        if !root.join(&marker).is_dir() {
+            return Err(Error::MarkerDirMissing { marker, root });
         }
-        Ok(Self {
-            root,
-            marker: marker.to_owned(),
-        })
+        Ok(Self { root, app_name })
     }
 
-    /// Open a workspace at `root` using the default marker.
+    /// Open a workspace at `root` using the default app name.
     pub fn from_root(root: &Path) -> Result<Self> {
-        Self::from_root_with_marker(root, DEFAULT_WORKSPACE_MARKER)
+        Self::from_root_with_app_name(root, DEFAULT_APP_NAME)
     }
 
-    /// `true` if the marker directory exists under `root`.
+    /// `true` if the marker directory (`.{app_name}`) exists under `root`.
     pub fn has_marker(&self) -> bool {
-        self.root.join(&self.marker).is_dir()
+        self.root.join(format!(".{}", self.app_name)).is_dir()
     }
 
-    /// Path to `{root}/{marker}/config.toml`.
+    /// Path to `{root}/.{app_name}/config.toml`.
     pub fn config_path(&self) -> PathBuf {
-        self.root.join(&self.marker).join("config.toml")
+        self.marker_dir().join("config.toml")
     }
 
-    /// Path to the marker directory (`{root}/{marker}`).
+    /// Path to the marker directory (`{root}/.{app_name}`).
     pub fn marker_dir(&self) -> PathBuf {
-        self.root.join(&self.marker)
+        self.root.join(format!(".{}", self.app_name))
     }
 
     // ── legacy resolution (no marker required) ────────────────────────────────
@@ -118,25 +127,21 @@ impl Workspace {
         } else {
             resolve_cwd()?
         };
-        Ok(Self {
-            root,
-            marker: DEFAULT_WORKSPACE_MARKER.to_owned(),
-        })
+        Ok(Self { root, app_name: DEFAULT_APP_NAME })
     }
 
     // ── cache / DB paths ──────────────────────────────────────────────────────
 
-    /// `$XDG_CACHE_HOME/sapphire-workspace-cli/{hash16}-{basename}/`
+    /// `$XDG_CACHE_HOME/{app_name}/{uuid_v3_of_root}/`
+    ///
+    /// The UUID is a stable UUIDv3 derived from the canonicalized workspace
+    /// root path, so the same directory always maps to the same cache location.
+    /// The `app_name` component allows different host applications to keep
+    /// their caches under separate XDG namespaces (e.g. `sapphire-journal`).
     pub fn cache_dir(&self) -> PathBuf {
-        let hash = path_hash(&self.root);
-        let basename = self
-            .root
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "root".to_owned());
         xdg_cache_home()
-            .join("sapphire-workspace-cli")
-            .join(format!("{:016x}-{}", hash, basename))
+            .join(self.app_name)
+            .join(cache_uuid(&self.root).to_string())
     }
 
     /// Path to the SQLite retrieve database file.
@@ -174,16 +179,15 @@ fn resolve_cwd() -> Result<PathBuf> {
     Ok(cwd)
 }
 
-/// FNV-1a hash of a path (no extra crates needed).
-fn path_hash(p: &Path) -> u64 {
-    const OFFSET: u64 = 14695981039346656037;
-    const PRIME: u64 = 1099511628211;
-    let mut h = OFFSET;
-    for b in p.as_os_str().as_encoded_bytes() {
-        h ^= *b as u64;
-        h = h.wrapping_mul(PRIME);
-    }
-    h
+/// Stable UUIDv3 derived from the canonicalized workspace root path.
+///
+/// The namespace is sapphire-workspace-specific and must not change across
+/// versions to keep cache locations stable.
+fn cache_uuid(root: &Path) -> uuid::Uuid {
+    const NAMESPACE: uuid::Uuid =
+        uuid::uuid!("c3d4e5f6-a7b8-3c9d-8e0f-1a2b3c4d5e6f");
+    let canonical = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_owned());
+    uuid::Uuid::new_v3(&NAMESPACE, canonical.as_os_str().as_encoded_bytes())
 }
 
 fn xdg_cache_home() -> PathBuf {
