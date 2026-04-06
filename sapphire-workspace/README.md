@@ -1,0 +1,140 @@
+# sapphire-workspace
+
+Workspace management library for indexing, search, and sync of Markdown documents.
+
+`sapphire-workspace` ties together [`sapphire-retrieve`] (full-text + vector search) and
+[`sapphire-sync`] (git-based synchronisation) into a single, ergonomic API.
+
+## Features
+
+| Feature flag | What it enables | Default |
+|---|---|---|
+| `lancedb-store` | LanceDB vector backend for semantic search | yes |
+| `fastembed-embed` | On-device embedding via FastEmbed | yes |
+| `sqlite-store` | SQLite FTS5 + sqlite-vec backend | no |
+| `git-sync` | Git-based workspace synchronisation via `sapphire-sync` | yes |
+
+## Quick start
+
+```toml
+[dependencies]
+sapphire-workspace = "0.3"
+```
+
+### Initialise a workspace
+
+```rust
+use sapphire_workspace::Workspace;
+
+// Walk up from cwd until a `.sapphire-workspace` directory is found.
+let ws = Workspace::find()?;
+println!("root: {}", ws.root.display());
+println!("cache: {}", ws.cache_dir().display());
+```
+
+### Open and index
+
+```rust
+use sapphire_workspace::{Workspace, WorkspaceState};
+
+let ws = Workspace::find()?;
+let state = WorkspaceState::open(ws)?;
+
+// Incrementally sync all Markdown / JSON / JSONL files into the retrieve DB.
+let (upserted, removed) = state.sync()?;
+println!("{upserted} upserted, {removed} removed");
+```
+
+### Full-text search
+
+```rust
+let results = state.retrieve_db().search("my query", 10)?;
+for r in results {
+    println!("{}: {}", r.path, r.score);
+}
+```
+
+### Write / delete files (index updated automatically)
+
+```rust
+use std::path::Path;
+
+state.write_file(Path::new("notes/hello.md"), "# Hello\n\nworld")?;
+state.delete_file(Path::new("notes/old.md"))?;
+```
+
+## Workspace discovery
+
+A workspace root is detected by walking up the directory tree until a
+`.sapphire-workspace/` marker directory is found.  Host applications can
+supply a custom `app_name` (e.g. `"sapphire-journal"`) via the
+`_with_app_name` construction methods so that marker directories and XDG caches
+use the host application's namespace:
+
+```rust
+let ws = Workspace::find_with_app_name("sapphire-journal")?;
+// marker: {root}/.sapphire-journal/
+// cache:  $XDG_CACHE_HOME/sapphire-journal/{uuid}/
+```
+
+## Stable workspace UUID
+
+Each workspace directory has a stable [UUIDv8] identifier derived from the
+MD5 hash of its canonicalised path.  The UUID is never stored on disk; it is
+recomputed on every call to `Workspace::uuid()` or the standalone `path_uuid()`
+function.
+
+```rust
+println!("{}", sapphire_workspace::path_uuid(Path::new("/my/workspace")));
+```
+
+## Configuration
+
+Place `config.toml` inside the marker directory
+(`.sapphire-workspace/config.toml`):
+
+```toml
+[sync]
+backend = "git"   # "auto" | "git" | "none"
+remote  = "origin"
+branch  = "main"
+
+[embedding]
+enabled    = true
+provider   = "openai"
+model      = "text-embedding-3-small"
+api_key_env = "OPENAI_API_KEY"
+vector_db  = "lancedb"   # "none" | "sqlite_vec" | "lancedb"
+dimension  = 1536
+```
+
+Environment variable overrides (prefix `SAPPHIRE_WORKSPACE_EMBEDDING_`):
+
+| Variable | Values |
+|---|---|
+| `SAPPHIRE_WORKSPACE_EMBEDDING_ENABLED` | `1` / `true` / `yes` |
+| `SAPPHIRE_WORKSPACE_EMBEDDING_VECTOR_DB` | `none` / `sqlite_vec` / `lancedb` |
+| `SAPPHIRE_WORKSPACE_EMBEDDING_PROVIDER` | string |
+| `SAPPHIRE_WORKSPACE_EMBEDDING_MODEL` | string |
+| `SAPPHIRE_WORKSPACE_EMBEDDING_API_KEY_ENV` | env-var name |
+| `SAPPHIRE_WORKSPACE_EMBEDDING_BASE_URL` | URL |
+| `SAPPHIRE_WORKSPACE_EMBEDDING_DIMENSION` | integer |
+
+## Supported file types
+
+The indexer walks the workspace root (hidden directories are skipped) and
+processes:
+
+| Extension | Chunking strategy |
+|---|---|
+| `md`, `markdown`, `txt`, `rst`, `org` | Paragraph split; backends auto-chunk |
+| `json` | Message/element extraction; each element is a separate chunk |
+| `jsonl` | One chunk per line |
+
+## License
+
+Licensed under either of [MIT](../LICENSE-MIT) or [Apache-2.0](../LICENSE-APACHE) at your option.
+
+[`sapphire-retrieve`]: ../sapphire-retrieve
+[`sapphire-sync`]: ../sapphire-sync
+[UUIDv8]: https://www.rfc-editor.org/rfc/rfc9562#name-uuid-version-8
