@@ -359,12 +359,7 @@ impl RetrieveDb {
         deduped.truncate(limit);
         deduped
             .into_iter()
-            .map(|r| SearchResult {
-                id: r.doc_id,
-                title: r.doc_title,
-                path: r.doc_path,
-                score: r.score,
-            })
+            .map(|r| SearchResult { id: r.doc_id, title: r.doc_title, path: r.doc_path, score: r.score })
             .collect()
     }
 

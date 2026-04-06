@@ -160,6 +160,7 @@ impl WorkspaceState {
             title,
             body,
             path: path_str,
+            chunks: None,
         })?;
         self.retrieve_db.rebuild_fts()?;
 

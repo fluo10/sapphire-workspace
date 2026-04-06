@@ -11,8 +11,8 @@
 //! |-----------------|---------------------------------------------------------------|---------------------------------|
 //! | `files`         | `path Utf8, mtime Int64`                                      | file mtime tracking             |
 //! | `documents`     | `id Int64, title Utf8, body Utf8, path Utf8`                  | FTS index source                |
-//! | `chunks_meta`   | `doc_id Int64, chunk_index Int32, text Utf8, doc_title Utf8, doc_path Utf8` | pending-embedding tracking |
-//! | `chunk_vectors` | `doc_id Int64, chunk_index Int32, doc_title Utf8, doc_path Utf8, text Utf8, embedding FixedSizeList<Float32>` | vector search |
+//! | `chunks_meta`   | `doc_id Int64, line Int32, col Int32, text Utf8, doc_title Utf8, doc_path Utf8` | pending-embedding tracking |
+//! | `chunk_vectors` | `doc_id Int64, line Int32, col Int32, doc_title Utf8, doc_path Utf8, text Utf8, embedding FixedSizeList<Float32>` | vector search |
 //!
 //! # Directory layout
 //!
@@ -47,7 +47,12 @@ use crate::{
 // ── versioning ────────────────────────────────────────────────────────────────
 
 /// Schema version encoded in the directory name.
-pub const SCHEMA_VERSION: i32 = 2;
+///
+/// Version history:
+/// - 1: initial schema
+/// - 2: LanceDB full-backend
+/// - 3: replace `chunk_index` with `line` + `col` (source positions)
+pub const SCHEMA_VERSION: i32 = 3;
 
 /// Returns the full-backend LanceDB directory for the given cache root.
 pub fn data_dir(root: &Path) -> PathBuf {
@@ -82,7 +87,8 @@ fn documents_schema() -> Arc<Schema> {
 fn chunks_meta_schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
         Field::new("doc_id", DataType::Int64, false),
-        Field::new("chunk_index", DataType::Int32, false),
+        Field::new("line", DataType::Int32, false),
+        Field::new("col", DataType::Int32, false),
         Field::new("text", DataType::Utf8, false),
         Field::new("doc_title", DataType::Utf8, false),
         Field::new("doc_path", DataType::Utf8, false),
@@ -92,7 +98,8 @@ fn chunks_meta_schema() -> Arc<Schema> {
 fn chunk_vectors_schema(dim: i32) -> Arc<Schema> {
     Arc::new(Schema::new(vec![
         Field::new("doc_id", DataType::Int64, false),
-        Field::new("chunk_index", DataType::Int32, false),
+        Field::new("line", DataType::Int32, false),
+        Field::new("col", DataType::Int32, false),
         Field::new("doc_title", DataType::Utf8, false),
         Field::new("doc_path", DataType::Utf8, false),
         Field::new("text", DataType::Utf8, false),
@@ -252,25 +259,38 @@ impl LanceFullStore {
         self.chunks_meta.delete(&format!("doc_id = {}", doc.id)).await?;
         self.chunk_vectors.delete(&format!("doc_id = {}", doc.id)).await?;
 
-        // Insert fresh chunks.
-        let chunk_texts = chunk_document(&doc.title, &doc.body);
-        if chunk_texts.is_empty() {
+        // Build (line, col, embed_text) tuples.
+        let computed: Vec<(usize, usize, String)>;
+        let chunks: &[(usize, usize, String)] = if let Some(ref c) = doc.chunks {
+            c.as_slice()
+        } else {
+            computed = chunk_document(&doc.title, &doc.body)
+                .into_iter()
+                .enumerate()
+                .map(|(i, t)| (i, 0usize, t))
+                .collect();
+            &computed
+        };
+
+        if chunks.is_empty() {
             return Ok(());
         }
 
         let schema = chunks_meta_schema();
-        let n = chunk_texts.len();
+        let n = chunks.len();
         let doc_ids = vec![doc.id; n];
-        let chunk_idxs: Vec<i32> = (0..n as i32).collect();
+        let lines: Vec<i32> = chunks.iter().map(|(l, _, _)| *l as i32).collect();
+        let cols: Vec<i32> = chunks.iter().map(|(_, c, _)| *c as i32).collect();
         let titles = vec![doc.title.as_str(); n];
         let paths = vec![doc.path.as_str(); n];
-        let texts: Vec<&str> = chunk_texts.iter().map(String::as_str).collect();
+        let texts: Vec<&str> = chunks.iter().map(|(_, _, t)| t.as_str()).collect();
 
         let batch = RecordBatch::try_new(
             schema.clone(),
             vec![
                 Arc::new(Int64Array::from(doc_ids)),
-                Arc::new(Int32Array::from(chunk_idxs)),
+                Arc::new(Int32Array::from(lines)),
+                Arc::new(Int32Array::from(cols)),
                 Arc::new(StringArray::from(texts)),
                 Arc::new(StringArray::from(titles)),
                 Arc::new(StringArray::from(paths)),
@@ -375,10 +395,14 @@ impl LanceFullStore {
                 .column_by_name("doc_id")
                 .and_then(|c| c.as_any().downcast_ref::<Int64Array>())
                 .ok_or_else(|| Error::Embed("missing `doc_id` in search result".into()))?;
-            let chunk_idxs = batch
-                .column_by_name("chunk_index")
+            let lines = batch
+                .column_by_name("line")
                 .and_then(|c| c.as_any().downcast_ref::<Int32Array>())
-                .ok_or_else(|| Error::Embed("missing `chunk_index` in search result".into()))?;
+                .ok_or_else(|| Error::Embed("missing `line` in search result".into()))?;
+            let cols = batch
+                .column_by_name("col")
+                .and_then(|c| c.as_any().downcast_ref::<Int32Array>())
+                .ok_or_else(|| Error::Embed("missing `col` in search result".into()))?;
             let titles = batch
                 .column_by_name("doc_title")
                 .and_then(|c| c.as_any().downcast_ref::<StringArray>())
@@ -399,7 +423,8 @@ impl LanceFullStore {
             for i in 0..batch.num_rows() {
                 results.push(ChunkSearchResult {
                     doc_id: doc_ids.value(i),
-                    chunk_index: chunk_idxs.value(i) as usize,
+                    line: lines.value(i) as usize,
+                    column: cols.value(i) as usize,
                     doc_title: titles.value(i).to_owned(),
                     doc_path: paths.value(i).to_owned(),
                     chunk_text: texts.value(i).to_owned(),
@@ -416,10 +441,7 @@ impl LanceFullStore {
         let batches: Vec<RecordBatch> = self
             .chunk_vectors
             .query()
-            .select(Select::Columns(vec![
-                "doc_id".to_string(),
-                "chunk_index".to_string(),
-            ]))
+            .select(Select::Columns(vec!["doc_id".to_string(), "line".to_string()]))
             .execute()
             .await?
             .try_collect()
@@ -430,12 +452,12 @@ impl LanceFullStore {
             let doc_ids = batch
                 .column_by_name("doc_id")
                 .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
-            let chunk_idxs = batch
-                .column_by_name("chunk_index")
+            let lines = batch
+                .column_by_name("line")
                 .and_then(|c| c.as_any().downcast_ref::<Int32Array>());
-            if let (Some(dids), Some(cidxs)) = (doc_ids, chunk_idxs) {
+            if let (Some(dids), Some(ls)) = (doc_ids, lines) {
                 for i in 0..batch.num_rows() {
-                    keys.insert((dids.value(i), cidxs.value(i) as usize));
+                    keys.insert((dids.value(i), ls.value(i) as usize));
                 }
             }
         }
@@ -456,8 +478,11 @@ impl LanceFullStore {
             let doc_ids = batch
                 .column_by_name("doc_id")
                 .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
-            let chunk_idxs = batch
-                .column_by_name("chunk_index")
+            let lines = batch
+                .column_by_name("line")
+                .and_then(|c| c.as_any().downcast_ref::<Int32Array>());
+            let cols = batch
+                .column_by_name("col")
                 .and_then(|c| c.as_any().downcast_ref::<Int32Array>());
             let texts = batch
                 .column_by_name("text")
@@ -469,15 +494,16 @@ impl LanceFullStore {
                 .column_by_name("doc_path")
                 .and_then(|c| c.as_any().downcast_ref::<StringArray>());
 
-            if let (Some(dids), Some(cidxs), Some(txts), Some(ttls), Some(pths)) =
-                (doc_ids, chunk_idxs, texts, titles, paths)
+            if let (Some(dids), Some(ls), Some(cs), Some(txts), Some(ttls), Some(pths)) =
+                (doc_ids, lines, cols, texts, titles, paths)
             {
                 for i in 0..batch.num_rows() {
-                    let key = (dids.value(i), cidxs.value(i) as usize);
+                    let key = (dids.value(i), ls.value(i) as usize);
                     if !embedded.contains(&key) {
                         chunks.push(Chunk {
                             doc_id: key.0,
-                            chunk_index: key.1,
+                            line: key.1,
+                            column: cs.value(i) as usize,
                             text: txts.value(i).to_owned(),
                             doc_title: ttls.value(i).to_owned(),
                             doc_path: pths.value(i).to_owned(),
@@ -495,7 +521,8 @@ impl LanceFullStore {
         }
         let schema = chunk_vectors_schema(self.dim);
         let doc_ids: Vec<i64> = chunks.iter().map(|c| c.doc_id).collect();
-        let chunk_idxs: Vec<i32> = chunks.iter().map(|c| c.chunk_index as i32).collect();
+        let lines: Vec<i32> = chunks.iter().map(|c| c.line as i32).collect();
+        let cols: Vec<i32> = chunks.iter().map(|c| c.column as i32).collect();
         let titles: Vec<&str> = chunks.iter().map(|c| c.doc_title.as_str()).collect();
         let paths: Vec<&str> = chunks.iter().map(|c| c.doc_path.as_str()).collect();
         let texts: Vec<&str> = chunks.iter().map(|c| c.text.as_str()).collect();
@@ -504,7 +531,8 @@ impl LanceFullStore {
             schema.clone(),
             vec![
                 Arc::new(Int64Array::from(doc_ids)),
-                Arc::new(Int32Array::from(chunk_idxs)),
+                Arc::new(Int32Array::from(lines)),
+                Arc::new(Int32Array::from(cols)),
                 Arc::new(StringArray::from(titles)),
                 Arc::new(StringArray::from(paths)),
                 Arc::new(StringArray::from(texts)),

@@ -6,9 +6,12 @@
 //!
 //! # Chunk identity
 //!
-//! Each chunk is identified by the pair `(doc_id, chunk_index)`.  `doc_id` is a
+//! Each chunk is identified by the pair `(doc_id, line)`.  `doc_id` is a
 //! stable i64 assigned by the caller (e.g. a path hash or application-level ID).
-//! `chunk_index` is reproducibly derived from the paragraph order of the body.
+//! `line` is the 0-based source line number of the chunk's first character in
+//! the original file, as produced by the [`Chunker`](crate::chunker::Chunker)
+//! trait.  This value is stored verbatim in the database so that search results
+//! carry a navigable source position with no extra lookup.
 
 use std::collections::HashSet;
 
@@ -16,14 +19,16 @@ use crate::error::Result;
 
 // ── public types ──────────────────────────────────────────────────────────────
 
-/// A single paragraph-level chunk derived from a document, ready to be embedded.
+/// A single text chunk derived from a document, ready to be embedded.
 #[derive(Debug, Clone)]
 pub struct Chunk {
     /// Stable document ID assigned by the caller.
     pub doc_id: i64,
-    /// Zero-based position of this paragraph in the document body.
-    pub chunk_index: usize,
-    /// Embeddable text: title prepended to the paragraph body.
+    /// Zero-based source line number where this chunk begins.
+    pub line: usize,
+    /// Zero-based byte column within `line` where this chunk begins.
+    pub column: usize,
+    /// Embeddable text: title prepended to the extracted chunk body.
     pub text: String,
     /// Denormalised document title (for display in search results).
     pub doc_title: String,
@@ -37,8 +42,13 @@ pub struct ChunkSearchResult {
     pub doc_id: i64,
     pub doc_title: String,
     pub doc_path: String,
-    /// Position of the matching chunk within the document (0-based).
-    pub chunk_index: usize,
+    /// Zero-based source line number of the matching chunk in the original file.
+    ///
+    /// A GUI can use this value directly to navigate to the exact location in
+    /// the source file and render surrounding context.
+    pub line: usize,
+    /// Zero-based byte column within `line` where the matching chunk begins.
+    pub column: usize,
     /// The text of the matching chunk.
     pub chunk_text: String,
     /// L2 distance (lower = more similar).
@@ -62,8 +72,8 @@ pub struct VecInfo {
 /// All methods are **synchronous**.  Backends that are inherently async
 /// (e.g. LanceDB) wrap their async operations in an internal Tokio runtime.
 pub trait VectorStore {
-    /// Return the `(doc_id, chunk_index)` pairs that already have embeddings
-    /// stored, so callers can compute the pending set.
+    /// Return the `(doc_id, line)` pairs that already have embeddings stored,
+    /// so callers can compute the pending set.
     fn embedded_chunk_keys(&self) -> Result<HashSet<(i64, usize)>>;
 
     /// Store embeddings for a batch of chunks.

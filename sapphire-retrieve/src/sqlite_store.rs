@@ -40,7 +40,12 @@ use crate::{
 // ── schema ────────────────────────────────────────────────────────────────────
 
 /// Stored in `PRAGMA user_version` of the SQLite retrieve DB.
-pub const SCHEMA_VERSION: i32 = 2;
+///
+/// Version history:
+/// - 1: initial schema
+/// - 2: sqlite-vec integration
+/// - 3: replace `chunk_index` with `line` + `column` (source positions)
+pub const SCHEMA_VERSION: i32 = 3;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS files (
@@ -65,11 +70,12 @@ CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
 );
 
 CREATE TABLE IF NOT EXISTS chunks (
-    id          INTEGER PRIMARY KEY,
-    doc_id      INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
-    chunk_index INTEGER NOT NULL,
-    text        TEXT    NOT NULL,
-    UNIQUE (doc_id, chunk_index)
+    id     INTEGER PRIMARY KEY,
+    doc_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    line   INTEGER NOT NULL,
+    col    INTEGER NOT NULL DEFAULT 0,
+    text   TEXT    NOT NULL,
+    UNIQUE (doc_id, line)
 );
 CREATE INDEX IF NOT EXISTS idx_chunks_doc_id ON chunks(doc_id);
 ";
@@ -310,7 +316,7 @@ impl RetrieveStore for SqliteStore {
         let conn = self.open_conn()?;
         let blob = vec_serialize(query_vec);
         let mut stmt = conn.prepare(
-            "SELECT d.id, d.title, d.path, c.chunk_index, c.text, cv.distance
+            "SELECT d.id, d.title, d.path, c.line, c.col, c.text, cv.distance
              FROM chunk_vectors cv
              JOIN chunks c ON c.id = cv.chunk_id
              JOIN documents d ON d.id = c.doc_id
@@ -323,9 +329,10 @@ impl RetrieveStore for SqliteStore {
                     doc_id: row.get::<_, i64>(0)?,
                     doc_title: row.get::<_, String>(1)?,
                     doc_path: row.get::<_, String>(2)?,
-                    chunk_index: row.get::<_, i64>(3)? as usize,
-                    chunk_text: row.get::<_, String>(4)?,
-                    score: row.get::<_, f64>(5).unwrap_or(0.0),
+                    line: row.get::<_, i64>(3)? as usize,
+                    column: row.get::<_, i64>(4)? as usize,
+                    chunk_text: row.get::<_, String>(5)?,
+                    score: row.get::<_, f64>(6).unwrap_or(0.0),
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -420,35 +427,63 @@ fn ensure_vec_tables(conn: &Connection, dim: u32) -> Result<()> {
 // ── chunk helpers ─────────────────────────────────────────────────────────────
 
 fn upsert_chunks(conn: &Connection, doc: &Document, has_vec: bool) -> Result<()> {
-    let chunk_texts = chunk_document(&doc.title, &doc.body);
+    // Build the list of (line, col, embed_text) tuples.
+    //
+    // When the caller provides pre-computed chunks (e.g. from JsonChunker),
+    // `line` is the 0-based source line number and `col` is the byte column.
+    // Otherwise we fall back to chunk_document() with sequential line=0,1,2,…
+    // and col=0.
+    let computed: Vec<(usize, usize, String)>;
+    let chunks: &[(usize, usize, String)] = if let Some(ref c) = doc.chunks {
+        c.as_slice()
+    } else {
+        computed = chunk_document(&doc.title, &doc.body)
+            .into_iter()
+            .enumerate()
+            .map(|(i, t)| (i, 0usize, t))
+            .collect();
+        &computed
+    };
 
-    // Delete excess chunks (handles body that shrank).
-    if has_vec {
+    let live_lines: std::collections::HashSet<i64> =
+        chunks.iter().map(|(line, _, _)| *line as i64).collect();
+
+    // Delete stale chunks (those no longer present in the new set).
+    let old_lines: Vec<i64> = {
+        let mut stmt = conn.prepare("SELECT line FROM chunks WHERE doc_id = ?1")?;
+        stmt.query_map([doc.id], |row| row.get::<_, i64>(0))?
+            .filter_map(|r| r.ok())
+            .filter(|l| !live_lines.contains(l))
+            .collect()
+    };
+    for line in old_lines {
+        if has_vec {
+            conn.execute(
+                "DELETE FROM chunk_vectors WHERE chunk_id = \
+                 (SELECT id FROM chunks WHERE doc_id = ?1 AND line = ?2)",
+                params![doc.id, line],
+            )?;
+        }
         conn.execute(
-            "DELETE FROM chunk_vectors WHERE chunk_id IN \
-             (SELECT id FROM chunks WHERE doc_id = ?1 AND chunk_index >= ?2)",
-            params![doc.id, chunk_texts.len() as i64],
+            "DELETE FROM chunks WHERE doc_id = ?1 AND line = ?2",
+            params![doc.id, line],
         )?;
     }
-    conn.execute(
-        "DELETE FROM chunks WHERE doc_id = ?1 AND chunk_index >= ?2",
-        params![doc.id, chunk_texts.len() as i64],
-    )?;
 
-    for (idx, text) in chunk_texts.iter().enumerate() {
+    // Upsert each chunk; if text changed, invalidate the stale embedding.
+    for (line, col, text) in chunks {
         conn.execute(
-            "INSERT INTO chunks (doc_id, chunk_index, text) VALUES (?1, ?2, ?3)
-             ON CONFLICT(doc_id, chunk_index) DO UPDATE
-             SET text = excluded.text
+            "INSERT INTO chunks (doc_id, line, col, text) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(doc_id, line) DO UPDATE
+             SET col = excluded.col, text = excluded.text
              WHERE text != excluded.text",
-            params![doc.id, idx as i64, text],
+            params![doc.id, *line as i64, *col as i64, text],
         )?;
-        // Row inserted or text changed → stale embedding no longer valid.
         if has_vec && conn.changes() > 0 {
             conn.execute(
                 "DELETE FROM chunk_vectors WHERE chunk_id = \
-                 (SELECT id FROM chunks WHERE doc_id = ?1 AND chunk_index = ?2)",
-                params![doc.id, idx as i64],
+                 (SELECT id FROM chunks WHERE doc_id = ?1 AND line = ?2)",
+                params![doc.id, *line as i64],
             )?;
         }
     }
@@ -459,7 +494,7 @@ fn upsert_chunks(conn: &Connection, doc: &Document, has_vec: bool) -> Result<()>
 
 fn sqlite_vec_embedded_keys(conn: &Connection) -> Result<HashSet<(i64, usize)>> {
     let mut stmt = conn.prepare(
-        "SELECT c.doc_id, c.chunk_index
+        "SELECT c.doc_id, c.line
          FROM chunks c
          JOIN chunk_vectors cv ON cv.chunk_id = c.id",
     )?;
@@ -477,7 +512,7 @@ fn collect_pending_chunks(
     embedded_keys: &HashSet<(i64, usize)>,
 ) -> Result<Vec<Chunk>> {
     let mut stmt = conn.prepare(
-        "SELECT c.doc_id, c.chunk_index, c.text, d.title, d.path
+        "SELECT c.doc_id, c.line, c.col, c.text, d.title, d.path
          FROM chunks c
          JOIN documents d ON d.id = c.doc_id",
     )?;
@@ -485,14 +520,15 @@ fn collect_pending_chunks(
         .query_map([], |row| {
             Ok(Chunk {
                 doc_id: row.get::<_, i64>(0)?,
-                chunk_index: row.get::<_, i64>(1)? as usize,
-                text: row.get::<_, String>(2)?,
-                doc_title: row.get::<_, String>(3)?,
-                doc_path: row.get::<_, String>(4)?,
+                line: row.get::<_, i64>(1)? as usize,
+                column: row.get::<_, i64>(2)? as usize,
+                text: row.get::<_, String>(3)?,
+                doc_title: row.get::<_, String>(4)?,
+                doc_path: row.get::<_, String>(5)?,
             })
         })?
         .filter_map(|r| r.ok())
-        .filter(|c| !embedded_keys.contains(&(c.doc_id, c.chunk_index)))
+        .filter(|c| !embedded_keys.contains(&(c.doc_id, c.line)))
         .collect();
     Ok(chunks)
 }
@@ -505,8 +541,8 @@ fn sqlite_vec_insert_embeddings(
     for (chunk, emb) in chunks.iter().zip(embeddings) {
         let chunk_id: Option<i64> = conn
             .query_row(
-                "SELECT id FROM chunks WHERE doc_id = ?1 AND chunk_index = ?2",
-                params![chunk.doc_id, chunk.chunk_index as i64],
+                "SELECT id FROM chunks WHERE doc_id = ?1 AND line = ?2",
+                params![chunk.doc_id, chunk.line as i64],
                 |row| row.get(0),
             )
             .ok();
