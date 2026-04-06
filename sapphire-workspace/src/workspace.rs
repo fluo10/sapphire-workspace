@@ -185,7 +185,7 @@ fn resolve_cwd() -> Result<PathBuf> {
 /// versions to keep cache locations stable.
 fn cache_uuid(root: &Path) -> uuid::Uuid {
     const NAMESPACE: uuid::Uuid =
-        uuid::uuid!("c3d4e5f6-a7b8-3c9d-8e0f-1a2b3c4d5e6f");
+        uuid::uuid!("4630204d-be95-46b2-9d37-93cb897aac7e");
     let canonical = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_owned());
     uuid::Uuid::new_v3(&NAMESPACE, canonical.as_os_str().as_encoded_bytes())
 }
