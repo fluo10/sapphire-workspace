@@ -22,7 +22,7 @@ impl Workspace {
     // ── marker-based discovery ────────────────────────────────────────────────
 
     /// Walk up from `start` until a directory containing `.{ctx.app_name}` is found.
-    pub fn find_from_with_ctx(start: &Path, ctx: &'static AppContext) -> Result<Self> {
+    pub fn find_from(ctx: &'static AppContext, start: &Path) -> Result<Self> {
         let start = start
             .canonicalize()
             .map_err(|e| Error::Access { path: start.to_owned(), source: e })?;
@@ -45,14 +45,14 @@ impl Workspace {
     }
 
     /// Walk up from the current working directory using `.{ctx.app_name}` as the marker.
-    pub fn find_with_ctx(ctx: &'static AppContext) -> Result<Self> {
-        Self::find_from_with_ctx(&std::env::current_dir()?, ctx)
+    pub fn find(ctx: &'static AppContext) -> Result<Self> {
+        Self::find_from(ctx, &std::env::current_dir()?)
     }
 
     /// Open a workspace at `root` that already has `.{ctx.app_name}` dir present.
     ///
     /// Returns an error if the marker directory does not exist.
-    pub fn from_root_with_ctx(root: &Path, ctx: &'static AppContext) -> Result<Self> {
+    pub fn from_root(ctx: &'static AppContext, root: &Path) -> Result<Self> {
         let root = root
             .canonicalize()
             .map_err(|e| Error::Access { path: root.to_owned(), source: e })?;
@@ -84,7 +84,7 @@ impl Workspace {
     /// 1. `explicit` parameter (no confirmation prompt)
     /// 2. `SAPPHIRE_WORKSPACE_DIR` env var (no confirmation prompt)
     /// 3. Current working directory (TTY: ask for confirmation; non-TTY: use directly)
-    pub fn resolve(explicit: Option<&Path>, ctx: &'static AppContext) -> Result<Self> {
+    pub fn resolve(ctx: &'static AppContext, explicit: Option<&Path>) -> Result<Self> {
         let root = if let Some(dir) = explicit {
             dir.canonicalize()
                 .map_err(|e| Error::Access { path: dir.to_owned(), source: e })?

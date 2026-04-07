@@ -44,14 +44,14 @@ pub fn open_workspace(
         std::borrow::Cow::Owned(std::env::current_dir()?)
     };
 
-    match Workspace::find_from_with_ctx(&start, &WORKSPACE_CTX) {
+    match Workspace::find_from(&WORKSPACE_CTX, &start) {
         Ok(ws) => {
             let config = WorkspaceConfig::load_from(&ws.config_path())?;
             Ok((ws, Some(config)))
         }
         Err(_) => {
             // No marker found — fall back to legacy resolution.
-            let ws = Workspace::resolve(explicit, &WORKSPACE_CTX)?;
+            let ws = Workspace::resolve(&WORKSPACE_CTX, explicit)?;
             Ok((ws, None))
         }
     }

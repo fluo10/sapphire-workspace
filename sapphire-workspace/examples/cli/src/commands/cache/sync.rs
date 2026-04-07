@@ -6,7 +6,7 @@ use sapphire_workspace::{UserConfig, Workspace, WorkspaceState};
 use crate::WORKSPACE_CTX;
 
 pub fn run(workspace_dir: Option<&Path>) -> Result<()> {
-    let workspace = Workspace::resolve(workspace_dir, &WORKSPACE_CTX)?;
+    let workspace = Workspace::resolve(&WORKSPACE_CTX, workspace_dir)?;
     let config = UserConfig::load()?;
     let state = WorkspaceState::open(workspace)?;
 

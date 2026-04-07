@@ -47,7 +47,7 @@ impl RecallServer {
     {
         let mut guard = self.state.lock().unwrap();
         if guard.is_none() {
-            let workspace = Workspace::resolve(self.default_dir.as_deref(), &WORKSPACE_CTX)?;
+            let workspace = Workspace::resolve(&WORKSPACE_CTX, self.default_dir.as_deref())?;
             let state = WorkspaceState::open(workspace)?;
             let config = UserConfig::load()?;
             if config.embedding.as_ref().map(|e| e.enabled).unwrap_or(false) {
@@ -116,9 +116,9 @@ impl RecallServer {
             let mut guard = self.state.lock().unwrap();
             let workspace_root = match guard.as_ref() {
                 Some(s) => s.workspace.root.clone(),
-                None => Workspace::resolve(self.default_dir.as_deref(), &WORKSPACE_CTX)?.root,
+                None => Workspace::resolve(&WORKSPACE_CTX, self.default_dir.as_deref())?.root,
             };
-            let state = WorkspaceState::rebuild(Workspace::from_root_with_ctx(&workspace_root, &WORKSPACE_CTX)?)?;
+            let state = WorkspaceState::rebuild(Workspace::from_root(&WORKSPACE_CTX, &workspace_root)?)?;
             let (upserted, _removed) = state.sync()?;
             *guard = Some(state);
             Ok(format!("rebuilt: {upserted} files indexed"))
