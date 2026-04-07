@@ -19,7 +19,7 @@ fastembed-embed = ["sapphire-workspace/fastembed-embed"]
 git-sync        = ["sapphire-workspace/git-sync"]
 
 [dependencies]
-sapphire-workspace = { version = "0.4.0", path = "../..", default-features = false }
+sapphire-workspace = { version = "0.5.0", path = "../..", default-features = false }
 clap.workspace = true
 anyhow.workspace = true
 serde.workspace = true

@@ -18,27 +18,31 @@ Workspace management library for indexing, search, and sync of Markdown document
 
 ```toml
 [dependencies]
-sapphire-workspace = "0.4"
+sapphire-workspace = "0.5"
 ```
 
 ### Initialise a workspace
 
 ```rust
-use sapphire_workspace::Workspace;
+use sapphire_workspace::{AppContext, Workspace};
 
-// Walk up from cwd until a `.sapphire-workspace` directory is found.
-let ws = Workspace::find()?;
+let ctx = AppContext::new("my-app");
+
+// Walk up from cwd until a `.my-app` marker directory is found.
+let ws = Workspace::find_with_ctx(ctx, std::env::current_dir()?)?;
 println!("root: {}", ws.root.display());
-println!("cache: {}", ws.cache_dir().display());
+println!("uuid: {}", ws.uuid);
+println!("cache: {}", ws.ctx.cache_dir().display());
 ```
 
 ### Open and index
 
 ```rust
-use sapphire_workspace::{Workspace, WorkspaceState};
+use sapphire_workspace::{AppContext, Workspace, WorkspaceState};
 
-let ws = Workspace::find()?;
-let state = WorkspaceState::open(ws)?;
+let ctx = AppContext::new("my-app");
+let ws = Workspace::find_with_ctx(ctx.clone(), std::env::current_dir()?)?;
+let state = WorkspaceState::open(ws, ctx)?;
 
 // Incrementally sync all Markdown / JSON / JSONL files into the retrieve DB.
 let (upserted, removed) = state.sync()?;
@@ -83,13 +87,14 @@ state.delete_file(Path::new("notes/old.md"))?;
 ## Workspace discovery
 
 A workspace root is detected by walking up the directory tree until a
-`.sapphire-workspace/` marker directory is found.  Host applications can
-supply a custom `app_name` (e.g. `"sapphire-journal"`) via the
-`_with_app_name` construction methods so that marker directories and XDG caches
+marker directory is found.  Pass an `AppContext` to every construction
+method to set the `app_name` so that marker directories and XDG caches
 use the host application's namespace:
 
 ```rust
-let ws = Workspace::find_with_app_name("sapphire-journal")?;
+use sapphire_workspace::AppContext;
+
+let ctx = AppContext::new("sapphire-journal");
 // marker: {root}/.sapphire-journal/
 // cache:  $XDG_CACHE_HOME/sapphire-journal/{uuid}/
 ```
@@ -112,25 +117,28 @@ Place `config.toml` inside the marker directory
 
 ```toml
 [sync]
-backend = "git"   # "auto" | "git" | "none"
-remote  = "origin"
-branch  = "main"
+backend  = "git"   # "auto" | "git" | "none"
+remote   = "origin"
+branch   = "main"
+# sync_interval_minutes = 30  # optional: run a full sync cycle every N minutes
 
-[embedding]
-enabled    = true
-provider   = "openai"
-model      = "text-embedding-3-small"
+[retrieve]
+db = "lancedb"   # "none" | "sqlite_vec" | "lancedb"
+
+[retrieve.embedding]
+enabled     = true
+provider    = "openai"
+model       = "text-embedding-3-small"
 api_key_env = "OPENAI_API_KEY"
-vector_db  = "lancedb"   # "none" | "sqlite_vec" | "lancedb"
-dimension  = 1536
+dimension   = 1536
 ```
 
-Environment variable overrides (prefix `SAPPHIRE_WORKSPACE_EMBEDDING_`):
+Environment variable overrides:
 
 | Variable | Values |
 |---|---|
+| `SAPPHIRE_WORKSPACE_RETRIEVE_DB` | `none` / `sqlite_vec` / `lancedb` |
 | `SAPPHIRE_WORKSPACE_EMBEDDING_ENABLED` | `1` / `true` / `yes` |
-| `SAPPHIRE_WORKSPACE_EMBEDDING_VECTOR_DB` | `none` / `sqlite_vec` / `lancedb` |
 | `SAPPHIRE_WORKSPACE_EMBEDDING_PROVIDER` | string |
 | `SAPPHIRE_WORKSPACE_EMBEDDING_MODEL` | string |
 | `SAPPHIRE_WORKSPACE_EMBEDDING_API_KEY_ENV` | env-var name |
