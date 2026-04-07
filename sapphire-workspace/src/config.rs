@@ -223,13 +223,5 @@ impl EmbeddingConfig {
 }
 
 fn xdg_config_home() -> PathBuf {
-    if let Ok(dir) = std::env::var("XDG_CONFIG_HOME") {
-        if !dir.is_empty() {
-            return PathBuf::from(dir);
-        }
-    }
-    if let Ok(home) = std::env::var("HOME") {
-        return PathBuf::from(home).join(".config");
-    }
-    std::env::temp_dir()
+    dirs::config_dir().unwrap_or_else(std::env::temp_dir)
 }
