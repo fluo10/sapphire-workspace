@@ -4,20 +4,11 @@ use std::path::{Path, PathBuf};
 use crate::context::AppContext;
 use crate::error::{Error, Result};
 
-/// Application name used by default when constructing a [`Workspace`].
+/// Marker directory name for the default workspace app (`"sapphire-workspace"`).
 ///
-/// The corresponding marker directory name is `".sapphire-workspace"`.
-pub const DEFAULT_APP_NAME: &str = "sapphire-workspace";
-
-/// Marker directory name used for workspace root detection (legacy; kept for
-/// code that constructs the marker directory directly, e.g. `init`).
-///
-/// Equal to `format!(".{DEFAULT_APP_NAME}")`.
+/// Used when creating or locating the marker directory without a custom
+/// [`AppContext`] — primarily in the bundled CLI example.
 pub const DEFAULT_WORKSPACE_MARKER: &str = ".sapphire-workspace";
-
-/// Default [`AppContext`] used when a workspace is opened without an explicit
-/// context.
-pub static DEFAULT_CTX: AppContext = AppContext::new(DEFAULT_APP_NAME);
 
 /// A resolved workspace directory.
 pub struct Workspace {
@@ -58,16 +49,6 @@ impl Workspace {
         Self::find_from_with_ctx(&std::env::current_dir()?, ctx)
     }
 
-    /// Walk up from `start` using the default context ([`DEFAULT_CTX`]).
-    pub fn find_from(start: &Path) -> Result<Self> {
-        Self::find_from_with_ctx(start, &DEFAULT_CTX)
-    }
-
-    /// Walk up from the current working directory using the default context.
-    pub fn find() -> Result<Self> {
-        Self::find_with_ctx(&DEFAULT_CTX)
-    }
-
     /// Open a workspace at `root` that already has `.{ctx.app_name}` dir present.
     ///
     /// Returns an error if the marker directory does not exist.
@@ -80,11 +61,6 @@ impl Workspace {
             return Err(Error::MarkerDirMissing { marker, root });
         }
         Ok(Self { root, ctx })
-    }
-
-    /// Open a workspace at `root` using the default context.
-    pub fn from_root(root: &Path) -> Result<Self> {
-        Self::from_root_with_ctx(root, &DEFAULT_CTX)
     }
 
     /// `true` if the marker directory (`.{app_name}`) exists under `root`.
@@ -108,7 +84,7 @@ impl Workspace {
     /// 1. `explicit` parameter (no confirmation prompt)
     /// 2. `SAPPHIRE_WORKSPACE_DIR` env var (no confirmation prompt)
     /// 3. Current working directory (TTY: ask for confirmation; non-TTY: use directly)
-    pub fn resolve(explicit: Option<&Path>) -> Result<Self> {
+    pub fn resolve(explicit: Option<&Path>, ctx: &'static AppContext) -> Result<Self> {
         let root = if let Some(dir) = explicit {
             dir.canonicalize()
                 .map_err(|e| Error::Access { path: dir.to_owned(), source: e })?
@@ -123,7 +99,7 @@ impl Workspace {
         } else {
             resolve_cwd()?
         };
-        Ok(Self { root, ctx: &DEFAULT_CTX })
+        Ok(Self { root, ctx })
     }
 
     // ── identity / cache paths ────────────────────────────────────────────────

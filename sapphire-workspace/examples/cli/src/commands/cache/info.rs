@@ -3,8 +3,10 @@ use std::path::Path;
 use anyhow::Result;
 use sapphire_workspace::{UserConfig, VectorDb, Workspace, WorkspaceState, RETRIEVE_SCHEMA_VERSION as SCHEMA_VERSION};
 
+use crate::WORKSPACE_CTX;
+
 pub fn run(workspace_dir: Option<&Path>) -> Result<()> {
-    let workspace = Workspace::resolve(workspace_dir)?;
+    let workspace = Workspace::resolve(workspace_dir, &WORKSPACE_CTX)?;
     let config = UserConfig::load()?;
     let state = WorkspaceState::open(workspace)?;
 

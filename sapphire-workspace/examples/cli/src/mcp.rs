@@ -11,6 +11,8 @@ use rmcp::{
     transport::stdio,
 };
 use sapphire_workspace::{RetrieveDb, UserConfig, Workspace, WorkspaceState};
+
+use crate::WORKSPACE_CTX;
 use serde::Deserialize;
 
 // ── server struct ─────────────────────────────────────────────────────────────
@@ -45,7 +47,7 @@ impl RecallServer {
     {
         let mut guard = self.state.lock().unwrap();
         if guard.is_none() {
-            let workspace = Workspace::resolve(self.default_dir.as_deref())?;
+            let workspace = Workspace::resolve(self.default_dir.as_deref(), &WORKSPACE_CTX)?;
             let state = WorkspaceState::open(workspace)?;
             let config = UserConfig::load()?;
             if config.embedding.as_ref().map(|e| e.enabled).unwrap_or(false) {
@@ -114,9 +116,9 @@ impl RecallServer {
             let mut guard = self.state.lock().unwrap();
             let workspace_root = match guard.as_ref() {
                 Some(s) => s.workspace.root.clone(),
-                None => Workspace::resolve(self.default_dir.as_deref())?.root,
+                None => Workspace::resolve(self.default_dir.as_deref(), &WORKSPACE_CTX)?.root,
             };
-            let state = WorkspaceState::rebuild(Workspace::from_root(&workspace_root)?)?;
+            let state = WorkspaceState::rebuild(Workspace::from_root_with_ctx(&workspace_root, &WORKSPACE_CTX)?)?;
             let (upserted, _removed) = state.sync()?;
             *guard = Some(state);
             Ok(format!("rebuilt: {upserted} files indexed"))

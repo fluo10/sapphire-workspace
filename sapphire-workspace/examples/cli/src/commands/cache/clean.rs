@@ -4,9 +4,10 @@ use anyhow::Result;
 use sapphire_workspace::Workspace;
 
 use super::info::{find_stale_retrieve, human_size};
+use crate::WORKSPACE_CTX;
 
 pub fn run(workspace_dir: Option<&Path>) -> Result<()> {
-    let workspace = Workspace::resolve(workspace_dir)?;
+    let workspace = Workspace::resolve(workspace_dir, &WORKSPACE_CTX)?;
     let cache_dir = workspace.cache_dir();
     let mut removed_any = false;
 

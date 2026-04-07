@@ -9,7 +9,7 @@ pub use error::{Error, Result};
 
 pub use config::{EmbeddingConfig, SyncBackendKind, SyncConfig, UserConfig, VectorDb, WorkspaceConfig};
 pub use context::AppContext;
-pub use workspace::{DEFAULT_APP_NAME, DEFAULT_CTX, DEFAULT_WORKSPACE_MARKER, path_uuid};
+pub use workspace::{DEFAULT_WORKSPACE_MARKER, path_uuid};
 pub use indexer::path_to_doc_id;
 pub use workspace::Workspace;
 pub use workspace_state::{DbInfo, WorkspaceState};

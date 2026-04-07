@@ -3,8 +3,10 @@ use std::{io::Write as _, path::Path};
 use anyhow::Result;
 use sapphire_workspace::{UserConfig, VectorDb, Workspace, WorkspaceState};
 
+use crate::WORKSPACE_CTX;
+
 pub fn run(workspace_dir: Option<&Path>) -> Result<()> {
-    let workspace = Workspace::resolve(workspace_dir)?;
+    let workspace = Workspace::resolve(workspace_dir, &WORKSPACE_CTX)?;
     let config = UserConfig::load()?;
 
     let embed_cfg = config.embedding.as_ref().ok_or_else(|| {

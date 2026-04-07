@@ -3,6 +3,10 @@ mod mcp;
 
 use std::path::PathBuf;
 
+use sapphire_workspace::AppContext;
+
+pub static WORKSPACE_CTX: AppContext = AppContext::new("sapphire-workspace");
+
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
