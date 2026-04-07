@@ -16,6 +16,14 @@ pub struct Workspace {
     pub root: PathBuf,
     /// Application context providing the app name and cache base directory.
     pub ctx: &'static AppContext,
+    /// Stable identifier for this workspace.
+    ///
+    /// Defaults to the UUIDv8 derived from the canonicalized root path (see
+    /// [`path_uuid`]).  Can be overridden at construction time via
+    /// [`from_root_with_uuid`](Self::from_root_with_uuid) so that callers
+    /// (e.g. mobile hosts) can supply the workspace directory name directly as
+    /// the identifier.
+    pub uuid: uuid::Uuid,
 }
 
 impl Workspace {
@@ -30,7 +38,7 @@ impl Workspace {
         let mut current = start.as_path();
         loop {
             if current.join(&marker).is_dir() {
-                return Ok(Self { root: current.to_owned(), ctx });
+                return Ok(Self { root: current.to_owned(), uuid: path_uuid(current), ctx });
             }
             match current.parent() {
                 Some(p) => current = p,
@@ -60,7 +68,7 @@ impl Workspace {
         if !root.join(&marker).is_dir() {
             return Err(Error::MarkerDirMissing { marker, root });
         }
-        Ok(Self { root, ctx })
+        Ok(Self { uuid: path_uuid(&root), root, ctx })
     }
 
     /// `true` if the marker directory (`.{app_name}`) exists under `root`.
@@ -99,30 +107,59 @@ impl Workspace {
         } else {
             resolve_cwd()?
         };
-        Ok(Self { root, ctx })
+        Ok(Self { uuid: path_uuid(&root), root, ctx })
+    }
+
+    // ── override constructors ─────────────────────────────────────────────────
+
+    /// Open a workspace at `root`, using `id` as the workspace UUID instead of
+    /// deriving one from the path.
+    ///
+    /// Useful on mobile (and similar) platforms where the workspace directory
+    /// name is itself a canonical unique identifier and should be reused
+    /// directly as the cache-directory key.
+    ///
+    /// The marker directory (`.{ctx.app_name}`) must already exist under `root`.
+    pub fn from_root_with_uuid(ctx: &'static AppContext, root: &Path, id: uuid::Uuid) -> Result<Self> {
+        let root = root
+            .canonicalize()
+            .map_err(|e| Error::Access { path: root.to_owned(), source: e })?;
+        let marker = format!(".{}", ctx.app_name);
+        if !root.join(&marker).is_dir() {
+            return Err(Error::MarkerDirMissing { marker, root });
+        }
+        Ok(Self { uuid: id, root, ctx })
+    }
+
+    /// Open a workspace at `root`, using `id` as the UUID and `app_name` as
+    /// the marker-directory / cache name instead of the context default.
+    ///
+    /// A new [`AppContext`] is heap-allocated and leaked to satisfy the
+    /// `'static` lifetime requirement.  This is appropriate for long-lived
+    /// application contexts (e.g. mobile app startup).
+    pub fn from_root_with_uuid_with_app_name(root: &Path, id: uuid::Uuid, app_name: &'static str) -> Result<Self> {
+        let ctx: &'static AppContext = Box::leak(Box::new(AppContext::new(app_name)));
+        Self::from_root_with_uuid(ctx, root, id)
     }
 
     // ── identity / cache paths ────────────────────────────────────────────────
 
-    /// Stable UUIDv8 identifier derived from the canonicalized workspace root.
+    /// Returns the workspace UUID.
     ///
-    /// The value is computed by taking the MD5 hash of the canonical path and
-    /// rewriting the version/variant nibbles to produce a valid UUIDv8.  This
-    /// gives a compact, collision-resistant, human-readable identifier that
-    /// does not depend on any external namespace constant.
-    ///
-    /// The UUID is never persisted — it is recomputed from the filesystem path
-    /// on every call.  It is stable for the lifetime of the root directory.
+    /// By default this is a stable UUIDv8 derived from the canonicalized root
+    /// path (see [`path_uuid`]).  When the workspace was constructed via
+    /// [`from_root_with_uuid`](Self::from_root_with_uuid) the supplied UUID is
+    /// returned instead.
     pub fn uuid(&self) -> uuid::Uuid {
-        path_uuid(&self.root)
+        self.uuid
     }
 
     /// `{ctx.cache_dir}/{uuid}/`
     ///
-    /// The UUID is a stable UUIDv8 derived from the canonicalized workspace
-    /// root path (see [`uuid`](Self::uuid)).
+    /// Uses [`self.uuid`](Self::uuid), so the cache path matches the workspace
+    /// directory name when an explicit UUID was provided at construction time.
     pub fn cache_dir(&self) -> PathBuf {
-        self.ctx.cache_dir_for(&self.root)
+        self.ctx.cache_dir().join(self.uuid.to_string())
     }
 
     /// Path to the SQLite retrieve database file.
