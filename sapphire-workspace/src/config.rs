@@ -1,23 +1,23 @@
 use std::path::{Path, PathBuf};
 
-use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+
+// Re-export config types from their home crates.
+pub use sapphire_retrieve::config::{EmbeddingConfig, RetrieveConfig, VectorDb};
+pub use sapphire_sync::config::{SyncBackendKind, SyncConfig};
 
 // ── WorkspaceConfig (per-workspace, stored in {marker}/config.toml) ──────────
 
 /// All settings for a workspace.  Stored in `.sapphire-workspace/config.toml`
 /// (or whichever marker directory the workspace uses).
-///
-/// This is the primary config for `sapphire-workspace`.  The legacy [`UserConfig`]
-/// (XDG path) is kept for backward compatibility when no marker directory exists.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct WorkspaceConfig {
     #[serde(default)]
     pub sync: SyncConfig,
     #[serde(default)]
-    pub embedding: Option<EmbeddingConfig>,
+    pub retrieve: RetrieveConfig,
 }
 
 impl WorkspaceConfig {
@@ -41,47 +41,12 @@ impl WorkspaceConfig {
         Ok(())
     }
 
-    /// Convert to [`UserConfig`] for use with [`WorkspaceState`] methods that
-    /// still accept the legacy type.
+    /// Convert to [`UserConfig`] for use with [`WorkspaceState`](crate::WorkspaceState) methods.
     pub fn to_user_config(&self) -> UserConfig {
         UserConfig {
-            embedding: self.embedding.clone(),
+            retrieve: Some(self.retrieve.clone()),
         }
     }
-}
-
-/// Sync backend selection and options (`[sync]` section).
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct SyncConfig {
-    #[serde(default)]
-    pub backend: SyncBackendKind,
-    /// Remote name used by the git backend (default: `"origin"`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub remote: Option<String>,
-    /// Branch name (default: current HEAD branch).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub branch: Option<String>,
-}
-
-impl SyncConfig {
-    /// Effective remote name (falls back to `"origin"`).
-    pub fn remote(&self) -> &str {
-        self.remote.as_deref().unwrap_or("origin")
-    }
-}
-
-/// Supported sync backend variants.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum SyncBackendKind {
-    /// Auto-detect: use git if the workspace is inside a git repository,
-    /// otherwise no sync (local-only).  This is the default.
-    #[default]
-    Auto,
-    /// Explicitly disable sync — local-only even inside a git repository.
-    None,
-    /// Git-based sync (commit → pull → push via `sapphire-workspace sync`).
-    Git,
 }
 
 // ── UserConfig (legacy, XDG path, backward compat) ───────────────────────────
@@ -92,13 +57,14 @@ pub enum SyncBackendKind {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct UserConfig {
     #[serde(default)]
-    pub embedding: Option<EmbeddingConfig>,
+    pub retrieve: Option<RetrieveConfig>,
 }
 
 impl UserConfig {
     /// Canonical path: `$XDG_CONFIG_HOME/sapphire-workspace-cli/config.toml`.
     pub fn path() -> PathBuf {
-        xdg_config_home()
+        dirs::config_dir()
+            .unwrap_or_else(std::env::temp_dir)
             .join("sapphire-workspace-cli")
             .join("config.toml")
     }
@@ -120,10 +86,7 @@ impl UserConfig {
     }
 
     fn apply_env_overrides(&mut self) {
-        let enabled = std::env::var("SAPPHIRE_WORKSPACE_EMBEDDING_ENABLED")
-            .ok()
-            .map(|v| matches!(v.as_str(), "1" | "true" | "yes"));
-        let vector_db = std::env::var("SAPPHIRE_WORKSPACE_EMBEDDING_VECTOR_DB")
+        let db = std::env::var("SAPPHIRE_WORKSPACE_RETRIEVE_DB")
             .ok()
             .and_then(|v| match v.as_str() {
                 "none" => Some(VectorDb::None),
@@ -131,6 +94,9 @@ impl UserConfig {
                 "lancedb" => Some(VectorDb::LanceDb),
                 _ => None,
             });
+        let enabled = std::env::var("SAPPHIRE_WORKSPACE_EMBEDDING_ENABLED")
+            .ok()
+            .map(|v| matches!(v.as_str(), "1" | "true" | "yes"));
         let provider = std::env::var("SAPPHIRE_WORKSPACE_EMBEDDING_PROVIDER").ok();
         let model = std::env::var("SAPPHIRE_WORKSPACE_EMBEDDING_MODEL").ok();
         let api_key_env = std::env::var("SAPPHIRE_WORKSPACE_EMBEDDING_API_KEY_ENV").ok();
@@ -139,8 +105,8 @@ impl UserConfig {
             .ok()
             .and_then(|v| v.parse::<u32>().ok());
 
-        let any = enabled.is_some()
-            || vector_db.is_some()
+        let any = db.is_some()
+            || enabled.is_some()
             || provider.is_some()
             || model.is_some()
             || api_key_env.is_some()
@@ -148,18 +114,10 @@ impl UserConfig {
             || dimension.is_some();
 
         if any {
-            let embed = self.embedding.get_or_insert_with(|| EmbeddingConfig {
-                enabled: false,
-                vector_db: VectorDb::default(),
-                provider: String::new(),
-                model: String::new(),
-                api_key_env: None,
-                base_url: None,
-                dimension: None,
-                extra: IndexMap::new(),
-            });
+            let retrieve = self.retrieve.get_or_insert_with(RetrieveConfig::default);
+            if let Some(v) = db { retrieve.db = v; }
+            let embed = retrieve.embedding.get_or_insert_with(EmbeddingConfig::default);
             if let Some(v) = enabled { embed.enabled = v; }
-            if let Some(v) = vector_db { embed.vector_db = v; }
             if let Some(v) = provider { embed.provider = v; }
             if let Some(v) = model { embed.model = v; }
             if let Some(v) = api_key_env { embed.api_key_env = Some(v); }
@@ -167,69 +125,4 @@ impl UserConfig {
             if let Some(v) = dimension { embed.dimension = Some(v); }
         }
     }
-}
-
-// ── Shared types ──────────────────────────────────────────────────────────────
-
-/// Vector database backend for approximate (semantic) search.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum VectorDb {
-    #[default]
-    None,
-    SqliteVec,
-    #[serde(rename = "lancedb")]
-    LanceDb,
-}
-
-impl VectorDb {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            VectorDb::None => "none",
-            VectorDb::SqliteVec => "sqlite_vec",
-            VectorDb::LanceDb => "lancedb",
-        }
-    }
-}
-
-/// Text embedding provider configuration (`[embedding]` section).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EmbeddingConfig {
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default)]
-    pub vector_db: VectorDb,
-    pub provider: String,
-    pub model: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub api_key_env: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub base_url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub dimension: Option<u32>,
-    #[serde(flatten)]
-    pub extra: IndexMap<String, toml::Value>,
-}
-
-impl EmbeddingConfig {
-    pub fn to_retrieve_embed_config(&self) -> sapphire_retrieve::EmbeddingConfig {
-        sapphire_retrieve::EmbeddingConfig {
-            provider: self.provider.clone(),
-            model: self.model.clone(),
-            api_key_env: self.api_key_env.clone(),
-            base_url: self.base_url.clone(),
-        }
-    }
-}
-
-fn xdg_config_home() -> PathBuf {
-    if let Ok(dir) = std::env::var("XDG_CONFIG_HOME") {
-        if !dir.is_empty() {
-            return PathBuf::from(dir);
-        }
-    }
-    if let Ok(home) = std::env::var("HOME") {
-        return PathBuf::from(home).join(".config");
-    }
-    std::env::temp_dir()
 }

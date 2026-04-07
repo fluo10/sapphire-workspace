@@ -12,6 +12,8 @@ use crate::{
     workspace::Workspace,
 };
 
+use sapphire_retrieve::build_embedder;
+
 /// An open workspace paired with its lazily-initialised search infrastructure.
 pub struct WorkspaceState {
     pub workspace: Workspace,
@@ -285,30 +287,20 @@ impl WorkspaceState {
 
     /// Initialise the vector backend (sync). Idempotent.
     pub fn load_retrieve_backend(&self, config: &UserConfig) -> Result<()> {
-        let Some(embed_cfg) = &config.embedding else {
-            return Ok(());
-        };
-        if !embed_cfg.enabled {
-            return Ok(());
-        }
-        let Some(dim) = embed_cfg.dimension else {
-            return Ok(());
-        };
-        self.init_vector_backend(embed_cfg.vector_db, dim)
+        let Some(retrieve) = &config.retrieve else { return Ok(()); };
+        let Some(embed_cfg) = &retrieve.embedding else { return Ok(()); };
+        if !embed_cfg.enabled { return Ok(()); }
+        let Some(dim) = embed_cfg.dimension else { return Ok(()); };
+        self.init_vector_backend(retrieve.db, dim)
     }
 
     /// Async version of [`load_retrieve_backend`](Self::load_retrieve_backend).
     pub async fn load_retrieve_backend_async(&self, config: &UserConfig) -> Result<()> {
-        let Some(embed_cfg) = &config.embedding else {
-            return Ok(());
-        };
-        if !embed_cfg.enabled {
-            return Ok(());
-        }
-        let Some(dim) = embed_cfg.dimension else {
-            return Ok(());
-        };
-        let vector_db = embed_cfg.vector_db;
+        let Some(retrieve) = &config.retrieve else { return Ok(()); };
+        let Some(embed_cfg) = &retrieve.embedding else { return Ok(()); };
+        if !embed_cfg.enabled { return Ok(()); }
+        let Some(dim) = embed_cfg.dimension else { return Ok(()); };
+        let vector_db = retrieve.db;
 
         #[cfg(feature = "lancedb-store")]
         if vector_db == VectorDb::LanceDb {
@@ -354,10 +346,15 @@ impl WorkspaceState {
             return Ok(());
         }
         let embedder = config
-            .embedding
+            .retrieve
             .as_ref()
+            .and_then(|r| r.embedding.as_ref())
             .filter(|c| c.enabled)
-            .map(|c| sapphire_retrieve::build_embedder(&c.to_retrieve_embed_config()))
+            .map(|c| {
+                let mut cfg = c.to_embedder_config();
+                cfg.cache_dir = Some(self.workspace.ctx.model_cache_dir());
+                build_embedder(&cfg)
+            })
             .transpose()?;
         let _ = self.embedder.set(embedder);
         Ok(())
@@ -365,13 +362,19 @@ impl WorkspaceState {
 
     /// Async version of [`load_embedder`](Self::load_embedder).
     pub async fn load_embedder_async(&self, config: &UserConfig) -> Result<()> {
+        let model_cache_dir = self.workspace.ctx.model_cache_dir();
         self.embedder
             .get_or_try_init(|| async {
                 config
-                    .embedding
+                    .retrieve
                     .as_ref()
+                    .and_then(|r| r.embedding.as_ref())
                     .filter(|c| c.enabled)
-                    .map(|c| sapphire_retrieve::build_embedder(&c.to_retrieve_embed_config()))
+                    .map(|c| {
+                        let mut cfg = c.to_embedder_config();
+                        cfg.cache_dir = Some(model_cache_dir.clone());
+                        build_embedder(&cfg)
+                    })
                     .transpose()
             })
             .await?;
@@ -391,7 +394,8 @@ impl WorkspaceState {
     pub async fn sync_and_embed(&self, config: &UserConfig) -> Result<(usize, usize, usize)> {
         let (upserted, removed) = sync_workspace(&self.workspace, &self.retrieve_db)?;
 
-        let Some(embed_cfg) = &config.embedding else {
+        let embed_cfg = config.retrieve.as_ref().and_then(|r| r.embedding.as_ref());
+        let Some(embed_cfg) = embed_cfg else {
             return Ok((upserted, removed, 0));
         };
         if !embed_cfg.enabled {
@@ -415,12 +419,9 @@ impl WorkspaceState {
         config: &UserConfig,
         on_progress: impl Fn(usize, usize),
     ) -> Result<usize> {
-        let Some(embed_cfg) = &config.embedding else {
-            return Ok(0);
-        };
-        if !embed_cfg.enabled {
-            return Ok(0);
-        }
+        let embed_cfg = config.retrieve.as_ref().and_then(|r| r.embedding.as_ref());
+        let Some(embed_cfg) = embed_cfg else { return Ok(0); };
+        if !embed_cfg.enabled { return Ok(0); }
         self.load_retrieve_backend(config)?;
         self.load_embedder(config)?;
         let Some(embedder) = self.embedder() else {

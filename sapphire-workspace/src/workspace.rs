@@ -1,49 +1,36 @@
 use std::io::IsTerminal as _;
 use std::path::{Path, PathBuf};
 
+use crate::context::AppContext;
 use crate::error::{Error, Result};
 
-/// Application name used by default when constructing a [`Workspace`].
+/// Marker directory name for the default workspace app (`"sapphire-workspace"`).
 ///
-/// The corresponding marker directory name is `".sapphire-workspace"`.
-pub const DEFAULT_APP_NAME: &str = "sapphire-workspace";
-
-/// Marker directory name used for workspace root detection (legacy; kept for
-/// code that constructs the marker directory directly, e.g. `init`).
-///
-/// Equal to `format!(".{DEFAULT_APP_NAME}")`.
+/// Used when creating or locating the marker directory without a custom
+/// [`AppContext`] — primarily in the bundled CLI example.
 pub const DEFAULT_WORKSPACE_MARKER: &str = ".sapphire-workspace";
 
 /// A resolved workspace directory.
 pub struct Workspace {
     /// Canonicalized absolute path of the workspace root.
     pub root: PathBuf,
-    /// Application name (no leading dot).
-    ///
-    /// Determines:
-    /// - The marker directory: `{root}/.{app_name}/`
-    /// - The XDG cache subdirectory: `$XDG_CACHE_HOME/{app_name}/{uuid}/`
-    ///
-    /// Default value: [`DEFAULT_APP_NAME`] (`"sapphire-workspace"`).
-    /// Pass a different value via the `_with_app_name` construction methods
-    /// so that a host application stores caches under its own XDG namespace
-    /// (e.g. `"sapphire-journal"`).
-    app_name: &'static str,
+    /// Application context providing the app name and cache base directory.
+    pub ctx: &'static AppContext,
 }
 
 impl Workspace {
     // ── marker-based discovery ────────────────────────────────────────────────
 
-    /// Walk up from `start` until a directory containing `.{app_name}` is found.
-    pub fn find_from_with_app_name(start: &Path, app_name: &'static str) -> Result<Self> {
+    /// Walk up from `start` until a directory containing `.{ctx.app_name}` is found.
+    pub fn find_from(ctx: &'static AppContext, start: &Path) -> Result<Self> {
         let start = start
             .canonicalize()
             .map_err(|e| Error::Access { path: start.to_owned(), source: e })?;
-        let marker = format!(".{app_name}");
+        let marker = format!(".{}", ctx.app_name);
         let mut current = start.as_path();
         loop {
             if current.join(&marker).is_dir() {
-                return Ok(Self { root: current.to_owned(), app_name });
+                return Ok(Self { root: current.to_owned(), ctx });
             }
             match current.parent() {
                 Some(p) => current = p,
@@ -57,43 +44,28 @@ impl Workspace {
         }
     }
 
-    /// Walk up from the current working directory using `.{app_name}` as the marker.
-    pub fn find_with_app_name(app_name: &'static str) -> Result<Self> {
-        Self::find_from_with_app_name(&std::env::current_dir()?, app_name)
+    /// Walk up from the current working directory using `.{ctx.app_name}` as the marker.
+    pub fn find(ctx: &'static AppContext) -> Result<Self> {
+        Self::find_from(ctx, &std::env::current_dir()?)
     }
 
-    /// Walk up from `start` using the default app name ([`DEFAULT_APP_NAME`]).
-    pub fn find_from(start: &Path) -> Result<Self> {
-        Self::find_from_with_app_name(start, DEFAULT_APP_NAME)
-    }
-
-    /// Walk up from the current working directory using the default app name.
-    pub fn find() -> Result<Self> {
-        Self::find_with_app_name(DEFAULT_APP_NAME)
-    }
-
-    /// Open a workspace at `root` that already has `.{app_name}` dir present.
+    /// Open a workspace at `root` that already has `.{ctx.app_name}` dir present.
     ///
     /// Returns an error if the marker directory does not exist.
-    pub fn from_root_with_app_name(root: &Path, app_name: &'static str) -> Result<Self> {
+    pub fn from_root(ctx: &'static AppContext, root: &Path) -> Result<Self> {
         let root = root
             .canonicalize()
             .map_err(|e| Error::Access { path: root.to_owned(), source: e })?;
-        let marker = format!(".{app_name}");
+        let marker = format!(".{}", ctx.app_name);
         if !root.join(&marker).is_dir() {
             return Err(Error::MarkerDirMissing { marker, root });
         }
-        Ok(Self { root, app_name })
-    }
-
-    /// Open a workspace at `root` using the default app name.
-    pub fn from_root(root: &Path) -> Result<Self> {
-        Self::from_root_with_app_name(root, DEFAULT_APP_NAME)
+        Ok(Self { root, ctx })
     }
 
     /// `true` if the marker directory (`.{app_name}`) exists under `root`.
     pub fn has_marker(&self) -> bool {
-        self.root.join(format!(".{}", self.app_name)).is_dir()
+        self.root.join(format!(".{}", self.ctx.app_name)).is_dir()
     }
 
     /// Path to `{root}/.{app_name}/config.toml`.
@@ -103,7 +75,7 @@ impl Workspace {
 
     /// Path to the marker directory (`{root}/.{app_name}`).
     pub fn marker_dir(&self) -> PathBuf {
-        self.root.join(format!(".{}", self.app_name))
+        self.root.join(format!(".{}", self.ctx.app_name))
     }
 
     // ── legacy resolution (no marker required) ────────────────────────────────
@@ -112,7 +84,7 @@ impl Workspace {
     /// 1. `explicit` parameter (no confirmation prompt)
     /// 2. `SAPPHIRE_WORKSPACE_DIR` env var (no confirmation prompt)
     /// 3. Current working directory (TTY: ask for confirmation; non-TTY: use directly)
-    pub fn resolve(explicit: Option<&Path>) -> Result<Self> {
+    pub fn resolve(ctx: &'static AppContext, explicit: Option<&Path>) -> Result<Self> {
         let root = if let Some(dir) = explicit {
             dir.canonicalize()
                 .map_err(|e| Error::Access { path: dir.to_owned(), source: e })?
@@ -127,7 +99,7 @@ impl Workspace {
         } else {
             resolve_cwd()?
         };
-        Ok(Self { root, app_name: DEFAULT_APP_NAME })
+        Ok(Self { root, ctx })
     }
 
     // ── identity / cache paths ────────────────────────────────────────────────
@@ -145,16 +117,12 @@ impl Workspace {
         path_uuid(&self.root)
     }
 
-    /// `$XDG_CACHE_HOME/{app_name}/{uuid}/`
+    /// `{ctx.cache_dir}/{uuid}/`
     ///
     /// The UUID is a stable UUIDv8 derived from the canonicalized workspace
-    /// root path (see [`uuid`](Self::uuid)).  The `app_name` component allows
-    /// different host applications to keep their caches under separate XDG
-    /// namespaces (e.g. `"sapphire-journal"`).
+    /// root path (see [`uuid`](Self::uuid)).
     pub fn cache_dir(&self) -> PathBuf {
-        xdg_cache_home()
-            .join(self.app_name)
-            .join(self.uuid().to_string())
+        self.ctx.cache_dir_for(&self.root)
     }
 
     /// Path to the SQLite retrieve database file.
@@ -210,14 +178,3 @@ pub fn path_uuid(root: &Path) -> uuid::Uuid {
     uuid::Uuid::from_bytes(bytes)
 }
 
-fn xdg_cache_home() -> PathBuf {
-    if let Ok(dir) = std::env::var("XDG_CACHE_HOME") {
-        if !dir.is_empty() {
-            return PathBuf::from(dir);
-        }
-    }
-    if let Ok(home) = std::env::var("HOME") {
-        return PathBuf::from(home).join(".cache");
-    }
-    std::env::temp_dir()
-}

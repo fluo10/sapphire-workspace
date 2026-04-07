@@ -3,6 +3,8 @@ use std::path::Path;
 use anyhow::{Result, bail};
 use sapphire_workspace::{WorkspaceConfig, WorkspaceState, workspace::Workspace};
 
+use crate::WORKSPACE_CTX;
+
 pub fn run(workspace_dir: Option<&Path>) -> Result<()> {
     let (workspace, config) = open_workspace(workspace_dir)?;
 
@@ -42,14 +44,14 @@ pub fn open_workspace(
         std::borrow::Cow::Owned(std::env::current_dir()?)
     };
 
-    match Workspace::find_from(&start) {
+    match Workspace::find_from(&WORKSPACE_CTX, &start) {
         Ok(ws) => {
             let config = WorkspaceConfig::load_from(&ws.config_path())?;
             Ok((ws, Some(config)))
         }
         Err(_) => {
             // No marker found — fall back to legacy resolution.
-            let ws = Workspace::resolve(explicit)?;
+            let ws = Workspace::resolve(&WORKSPACE_CTX, explicit)?;
             Ok((ws, None))
         }
     }

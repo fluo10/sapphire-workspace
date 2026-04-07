@@ -26,3 +26,4 @@ indexmap.workspace = true
 walkdir = "2"
 uuid = "1"
 md-5 = "0.10"
+dirs = "5"

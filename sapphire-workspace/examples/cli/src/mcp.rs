@@ -11,6 +11,8 @@ use rmcp::{
     transport::stdio,
 };
 use sapphire_workspace::{RetrieveDb, UserConfig, Workspace, WorkspaceState};
+
+use crate::WORKSPACE_CTX;
 use serde::Deserialize;
 
 // ── server struct ─────────────────────────────────────────────────────────────
@@ -45,10 +47,10 @@ impl RecallServer {
     {
         let mut guard = self.state.lock().unwrap();
         if guard.is_none() {
-            let workspace = Workspace::resolve(self.default_dir.as_deref())?;
+            let workspace = Workspace::resolve(&WORKSPACE_CTX, self.default_dir.as_deref())?;
             let state = WorkspaceState::open(workspace)?;
             let config = UserConfig::load()?;
-            if config.embedding.as_ref().map(|e| e.enabled).unwrap_or(false) {
+            if config.retrieve.as_ref().and_then(|r| r.embedding.as_ref()).map(|e| e.enabled).unwrap_or(false) {
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(async {
                         state.load_retrieve_backend_async(&config).await?;
@@ -114,9 +116,9 @@ impl RecallServer {
             let mut guard = self.state.lock().unwrap();
             let workspace_root = match guard.as_ref() {
                 Some(s) => s.workspace.root.clone(),
-                None => Workspace::resolve(self.default_dir.as_deref())?.root,
+                None => Workspace::resolve(&WORKSPACE_CTX, self.default_dir.as_deref())?.root,
             };
-            let state = WorkspaceState::rebuild(Workspace::from_root(&workspace_root)?)?;
+            let state = WorkspaceState::rebuild(Workspace::from_root(&WORKSPACE_CTX, &workspace_root)?)?;
             let (upserted, _removed) = state.sync()?;
             *guard = Some(state);
             Ok(format!("rebuilt: {upserted} files indexed"))
