@@ -117,12 +117,10 @@ impl Workspace {
         path_uuid(&self.root)
     }
 
-    /// `{cache_base}/{app_name}/{uuid}/`
+    /// `{ctx.cache_dir}/{uuid}/`
     ///
     /// The UUID is a stable UUIDv8 derived from the canonicalized workspace
-    /// root path (see [`uuid`](Self::uuid)).  The `app_name` component allows
-    /// different host applications to keep their caches under separate
-    /// namespaces (e.g. `"sapphire-journal"`).
+    /// root path (see [`uuid`](Self::uuid)).
     pub fn cache_dir(&self) -> PathBuf {
         self.ctx.cache_dir_for(&self.root)
     }

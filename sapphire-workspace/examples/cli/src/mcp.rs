@@ -50,7 +50,7 @@ impl RecallServer {
             let workspace = Workspace::resolve(&WORKSPACE_CTX, self.default_dir.as_deref())?;
             let state = WorkspaceState::open(workspace)?;
             let config = UserConfig::load()?;
-            if config.embedding.as_ref().map(|e| e.enabled).unwrap_or(false) {
+            if config.retrieve.as_ref().and_then(|r| r.embedding.as_ref()).map(|e| e.enabled).unwrap_or(false) {
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(async {
                         state.load_retrieve_backend_async(&config).await?;

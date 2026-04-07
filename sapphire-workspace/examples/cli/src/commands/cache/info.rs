@@ -38,14 +38,15 @@ pub fn run(workspace_dir: Option<&Path>) -> Result<()> {
         );
     }
 
-    if let Some(embed_cfg) = &config.embedding {
+    if let Some(retrieve) = &config.retrieve {
+        if let Some(embed_cfg) = &retrieve.embedding {
         let enabled_str = if embed_cfg.enabled { "enabled" } else { "disabled" };
         println!(
             "embedding:      {} (provider={}, model={})",
             enabled_str, embed_cfg.provider, embed_cfg.model
         );
 
-        match embed_cfg.vector_db {
+        match retrieve.db {
             VectorDb::None => {}
             VectorDb::SqliteVec => {
                 if embed_cfg.dimension.is_some() {
@@ -112,7 +113,8 @@ pub fn run(workspace_dir: Option<&Path>) -> Result<()> {
                 println!("vector backend: lancedb (not compiled in)");
             }
         }
-    }
+        } // end if let Some(embed_cfg)
+    } // end if let Some(retrieve)
 
     Ok(())
 }
