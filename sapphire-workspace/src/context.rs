@@ -76,6 +76,15 @@ impl AppContext {
     pub fn cache_dir_for(&self, root: &Path) -> PathBuf {
         self.cache_base().join(self.app_name).join(path_uuid(root).to_string())
     }
+
+    /// Return the directory where embedding models should be cached.
+    ///
+    /// Computed as `{cache_base}/{app_name}/models`.  On mobile platforms, set
+    /// the correct cache base with [`set_cache_base`](Self::set_cache_base) at
+    /// startup so that this path points to a writable location.
+    pub fn model_cache_dir(&self) -> PathBuf {
+        self.cache_base().join(self.app_name).join("models")
+    }
 }
 
 fn platform_cache_home() -> PathBuf {

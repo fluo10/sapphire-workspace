@@ -15,7 +15,7 @@ pub struct Workspace {
     /// Canonicalized absolute path of the workspace root.
     pub root: PathBuf,
     /// Application context providing the app name and cache base directory.
-    ctx: &'static AppContext,
+    pub ctx: &'static AppContext,
 }
 
 impl Workspace {

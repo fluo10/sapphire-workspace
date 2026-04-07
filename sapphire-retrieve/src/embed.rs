@@ -14,9 +14,13 @@ use crate::error::{Error, Result};
 
 // ── configuration ─────────────────────────────────────────────────────────────
 
-/// Embedding provider configuration passed to [`build_embedder`].
+/// Runtime embedding provider configuration passed to [`build_embedder`].
+///
+/// This is the minimal, non-serializable config used to construct an
+/// [`Embedder`] at runtime.  For the user-facing, serde-annotated config
+/// see [`crate::config::EmbeddingConfig`].
 #[derive(Debug, Clone)]
-pub struct EmbeddingConfig {
+pub struct EmbedderConfig {
     /// Embedding provider: `"openai"`, `"ollama"`, or `"fastembed"`.
     pub provider: String,
     /// Model name or identifier (provider-specific).
@@ -28,6 +32,10 @@ pub struct EmbeddingConfig {
     /// For `"openai"`: defaults to `https://api.openai.com`.
     /// For `"ollama"`: defaults to `http://localhost:11434`.
     pub base_url: Option<String>,
+    /// Directory where downloaded model weights are cached.
+    /// Only used by the `"fastembed"` provider.
+    /// Falls back to the OS temporary directory when `None`.
+    pub cache_dir: Option<std::path::PathBuf>,
 }
 
 // ── Embedder trait ────────────────────────────────────────────────────────────
@@ -50,7 +58,7 @@ pub trait Embedder: Send + Sync {
 /// For `"fastembed"` this loads the ONNX model from disk (or downloads it on
 /// first use), which can take several seconds.  For REST providers the
 /// returned value is lightweight.
-pub fn build_embedder(config: &EmbeddingConfig) -> Result<Box<dyn Embedder + Send + Sync>> {
+pub fn build_embedder(config: &EmbedderConfig) -> Result<Box<dyn Embedder + Send + Sync>> {
     match config.provider.as_str() {
         "openai" | "ollama" => Ok(Box::new(RestEmbedder { config: config.clone() })),
         #[cfg(feature = "fastembed-embed")]
@@ -65,7 +73,7 @@ pub fn build_embedder(config: &EmbeddingConfig) -> Result<Box<dyn Embedder + Sen
 // ── REST embedder (OpenAI / Ollama) ───────────────────────────────────────────
 
 struct RestEmbedder {
-    config: EmbeddingConfig,
+    config: EmbedderConfig,
 }
 
 impl Embedder for RestEmbedder {
@@ -90,7 +98,7 @@ struct FastEmbedEmbedder {
 
 #[cfg(feature = "fastembed-embed")]
 impl FastEmbedEmbedder {
-    fn new(config: &EmbeddingConfig) -> Result<Self> {
+    fn new(config: &EmbedderConfig) -> Result<Self> {
         use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 
         let model_variant = match config.model.as_str() {
@@ -113,7 +121,8 @@ impl FastEmbedEmbedder {
             }
         };
 
-        let cache_dir = xdg_cache_home().join("sapphire-retrieve").join("fastembed");
+        let cache_dir = config.cache_dir.clone()
+            .unwrap_or_else(|| std::env::temp_dir().join("fastembed"));
         let model = TextEmbedding::try_new(
             InitOptions::new(model_variant)
                 .with_cache_dir(cache_dir)
@@ -142,7 +151,7 @@ impl Embedder for FastEmbedEmbedder {
 
 // ── OpenAI-compatible ─────────────────────────────────────────────────────────
 
-fn embed_openai(config: &EmbeddingConfig, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+fn embed_openai(config: &EmbedderConfig, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
     let api_key_env = config.api_key_env.as_deref().unwrap_or("OPENAI_API_KEY");
     let api_key = std::env::var(api_key_env).map_err(|_| {
         Error::Embed(format!("environment variable `{api_key_env}` is not set"))
@@ -192,7 +201,7 @@ fn parse_openai_response(
 
 // ── Ollama ────────────────────────────────────────────────────────────────────
 
-fn embed_ollama(config: &EmbeddingConfig, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+fn embed_ollama(config: &EmbedderConfig, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
     let base_url = config.base_url.as_deref().unwrap_or("http://localhost:11434");
     let url = format!("{base_url}/api/embed");
 
@@ -218,18 +227,6 @@ fn embed_ollama(config: &EmbeddingConfig, texts: &[&str]) -> Result<Vec<Vec<f32>
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
-
-fn xdg_cache_home() -> std::path::PathBuf {
-    if let Ok(dir) = std::env::var("XDG_CACHE_HOME") {
-        if !dir.is_empty() {
-            return std::path::PathBuf::from(dir);
-        }
-    }
-    if let Ok(home) = std::env::var("HOME") {
-        return std::path::PathBuf::from(home).join(".cache");
-    }
-    std::env::temp_dir()
-}
 
 fn parse_float_array(value: &serde_json::Value) -> Result<Vec<f32>> {
     value

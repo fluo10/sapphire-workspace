@@ -7,7 +7,7 @@ pub mod workspace_state;
 mod error;
 pub use error::{Error, Result};
 
-pub use config::{EmbeddingConfig, SyncBackendKind, SyncConfig, UserConfig, VectorDb, WorkspaceConfig};
+pub use config::{EmbeddingConfig, RetrieveConfig, SyncBackendKind, SyncConfig, UserConfig, VectorDb, WorkspaceConfig};
 pub use context::AppContext;
 pub use workspace::{DEFAULT_WORKSPACE_MARKER, path_uuid};
 pub use indexer::path_to_doc_id;
@@ -16,7 +16,7 @@ pub use workspace_state::{DbInfo, WorkspaceState};
 
 // Re-export sapphire-retrieve public API so callers can use a single dependency.
 pub use sapphire_retrieve::{
-    Chunk, ChunkSearchResult, Document, Embedder, EmbeddingConfig as RetrieveEmbedConfig,
+    Chunk, ChunkSearchResult, Document, EmbedderConfig, Embedder,
     Error as RetrieveError, RetrieveDb, SearchResult, VecInfo, build_embedder,
 };
 #[cfg(feature = "sqlite-store")]

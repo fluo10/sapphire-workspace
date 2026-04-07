@@ -1,6 +1,8 @@
 use std::path::Path;
 
+pub mod config;
 mod error;
+pub use config::{SyncBackendKind, SyncConfig};
 pub use error::{Error, Result};
 
 #[cfg(feature = "git")]
