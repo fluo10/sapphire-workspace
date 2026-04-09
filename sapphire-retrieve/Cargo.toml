@@ -1,7 +1,7 @@
 [package]
 name = "sapphire-retrieve"
 edition.workspace = true
-version = "0.5.0"
+version.workspace = true
 description = "Document retrieval and semantic search library with SQLite (FTS5/sqlite-vec) and LanceDB backends"
 license.workspace = true
 repository.workspace = true
