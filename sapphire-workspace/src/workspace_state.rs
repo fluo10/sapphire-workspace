@@ -332,7 +332,7 @@ impl WorkspaceState {
             }
             #[cfg(not(feature = "lancedb-store"))]
             VectorDb::LanceDb => {
-                return Err(Error::LanceDbNotEnabled);
+                return Err(crate::error::Error::LanceDbNotEnabled);
             }
         }
         Ok(())
