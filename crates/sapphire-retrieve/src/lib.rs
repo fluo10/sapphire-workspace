@@ -11,7 +11,7 @@ pub mod sqlite_store;
 pub mod vector_store;
 
 pub use chunker::{Chunker, JsonChunker, MarkdownChunker, TextChunk};
-pub use config::{EmbeddingConfig, RetrieveConfig, VectorDb};
+pub use config::{EmbeddingConfig, HybridConfig, RetrieveConfig, VectorDb};
 pub use db::{Document, RetrieveDb, SearchResult};
 pub use embed::{build_embedder, EmbedderConfig, Embedder};
 pub use error::{Error, Result};

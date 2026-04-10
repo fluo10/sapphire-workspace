@@ -15,6 +15,40 @@ pub struct RetrieveConfig {
     /// if `db` is set to a non-`none` value.
     #[serde(default)]
     pub embedding: Option<EmbeddingConfig>,
+    /// Hybrid search tuning (FTS + semantic merged via Reciprocal Rank Fusion).
+    #[serde(default)]
+    pub hybrid: HybridConfig,
+}
+
+/// Settings for hybrid (FTS + semantic) search merging via Reciprocal Rank
+/// Fusion (RRF).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HybridConfig {
+    /// Weight for FTS results in RRF fusion (0.0–1.0, default 0.5).
+    /// The semantic weight is `1.0 - fts_weight`.
+    #[serde(default = "default_fts_weight")]
+    pub fts_weight: f64,
+    /// Constant *k* in the RRF formula: `score = 1 / (k + rank)`.
+    /// Default 60.
+    #[serde(default = "default_rrf_k")]
+    pub rrf_k: u32,
+}
+
+fn default_fts_weight() -> f64 {
+    0.5
+}
+
+fn default_rrf_k() -> u32 {
+    60
+}
+
+impl Default for HybridConfig {
+    fn default() -> Self {
+        Self {
+            fts_weight: default_fts_weight(),
+            rrf_k: default_rrf_k(),
+        }
+    }
 }
 
 /// Vector database backend for approximate (semantic) text search.

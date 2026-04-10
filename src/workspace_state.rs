@@ -1,18 +1,45 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use sapphire_retrieve::{Document, Embedder, RetrieveDb};
+use sapphire_retrieve::{Document, Embedder, RetrieveDb, SearchResult};
 #[cfg(feature = "sqlite-store")]
 use sapphire_retrieve::db::SCHEMA_VERSION;
 use tokio::sync::OnceCell;
 
 use crate::{
-    config::{UserConfig, VectorDb, WorkspaceConfig},
+    config::{HybridConfig, UserConfig, VectorDb, WorkspaceConfig},
     error::Result,
     indexer::{path_to_doc_id, sync_workspace},
     workspace::Workspace,
 };
 
 use sapphire_retrieve::build_embedder;
+
+/// Controls which retrieval strategy [`WorkspaceState::retrieve_files`] uses.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SearchMode {
+    /// Full-text search only (BM25 / trigram).
+    Fts,
+    /// Semantic (vector) search only.  Falls back to FTS if no embedder is
+    /// configured.
+    Semantic,
+    /// Combine FTS and semantic results via Reciprocal Rank Fusion (default).
+    #[default]
+    Hybrid,
+}
+
+/// Parameters for [`WorkspaceState::retrieve_files`].
+pub struct RetrieveParams<'a> {
+    /// The search query string.
+    pub query: &'a str,
+    /// Maximum number of results to return.
+    pub limit: usize,
+    /// Retrieval strategy (default: [`SearchMode::Hybrid`]).
+    pub mode: SearchMode,
+    /// Optional folder prefix filter.  Only results whose path starts with
+    /// this prefix are returned.  Should be an absolute path.
+    pub folder: Option<&'a Path>,
+}
 
 /// An open workspace paired with its lazily-initialised search infrastructure.
 pub struct WorkspaceState {
@@ -454,5 +481,138 @@ impl WorkspaceState {
             vector_count: vec_info.vector_count,
             pending_count: vec_info.pending_count,
         })
+    }
+
+    // ── retrieve (unified search) ────────────────────────────────────────────
+
+    /// Retrieve files matching `query` using the specified search mode.
+    ///
+    /// - **Fts**: full-text search only.
+    /// - **Semantic**: vector search only (falls back to FTS when no embedder
+    ///   is loaded).
+    /// - **Hybrid** (default): runs both FTS and semantic search, then merges
+    ///   results via Reciprocal Rank Fusion (RRF).
+    ///
+    /// When `params.folder` is set, results are post-filtered to paths that
+    /// start with that prefix.
+    pub fn retrieve_files(
+        &self,
+        params: &RetrieveParams<'_>,
+        hybrid_config: &HybridConfig,
+    ) -> Result<Vec<SearchResult>> {
+        // Over-fetch to compensate for post-filter losses.
+        let fetch_limit = if params.folder.is_some() {
+            params.limit * 3
+        } else {
+            params.limit
+        };
+
+        // Fall back to FTS when the embedder is not available.
+        let effective_mode = match params.mode {
+            SearchMode::Semantic | SearchMode::Hybrid if self.embedder().is_none() => {
+                SearchMode::Fts
+            }
+            other => other,
+        };
+
+        let results = match effective_mode {
+            SearchMode::Fts => self.search_fts_internal(params.query, fetch_limit)?,
+            SearchMode::Semantic => self.search_semantic_internal(params.query, fetch_limit)?,
+            SearchMode::Hybrid => {
+                self.search_hybrid_internal(params.query, fetch_limit, hybrid_config)?
+            }
+        };
+
+        let results = Self::filter_by_folder(results, params.folder);
+        Ok(results.into_iter().take(params.limit).collect())
+    }
+
+    fn search_fts_internal(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
+        Ok(self.retrieve_db.search_fts(query, limit)?)
+    }
+
+    fn search_semantic_internal(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<SearchResult>> {
+        let embedder = self.embedder().expect("caller verified embedder exists");
+        let query_vecs = embedder.embed_texts(&[query])?;
+        let query_vec = query_vecs
+            .into_iter()
+            .next()
+            .ok_or_else(|| sapphire_retrieve::Error::Embed("embedder returned empty result".into()))?;
+        let raw = self.retrieve_db.search_similar(&query_vec, limit * 3)?;
+        Ok(RetrieveDb::dedup_chunk_results(raw, limit))
+    }
+
+    fn search_hybrid_internal(
+        &self,
+        query: &str,
+        limit: usize,
+        config: &HybridConfig,
+    ) -> Result<Vec<SearchResult>> {
+        let fts_results = self.search_fts_internal(query, limit)?;
+        let sem_results = self.search_semantic_internal(query, limit)?;
+        Ok(Self::merge_rrf(fts_results, sem_results, limit, config))
+    }
+
+    /// Merge two ranked result lists via Reciprocal Rank Fusion.
+    ///
+    /// `score(d) = w_fts / (k + rank_fts) + w_sem / (k + rank_sem)`
+    ///
+    /// Documents appearing in only one list receive a contribution from that
+    /// list alone.  The returned list is sorted by descending RRF score.
+    fn merge_rrf(
+        fts: Vec<SearchResult>,
+        semantic: Vec<SearchResult>,
+        limit: usize,
+        config: &HybridConfig,
+    ) -> Vec<SearchResult> {
+        let k = config.rrf_k as f64;
+        let w_fts = config.fts_weight;
+        let w_sem = 1.0 - w_fts;
+
+        let mut scores: HashMap<String, (SearchResult, f64)> = HashMap::new();
+
+        for (rank, result) in fts.into_iter().enumerate() {
+            let rrf = w_fts / (k + (rank + 1) as f64);
+            scores
+                .entry(result.path.clone())
+                .and_modify(|(_, s)| *s += rrf)
+                .or_insert((result, rrf));
+        }
+
+        for (rank, result) in semantic.into_iter().enumerate() {
+            let rrf = w_sem / (k + (rank + 1) as f64);
+            scores
+                .entry(result.path.clone())
+                .and_modify(|(_, s)| *s += rrf)
+                .or_insert((result, rrf));
+        }
+
+        let mut merged: Vec<_> = scores.into_values().collect();
+        merged.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        merged.truncate(limit);
+
+        merged
+            .into_iter()
+            .map(|(mut result, rrf_score)| {
+                result.score = rrf_score;
+                result
+            })
+            .collect()
+    }
+
+    fn filter_by_folder(
+        results: Vec<SearchResult>,
+        folder: Option<&Path>,
+    ) -> Vec<SearchResult> {
+        let Some(prefix) = folder else { return results };
+        let prefix_str = prefix.to_string_lossy();
+        results
+            .into_iter()
+            .filter(|r| r.path.starts_with(prefix_str.as_ref()))
+            .collect()
     }
 }
