@@ -9,7 +9,7 @@ use tokio::sync::OnceCell;
 use crate::{
     config::{HybridConfig, UserConfig, VectorDb, WorkspaceConfig},
     error::Result,
-    indexer::{path_to_doc_id, sync_workspace},
+    indexer::{path_to_doc_id, sync_workspace, sync_workspace_incremental},
     workspace::Workspace,
 };
 
@@ -413,6 +413,22 @@ impl WorkspaceState {
     /// Scan the workspace and incrementally sync all files into the retrieve DB.
     pub fn sync(&self) -> Result<(usize, usize)> {
         sync_workspace(&self.workspace, &self.retrieve_db)
+    }
+
+    /// Run the periodic sync cycle: git sync (if configured) followed by an
+    /// mtime-based incremental cache update.
+    ///
+    /// This is the intended entry point for interval-based background
+    /// refreshes.  It first synchronises with the remote (commit → pull →
+    /// push), then walks the workspace and re-indexes only the files whose
+    /// mtime has changed since the last run.
+    ///
+    /// Returns `(upserted, removed)`.
+    pub fn periodic_sync(&self) -> Result<(usize, usize)> {
+        if let Some(backend) = &self.sync_backend {
+            backend.sync()?;
+        }
+        sync_workspace_incremental(&self.workspace, &self.retrieve_db)
     }
 
     /// Sync and, when embedding is configured, embed pending chunks.

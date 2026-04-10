@@ -8,19 +8,41 @@ use crate::error::{Error, Result};
 pub use sapphire_retrieve::config::{EmbeddingConfig, HybridConfig, RetrieveConfig, VectorDb};
 pub use sapphire_sync::config::{SyncBackendKind, SyncConfig};
 
-// ── WorkspaceConfig (per-workspace, stored in {marker}/config.toml) ──────────
+// ── WorkspaceConfig ─────────────────────────────────────────────────────────
 
-/// All settings for a workspace.  Stored in `.sapphire-workspace/config.toml`
-/// (or whichever marker directory the workspace uses).
+/// All settings for a workspace.
+///
+/// By default this is stored in the per-user config file
+/// (`$XDG_CONFIG_HOME/sapphire-workspace/config.toml`) because
+/// host-specific settings — such as the embedding model — depend on
+/// local hardware capabilities.  A workspace-level file
+/// (`.sapphire-workspace/config.toml`) can provide shared defaults that
+/// are synced across devices; the per-user file then overrides any
+/// fields that need to differ per host.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct WorkspaceConfig {
     #[serde(default)]
     pub sync: SyncConfig,
     #[serde(default)]
     pub retrieve: RetrieveConfig,
+    /// How often to automatically sync and refresh the cache, in minutes.
+    ///
+    /// When set, the `watch` command will run a full sync cycle (git sync +
+    /// mtime-based incremental cache update) at this interval.
+    /// When unset or `0`, automatic periodic sync is disabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_interval_minutes: Option<u32>,
 }
 
 impl WorkspaceConfig {
+    /// Returns the sync interval as a [`std::time::Duration`], or `None` if
+    /// periodic sync is disabled (`sync_interval_minutes` is unset or `0`).
+    pub fn sync_interval(&self) -> Option<std::time::Duration> {
+        self.sync_interval_minutes
+            .filter(|&m| m > 0)
+            .map(|m| std::time::Duration::from_secs(m as u64 * 60))
+    }
+
     /// Load from an explicit file path.
     pub fn load_from(path: &Path) -> Result<Self> {
         if !path.exists() {
@@ -49,11 +71,14 @@ impl WorkspaceConfig {
     }
 }
 
-// ── UserConfig (legacy, XDG path, backward compat) ───────────────────────────
+// ── UserConfig (per-user / per-host) ─────────────────────────────────────────
 
-/// Legacy per-user config loaded from `$XDG_CONFIG_HOME/sapphire-workspace-cli/config.toml`.
+/// Per-user config loaded from `$XDG_CONFIG_HOME/sapphire-workspace-cli/config.toml`.
 ///
-/// Used as a fallback when no `.sapphire-workspace` marker directory is present.
+/// Contains host-specific settings (e.g. embedding model, API keys) that
+/// override the workspace-level defaults.  This is the primary config
+/// location for retrieve/embedding settings because the optimal model
+/// depends on the host's hardware.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct UserConfig {
     #[serde(default)]
