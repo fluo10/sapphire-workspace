@@ -203,9 +203,8 @@ impl Workspace {
         #[cfg(feature = "sqlite-store")]
         {
             use sapphire_retrieve::db::SCHEMA_VERSION;
-            return self
-                .cache_dir()
-                .join(format!("retrieve_v{SCHEMA_VERSION}.db"));
+            self.cache_dir()
+                .join(format!("retrieve_v{SCHEMA_VERSION}.db"))
         }
         #[cfg(not(feature = "sqlite-store"))]
         self.cache_dir().join("retrieve.db")

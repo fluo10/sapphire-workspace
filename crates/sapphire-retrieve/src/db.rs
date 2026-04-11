@@ -67,6 +67,7 @@ struct InMemoryState {
 }
 
 impl InMemoryStore {
+    #[allow(dead_code)]
     fn new() -> Self {
         Self {
             state: Mutex::new(InMemoryState::default()),
@@ -179,6 +180,7 @@ enum BackendState {
     ///
     /// Used when neither `sqlite-store` nor `lancedb-store` is compiled in,
     /// and as the initial state before [`RetrieveDb::init_lancedb`] is called.
+    #[allow(dead_code)]
     InMemory(Arc<InMemoryStore>),
     /// SQLite backend (FTS only or FTS + sqlite-vec).
     #[cfg(feature = "sqlite-store")]
@@ -242,10 +244,10 @@ impl RetrieveDb {
         #[cfg(feature = "sqlite-store")]
         {
             let store = SqliteStore::new_fts_only(db_path.to_owned());
-            return Ok(Self {
+            Ok(Self {
                 db_path: db_path.to_owned(),
                 backend: Mutex::new(BackendState::Sqlite(Arc::new(store))),
-            });
+            })
         }
 
         #[cfg(not(feature = "sqlite-store"))]

@@ -278,25 +278,24 @@ fn chunks_from_json_value(raw: &str, value: &serde_json::Value) -> Vec<TextChunk
             // Look for a nested messages/chat array.
             const ARRAY_KEYS: &[&str] = &["messages", "chat", "history", "log"];
             for key in ARRAY_KEYS {
-                if let Some(serde_json::Value::Array(arr)) = map.get(*key) {
-                    if !arr.is_empty() {
-                        // Find the position of this key's array in the raw text,
-                        // then scan for element positions within it.
-                        let nested_positions = find_nested_array_positions(raw, key);
-                        return arr
-                            .iter()
-                            .enumerate()
-                            .map(|(i, v)| {
-                                let (line, column) =
-                                    nested_positions.get(i).copied().unwrap_or((i, 0));
-                                TextChunk {
-                                    line,
-                                    column,
-                                    text: extract_message_text(v),
-                                }
-                            })
-                            .collect();
-                    }
+                if let Some(serde_json::Value::Array(arr)) = map.get(*key)
+                    && !arr.is_empty()
+                {
+                    // Find the position of this key's array in the raw text,
+                    // then scan for element positions within it.
+                    let nested_positions = find_nested_array_positions(raw, key);
+                    return arr
+                        .iter()
+                        .enumerate()
+                        .map(|(i, v)| {
+                            let (line, column) = nested_positions.get(i).copied().unwrap_or((i, 0));
+                            TextChunk {
+                                line,
+                                column,
+                                text: extract_message_text(v),
+                            }
+                        })
+                        .collect();
                 }
             }
             // Single object — one chunk at the start of the file.
