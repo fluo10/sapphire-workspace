@@ -11,7 +11,7 @@ Workspace management library for indexing, search, and sync of Markdown document
 |---|---|---|
 | `lancedb-store` | LanceDB vector backend for semantic search | yes |
 | `fastembed-embed` | On-device embedding via FastEmbed | yes |
-| `sqlite-store` | SQLite FTS5 + sqlite-vec backend | no |
+| `sqlite-store` | SQLite FTS5 + sqlite-vec backend | yes |
 | `git-sync` | Git-based workspace synchronisation via `sapphire-sync` | yes |
 
 ## Quick start
