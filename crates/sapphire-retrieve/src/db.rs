@@ -358,7 +358,10 @@ impl RetrieveDb {
     /// # Deprecation
     ///
     /// Prefer the free function [`dedup_chunk_results`] instead.
-    #[deprecated(since = "0.7.0", note = "use the free function `dedup_chunk_results` instead")]
+    #[deprecated(
+        since = "0.7.0",
+        note = "use the free function `dedup_chunk_results` instead"
+    )]
     pub fn dedup_chunk_results(results: Vec<ChunkSearchResult>, limit: usize) -> Vec<SearchResult> {
         dedup_chunk_results(results, limit)
     }
@@ -476,7 +479,10 @@ pub fn open_sqlite_fts(db_path: &Path) -> Arc<dyn RetrieveStore + Send + Sync> {
 /// Open or create a SQLite + sqlite-vec backend at `db_path` with `dim`-dimensional embeddings.
 #[cfg(feature = "sqlite-store")]
 pub fn open_sqlite_vec(db_path: &Path, dim: u32) -> Result<Arc<dyn RetrieveStore + Send + Sync>> {
-    Ok(Arc::new(SqliteStore::new_with_vec(db_path.to_owned(), dim)?))
+    Ok(Arc::new(SqliteStore::new_with_vec(
+        db_path.to_owned(),
+        dim,
+    )?))
 }
 
 /// Open or create a LanceDB backend under `data_dir` with `dim`-dimensional embeddings.

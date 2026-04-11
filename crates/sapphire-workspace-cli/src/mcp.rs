@@ -10,8 +10,8 @@ use rmcp::{
     schemars, tool, tool_handler, tool_router,
     transport::stdio,
 };
-use sapphire_workspace::{UserConfig, Workspace, WorkspaceState};
 use sapphire_retrieve::dedup_chunk_results;
+use sapphire_workspace::{UserConfig, Workspace, WorkspaceState};
 
 use crate::WORKSPACE_CTX;
 use serde::Deserialize;

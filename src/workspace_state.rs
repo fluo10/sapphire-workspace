@@ -4,11 +4,11 @@ use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "sqlite-store")]
 use sapphire_retrieve::db::SCHEMA_VERSION;
-use sapphire_retrieve::{dedup_chunk_results, Document, Embedder, RetrieveStore, SearchResult};
-#[cfg(feature = "sqlite-store")]
-use sapphire_retrieve::{open_sqlite_fts, open_sqlite_vec};
 #[cfg(feature = "lancedb-store")]
 use sapphire_retrieve::open_lancedb;
+use sapphire_retrieve::{Document, Embedder, RetrieveStore, SearchResult, dedup_chunk_results};
+#[cfg(feature = "sqlite-store")]
+use sapphire_retrieve::{open_sqlite_fts, open_sqlite_vec};
 use tokio::sync::OnceCell;
 
 use crate::{
@@ -653,9 +653,10 @@ impl WorkspaceState {
         match vector_db {
             VectorDb::None => Ok(None),
             #[cfg(feature = "sqlite-store")]
-            VectorDb::SqliteVec => {
-                Ok(Some(open_sqlite_vec(&self.workspace.retrieve_db_path(), dim)?))
-            }
+            VectorDb::SqliteVec => Ok(Some(open_sqlite_vec(
+                &self.workspace.retrieve_db_path(),
+                dim,
+            )?)),
             #[cfg(not(feature = "sqlite-store"))]
             VectorDb::SqliteVec => Err(crate::error::Error::SqliteStoreNotEnabled),
             #[cfg(feature = "lancedb-store")]
