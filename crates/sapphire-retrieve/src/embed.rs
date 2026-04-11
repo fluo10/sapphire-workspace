@@ -236,7 +236,7 @@ fn embed_ollama(config: &EmbedderConfig, texts: &[&str]) -> Result<Vec<Vec<f32>>
             Error::Embed("unexpected Ollama response: missing `embeddings` array".into())
         })?
         .iter()
-        .map(|arr| parse_float_array(arr))
+        .map(parse_float_array)
         .collect()
 }
 

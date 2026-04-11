@@ -217,10 +217,10 @@ pub fn sync_workspace_incremental(
         // Check mtime — skip if unchanged.
         let path_str = path.to_string_lossy();
         let disk_mtime = file_mtime_secs(path);
-        if let Some(&cached_mtime) = known_mtimes.get(path_str.as_ref()) {
-            if cached_mtime == disk_mtime {
-                continue;
-            }
+        if let Some(&cached_mtime) = known_mtimes.get(path_str.as_ref())
+            && cached_mtime == disk_mtime
+        {
+            continue;
         }
 
         let raw = match std::fs::read_to_string(path) {
