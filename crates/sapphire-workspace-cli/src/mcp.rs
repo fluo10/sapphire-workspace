@@ -10,7 +10,8 @@ use rmcp::{
     schemars, tool, tool_handler, tool_router,
     transport::stdio,
 };
-use sapphire_workspace::{RetrieveDb, UserConfig, Workspace, WorkspaceState};
+use sapphire_retrieve::dedup_chunk_results;
+use sapphire_workspace::{UserConfig, Workspace, WorkspaceState};
 
 use crate::WORKSPACE_CTX;
 use serde::Deserialize;
@@ -166,7 +167,7 @@ impl RecallServer {
                         .retrieve_db()
                         .search_similar(&query_vec, limit * 3)
                         .map_err(anyhow::Error::msg)?;
-                    let results = RetrieveDb::dedup_chunk_results(raw, limit);
+                    let results = dedup_chunk_results(raw, limit);
                     return Ok(serde_json::to_string_pretty(&results)?);
                 }
 

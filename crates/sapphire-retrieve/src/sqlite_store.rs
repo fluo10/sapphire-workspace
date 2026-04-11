@@ -380,7 +380,7 @@ pub(crate) fn open_or_init(db_path: &Path) -> Result<Connection> {
     })
 }
 
-pub(crate) fn wipe_db_files(db_path: &Path) {
+pub fn wipe_db_files(db_path: &Path) {
     let base = db_path.to_string_lossy();
     for suffix in ["", "-wal", "-shm"] {
         let _ = std::fs::remove_file(format!("{base}{suffix}"));

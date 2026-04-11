@@ -1,6 +1,6 @@
-use std::{collections::HashSet, path::Path};
+use std::{collections::HashSet, path::Path, sync::Arc};
 
-use sapphire_retrieve::{Chunker, Document, JsonChunker, RetrieveDb};
+use sapphire_retrieve::{Chunker, Document, JsonChunker, RetrieveStore};
 
 use crate::{error::Result, workspace::Workspace};
 
@@ -47,7 +47,10 @@ pub fn path_to_doc_id(path: &Path) -> i64 {
 /// text (no JSON syntax noise), and each chunk's `line` value in
 /// [`ChunkSearchResult`](sapphire_retrieve::ChunkSearchResult) is the 0-based
 /// source line number of that message in the original file.
-pub fn sync_workspace(workspace: &Workspace, retrieve_db: &RetrieveDb) -> Result<(usize, usize)> {
+pub fn sync_workspace(
+    workspace: &Workspace,
+    retrieve_db: Arc<dyn RetrieveStore + Send + Sync>,
+) -> Result<(usize, usize)> {
     let existing_ids: HashSet<i64> = retrieve_db
         .document_ids()
         .unwrap_or_default()
@@ -169,7 +172,7 @@ pub fn sync_workspace(workspace: &Workspace, retrieve_db: &RetrieveDb) -> Result
 /// much cheaper for periodic background refreshes.
 pub fn sync_workspace_incremental(
     workspace: &Workspace,
-    retrieve_db: &RetrieveDb,
+    retrieve_db: Arc<dyn RetrieveStore + Send + Sync>,
 ) -> Result<(usize, usize)> {
     let known_mtimes = retrieve_db.file_mtimes().unwrap_or_default();
     let existing_ids: HashSet<i64> = retrieve_db
