@@ -60,12 +60,18 @@ pub trait Embedder: Send + Sync {
 /// returned value is lightweight.
 pub fn build_embedder(config: &EmbedderConfig) -> Result<Box<dyn Embedder + Send + Sync>> {
     match config.provider.as_str() {
-        "openai" | "ollama" => Ok(Box::new(RestEmbedder { config: config.clone() })),
+        "openai" | "ollama" => Ok(Box::new(RestEmbedder {
+            config: config.clone(),
+        })),
         #[cfg(feature = "fastembed-embed")]
         "fastembed" => Ok(Box::new(FastEmbedEmbedder::new(config)?)),
         other => Err(Error::Embed(format!(
             "unknown embedding provider `{other}`; supported values: openai, ollama{}",
-            if cfg!(feature = "fastembed-embed") { ", fastembed" } else { "" }
+            if cfg!(feature = "fastembed-embed") {
+                ", fastembed"
+            } else {
+                ""
+            }
         ))),
     }
 }
@@ -102,14 +108,14 @@ impl FastEmbedEmbedder {
         use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 
         let model_variant = match config.model.as_str() {
-            "AllMiniLML6V2"       => EmbeddingModel::AllMiniLML6V2,
-            "BGESmallENV15"       => EmbeddingModel::BGESmallENV15,
-            "BGEBaseENV15"        => EmbeddingModel::BGEBaseENV15,
-            "BGELargeENV15"       => EmbeddingModel::BGELargeENV15,
-            "NomicEmbedTextV1"    => EmbeddingModel::NomicEmbedTextV1,
-            "NomicEmbedTextV15"   => EmbeddingModel::NomicEmbedTextV15,
+            "AllMiniLML6V2" => EmbeddingModel::AllMiniLML6V2,
+            "BGESmallENV15" => EmbeddingModel::BGESmallENV15,
+            "BGEBaseENV15" => EmbeddingModel::BGEBaseENV15,
+            "BGELargeENV15" => EmbeddingModel::BGELargeENV15,
+            "NomicEmbedTextV1" => EmbeddingModel::NomicEmbedTextV1,
+            "NomicEmbedTextV15" => EmbeddingModel::NomicEmbedTextV15,
             "MultilingualE5Small" => EmbeddingModel::MultilingualE5Small,
-            "MultilingualE5Base"  => EmbeddingModel::MultilingualE5Base,
+            "MultilingualE5Base" => EmbeddingModel::MultilingualE5Base,
             "MultilingualE5Large" => EmbeddingModel::MultilingualE5Large,
             other => {
                 return Err(Error::Embed(format!(
@@ -117,11 +123,13 @@ impl FastEmbedEmbedder {
                      supported: AllMiniLML6V2, BGESmallENV15, BGEBaseENV15, BGELargeENV15, \
                      NomicEmbedTextV1, NomicEmbedTextV15, \
                      MultilingualE5Small, MultilingualE5Base, MultilingualE5Large"
-                )))
+                )));
             }
         };
 
-        let cache_dir = config.cache_dir.clone()
+        let cache_dir = config
+            .cache_dir
+            .clone()
             .unwrap_or_else(|| std::env::temp_dir().join("fastembed"));
         let model = TextEmbedding::try_new(
             InitOptions::new(model_variant)
@@ -130,7 +138,9 @@ impl FastEmbedEmbedder {
         )
         .map_err(|e| Error::Embed(format!("failed to load fastembed model: {e}")))?;
 
-        Ok(Self { model: std::sync::Mutex::new(model) })
+        Ok(Self {
+            model: std::sync::Mutex::new(model),
+        })
     }
 }
 
@@ -153,11 +163,13 @@ impl Embedder for FastEmbedEmbedder {
 
 fn embed_openai(config: &EmbedderConfig, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
     let api_key_env = config.api_key_env.as_deref().unwrap_or("OPENAI_API_KEY");
-    let api_key = std::env::var(api_key_env).map_err(|_| {
-        Error::Embed(format!("environment variable `{api_key_env}` is not set"))
-    })?;
+    let api_key = std::env::var(api_key_env)
+        .map_err(|_| Error::Embed(format!("environment variable `{api_key_env}` is not set")))?;
 
-    let base_url = config.base_url.as_deref().unwrap_or("https://api.openai.com");
+    let base_url = config
+        .base_url
+        .as_deref()
+        .unwrap_or("https://api.openai.com");
     let url = format!("{base_url}/v1/embeddings");
 
     let body = serde_json::json!({
@@ -177,10 +189,7 @@ fn embed_openai(config: &EmbedderConfig, texts: &[&str]) -> Result<Vec<Vec<f32>>
     parse_openai_response(&response, texts.len())
 }
 
-fn parse_openai_response(
-    response: &serde_json::Value,
-    expected: usize,
-) -> Result<Vec<Vec<f32>>> {
+fn parse_openai_response(response: &serde_json::Value, expected: usize) -> Result<Vec<Vec<f32>>> {
     let data = response["data"]
         .as_array()
         .ok_or_else(|| Error::Embed("unexpected OpenAI response: missing `data` array".into()))?;
@@ -202,7 +211,10 @@ fn parse_openai_response(
 // ── Ollama ────────────────────────────────────────────────────────────────────
 
 fn embed_ollama(config: &EmbedderConfig, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
-    let base_url = config.base_url.as_deref().unwrap_or("http://localhost:11434");
+    let base_url = config
+        .base_url
+        .as_deref()
+        .unwrap_or("http://localhost:11434");
     let url = format!("{base_url}/api/embed");
 
     let body = serde_json::json!({
@@ -220,7 +232,9 @@ fn embed_ollama(config: &EmbedderConfig, texts: &[&str]) -> Result<Vec<Vec<f32>>
 
     response["embeddings"]
         .as_array()
-        .ok_or_else(|| Error::Embed("unexpected Ollama response: missing `embeddings` array".into()))?
+        .ok_or_else(|| {
+            Error::Embed("unexpected Ollama response: missing `embeddings` array".into())
+        })?
         .iter()
         .map(|arr| parse_float_array(arr))
         .collect()

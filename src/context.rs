@@ -48,7 +48,10 @@ impl AppContext {
     /// Create a new context.  This is `const` so it can be used in `static`
     /// initialisers.
     pub const fn new(app_name: &'static str) -> Self {
-        Self { app_name, cache_dir: OnceLock::new() }
+        Self {
+            app_name,
+            cache_dir: OnceLock::new(),
+        }
     }
 
     /// Override the app cache directory.
@@ -75,7 +78,8 @@ impl AppContext {
     /// | iOS      | Result of [`set_cache_dir`](Self::set_cache_dir) (app sandbox root) |
     /// | Android  | Result of [`set_cache_dir`](Self::set_cache_dir) (`Context.getCacheDir()`) |
     pub fn cache_dir(&self) -> &Path {
-        self.cache_dir.get_or_init(|| platform_cache_home().join(self.app_name))
+        self.cache_dir
+            .get_or_init(|| platform_cache_home().join(self.app_name))
     }
 
     /// Compute the cache directory for a workspace rooted at `root`.

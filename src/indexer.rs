@@ -103,7 +103,11 @@ pub fn sync_workspace(workspace: &Workspace, retrieve_db: &RetrieveDb) -> Result
             // The body is the extracted text (no JSON syntax), and each chunk
             // carries the source line of its origin in the file.
             let text_chunks = JsonChunker.chunk(&title, &raw);
-            let body = text_chunks.iter().map(|c| c.text.as_str()).collect::<Vec<_>>().join("\n\n");
+            let body = text_chunks
+                .iter()
+                .map(|c| c.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n");
             // Build embed text: prepend title to each chunk (same as chunk_document).
             let chunks: Vec<(usize, usize, String)> = text_chunks
                 .into_iter()

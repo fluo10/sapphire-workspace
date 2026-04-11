@@ -13,7 +13,7 @@ pub mod vector_store;
 pub use chunker::{Chunker, JsonChunker, MarkdownChunker, TextChunk};
 pub use config::{EmbeddingConfig, HybridConfig, RetrieveConfig, VectorDb};
 pub use db::{Document, RetrieveDb, SearchResult};
-pub use embed::{build_embedder, EmbedderConfig, Embedder};
+pub use embed::{Embedder, EmbedderConfig, build_embedder};
 pub use error::{Error, Result};
 pub use retrieve_store::RetrieveStore;
 pub use vector_store::{Chunk, ChunkSearchResult, VecInfo, VectorStore};

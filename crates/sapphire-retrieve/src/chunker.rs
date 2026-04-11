@@ -140,7 +140,11 @@ impl Chunker for MarkdownChunker {
         }
 
         if chunks.is_empty() {
-            vec![TextChunk { line: 0, column: 0, text: title.to_owned() }]
+            vec![TextChunk {
+                line: 0,
+                column: 0,
+                text: title.to_owned(),
+            }]
         } else {
             chunks
         }
@@ -210,7 +214,11 @@ impl Chunker for JsonChunker {
         match serde_json::from_str::<serde_json::Value>(content) {
             Ok(value) => chunks_from_json_value(content, &value),
             Err(_) => {
-                vec![TextChunk { line: 0, column: 0, text: normalise(content) }]
+                vec![TextChunk {
+                    line: 0,
+                    column: 0,
+                    text: normalise(content),
+                }]
             }
         }
     }
@@ -258,7 +266,11 @@ fn chunks_from_json_value(raw: &str, value: &serde_json::Value) -> Vec<TextChunk
                 .enumerate()
                 .map(|(i, v)| {
                     let (line, column) = positions.get(i).copied().unwrap_or((i, 0));
-                    TextChunk { line, column, text: extract_message_text(v) }
+                    TextChunk {
+                        line,
+                        column,
+                        text: extract_message_text(v),
+                    }
                 })
                 .collect()
         }
@@ -270,15 +282,18 @@ fn chunks_from_json_value(raw: &str, value: &serde_json::Value) -> Vec<TextChunk
                     if !arr.is_empty() {
                         // Find the position of this key's array in the raw text,
                         // then scan for element positions within it.
-                        let nested_positions =
-                            find_nested_array_positions(raw, key);
+                        let nested_positions = find_nested_array_positions(raw, key);
                         return arr
                             .iter()
                             .enumerate()
                             .map(|(i, v)| {
                                 let (line, column) =
                                     nested_positions.get(i).copied().unwrap_or((i, 0));
-                                TextChunk { line, column, text: extract_message_text(v) }
+                                TextChunk {
+                                    line,
+                                    column,
+                                    text: extract_message_text(v),
+                                }
                             })
                             .collect();
                     }
@@ -607,14 +622,23 @@ mod tests {
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].line, 0, "first message should be on line 0");
         assert_eq!(chunks[1].line, 1, "second message should be on line 1");
-        assert!(chunks[0].text.contains("Hello there"), "got: {}", chunks[0].text);
-        assert!(chunks[1].text.contains("Hi! How can I help?"), "got: {}", chunks[1].text);
+        assert!(
+            chunks[0].text.contains("Hello there"),
+            "got: {}",
+            chunks[0].text
+        );
+        assert!(
+            chunks[1].text.contains("Hi! How can I help?"),
+            "got: {}",
+            chunks[1].text
+        );
     }
 
     #[test]
     fn jsonl_column_always_zero() {
         let c = JsonChunker;
-        let jsonl = "{\"role\":\"user\",\"content\":\"A\"}\n{\"role\":\"assistant\",\"content\":\"B\"}";
+        let jsonl =
+            "{\"role\":\"user\",\"content\":\"A\"}\n{\"role\":\"assistant\",\"content\":\"B\"}";
         let chunks = c.chunk("chat.jsonl", jsonl);
         for ch in &chunks {
             assert_eq!(ch.column, 0, "JSONL chunks should always have column 0");
@@ -624,14 +648,17 @@ mod tests {
     #[test]
     fn json_openai_messages() {
         let c = JsonChunker;
-        let json =
-            "{\n  \"messages\": [\n    {\"role\":\"user\",\"content\":\"What is 2+2?\"},\n    {\"role\":\"assistant\",\"content\":\"4\"}\n  ]\n}";
+        let json = "{\n  \"messages\": [\n    {\"role\":\"user\",\"content\":\"What is 2+2?\"},\n    {\"role\":\"assistant\",\"content\":\"4\"}\n  ]\n}";
         let chunks = c.chunk("session.json", json);
         assert_eq!(chunks.len(), 2);
         assert!(chunks[0].text.contains("2+2"), "got: {}", chunks[0].text);
         assert!(chunks[1].text.contains('4'), "got: {}", chunks[1].text);
         // Messages start at lines 2 and 3 in the pretty-printed JSON above.
-        assert!(chunks[0].line >= 2, "expected line >= 2, got {}", chunks[0].line);
+        assert!(
+            chunks[0].line >= 2,
+            "expected line >= 2, got {}",
+            chunks[0].line
+        );
     }
 
     #[test]
@@ -652,7 +679,11 @@ mod tests {
         let chunks = c.chunk("single.json", json);
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].line, 0);
-        assert!(chunks[0].text.contains("Just one message"), "got: {}", chunks[0].text);
+        assert!(
+            chunks[0].text.contains("Just one message"),
+            "got: {}",
+            chunks[0].text
+        );
     }
 
     #[test]

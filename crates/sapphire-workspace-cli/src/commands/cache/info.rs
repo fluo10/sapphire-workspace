@@ -1,7 +1,9 @@
 use std::path::Path;
 
 use anyhow::Result;
-use sapphire_workspace::{UserConfig, VectorDb, Workspace, WorkspaceState, RETRIEVE_SCHEMA_VERSION as SCHEMA_VERSION};
+use sapphire_workspace::{
+    RETRIEVE_SCHEMA_VERSION as SCHEMA_VERSION, UserConfig, VectorDb, Workspace, WorkspaceState,
+};
 
 use crate::WORKSPACE_CTX;
 
@@ -40,79 +42,83 @@ pub fn run(workspace_dir: Option<&Path>) -> Result<()> {
 
     if let Some(retrieve) = &config.retrieve {
         if let Some(embed_cfg) = &retrieve.embedding {
-        let enabled_str = if embed_cfg.enabled { "enabled" } else { "disabled" };
-        println!(
-            "embedding:      {} (provider={}, model={})",
-            enabled_str, embed_cfg.provider, embed_cfg.model
-        );
+            let enabled_str = if embed_cfg.enabled {
+                "enabled"
+            } else {
+                "disabled"
+            };
+            println!(
+                "embedding:      {} (provider={}, model={})",
+                enabled_str, embed_cfg.provider, embed_cfg.model
+            );
 
-        match retrieve.db {
-            VectorDb::None => {}
-            VectorDb::SqliteVec => {
-                if embed_cfg.dimension.is_some() {
-                    state
-                        .load_retrieve_backend(&config)
-                        .map_err(anyhow::Error::msg)?;
-                    match state.retrieve_db().vec_info() {
-                        Ok(vi) => {
-                            println!("vector backend: sqlite_vec (dim={})", vi.embedding_dim);
+            match retrieve.db {
+                VectorDb::None => {}
+                VectorDb::SqliteVec => {
+                    if embed_cfg.dimension.is_some() {
+                        state
+                            .load_retrieve_backend(&config)
+                            .map_err(anyhow::Error::msg)?;
+                        match state.retrieve_db().vec_info() {
+                            Ok(vi) => {
+                                println!("vector backend: sqlite_vec (dim={})", vi.embedding_dim);
+                                println!(
+                                    "vectors:        {} indexed, {} pending",
+                                    vi.vector_count, vi.pending_count
+                                );
+                            }
+                            Err(e) => eprintln!("warn: could not read vector stats: {e}"),
+                        }
+                    } else {
+                        println!("vector backend: sqlite_vec (dimension not configured)");
+                    }
+                }
+                #[cfg(feature = "lancedb-store")]
+                VectorDb::LanceDb => {
+                    if embed_cfg.dimension.is_some() {
+                        use sapphire_workspace::lancedb_store;
+                        let dir = lancedb_store::data_dir(&state.workspace.cache_dir());
+                        println!("vector backend: lancedb");
+                        println!("lancedb path:   {}", dir.display());
+                        state
+                            .load_retrieve_backend(&config)
+                            .map_err(anyhow::Error::msg)?;
+                        match state.retrieve_db().vec_info() {
+                            Ok(vi) => {
+                                println!(
+                                    "vectors:        {} indexed, {} pending",
+                                    vi.vector_count, vi.pending_count
+                                );
+                            }
+                            Err(e) => eprintln!("warn: could not read vector stats: {e}"),
+                        }
+                        let stale = find_stale_lancedb(&state.workspace.cache_dir());
+                        if !stale.is_empty() {
+                            let names: Vec<String> = stale
+                                .iter()
+                                .map(|(p, _)| {
+                                    p.file_name()
+                                        .unwrap_or_default()
+                                        .to_string_lossy()
+                                        .into_owned()
+                                })
+                                .collect();
+                            let total: u64 = stale.iter().map(|(_, sz)| sz).sum();
                             println!(
-                                "vectors:        {} indexed, {} pending",
-                                vi.vector_count, vi.pending_count
+                                "stale lancedb:  {} ({}) — run `sapphire-workspace clean` to remove",
+                                names.join(", "),
+                                human_size(total)
                             );
                         }
-                        Err(e) => eprintln!("warn: could not read vector stats: {e}"),
+                    } else {
+                        println!("vector backend: lancedb (dimension not configured)");
                     }
-                } else {
-                    println!("vector backend: sqlite_vec (dimension not configured)");
+                }
+                #[cfg(not(feature = "lancedb-store"))]
+                VectorDb::LanceDb => {
+                    println!("vector backend: lancedb (not compiled in)");
                 }
             }
-            #[cfg(feature = "lancedb-store")]
-            VectorDb::LanceDb => {
-                if embed_cfg.dimension.is_some() {
-                    use sapphire_workspace::lancedb_store;
-                    let dir = lancedb_store::data_dir(&state.workspace.cache_dir());
-                    println!("vector backend: lancedb");
-                    println!("lancedb path:   {}", dir.display());
-                    state
-                        .load_retrieve_backend(&config)
-                        .map_err(anyhow::Error::msg)?;
-                    match state.retrieve_db().vec_info() {
-                        Ok(vi) => {
-                            println!(
-                                "vectors:        {} indexed, {} pending",
-                                vi.vector_count, vi.pending_count
-                            );
-                        }
-                        Err(e) => eprintln!("warn: could not read vector stats: {e}"),
-                    }
-                    let stale = find_stale_lancedb(&state.workspace.cache_dir());
-                    if !stale.is_empty() {
-                        let names: Vec<String> = stale
-                            .iter()
-                            .map(|(p, _)| {
-                                p.file_name()
-                                    .unwrap_or_default()
-                                    .to_string_lossy()
-                                    .into_owned()
-                            })
-                            .collect();
-                        let total: u64 = stale.iter().map(|(_, sz)| sz).sum();
-                        println!(
-                            "stale lancedb:  {} ({}) — run `sapphire-workspace clean` to remove",
-                            names.join(", "),
-                            human_size(total)
-                        );
-                    }
-                } else {
-                    println!("vector backend: lancedb (dimension not configured)");
-                }
-            }
-            #[cfg(not(feature = "lancedb-store"))]
-            VectorDb::LanceDb => {
-                println!("vector backend: lancedb (not compiled in)");
-            }
-        }
         } // end if let Some(embed_cfg)
     } // end if let Some(retrieve)
 

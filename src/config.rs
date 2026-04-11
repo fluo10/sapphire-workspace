@@ -53,8 +53,10 @@ impl WorkspaceConfig {
             return Ok(Self::default());
         }
         let contents = std::fs::read_to_string(path)?;
-        toml::from_str(&contents)
-            .map_err(|e| Error::ConfigParse { path: path.to_owned(), source: e })
+        toml::from_str(&contents).map_err(|e| Error::ConfigParse {
+            path: path.to_owned(),
+            source: e,
+        })
     }
 
     /// Serialize and write to `path` (creates parent directories).
@@ -107,8 +109,7 @@ impl UserConfig {
             UserConfig::default()
         } else {
             let contents = std::fs::read_to_string(&path)?;
-            toml::from_str(&contents)
-                .map_err(|e| Error::ConfigParse { path, source: e })?
+            toml::from_str(&contents).map_err(|e| Error::ConfigParse { path, source: e })?
         };
         config.apply_env_overrides();
         Ok(config)
@@ -144,14 +145,30 @@ impl UserConfig {
 
         if any {
             let retrieve = self.retrieve.get_or_insert_with(RetrieveConfig::default);
-            if let Some(v) = db { retrieve.db = v; }
-            let embed = retrieve.embedding.get_or_insert_with(EmbeddingConfig::default);
-            if let Some(v) = enabled { embed.enabled = v; }
-            if let Some(v) = provider { embed.provider = v; }
-            if let Some(v) = model { embed.model = v; }
-            if let Some(v) = api_key_env { embed.api_key_env = Some(v); }
-            if let Some(v) = base_url { embed.base_url = Some(v); }
-            if let Some(v) = dimension { embed.dimension = Some(v); }
+            if let Some(v) = db {
+                retrieve.db = v;
+            }
+            let embed = retrieve
+                .embedding
+                .get_or_insert_with(EmbeddingConfig::default);
+            if let Some(v) = enabled {
+                embed.enabled = v;
+            }
+            if let Some(v) = provider {
+                embed.provider = v;
+            }
+            if let Some(v) = model {
+                embed.model = v;
+            }
+            if let Some(v) = api_key_env {
+                embed.api_key_env = Some(v);
+            }
+            if let Some(v) = base_url {
+                embed.base_url = Some(v);
+            }
+            if let Some(v) = dimension {
+                embed.dimension = Some(v);
+            }
         }
     }
 }
