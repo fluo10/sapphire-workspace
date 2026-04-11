@@ -46,7 +46,7 @@ pub fn open_workspace(
 
     match Workspace::find_from(&WORKSPACE_CTX, &start) {
         Ok(ws) => {
-            let config = WorkspaceConfig::load_from(&ws.config_path())?;
+            let config = crate::config::load_layered(&ws.config_path())?;
             Ok((ws, Some(config)))
         }
         Err(_) => {

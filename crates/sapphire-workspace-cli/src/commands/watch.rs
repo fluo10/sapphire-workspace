@@ -12,7 +12,7 @@ pub fn run(workspace_dir: Option<&Path>, debounce_ms: u64) -> Result<()> {
     let (workspace, config) = open_workspace(workspace_dir)?;
 
     let watch_root = workspace.root.clone();
-    let sync_interval = config.as_ref().and_then(|c| c.sync.sync_interval());
+    let sync_interval = config.as_ref().and_then(|c| c.sync_interval());
 
     let state = Arc::new(match config {
         Some(ref cfg) => WorkspaceState::open_configured(workspace, cfg)?,
@@ -55,12 +55,12 @@ pub fn run(workspace_dir: Option<&Path>, debounce_ms: u64) -> Result<()> {
         let run_periodic_sync = |last_sync: &mut Instant| {
             if let Some(interval) = sync_interval {
                 if last_sync.elapsed() >= interval {
-                    if let Some(backend) = state_clone.sync_backend() {
-                        print!("periodic sync... ");
-                        match backend.sync() {
-                            Ok(()) => println!("done"),
-                            Err(e) => eprintln!("sync error: {e}"),
+                    print!("periodic sync... ");
+                    match state_clone.periodic_sync() {
+                        Ok((upserted, removed)) => {
+                            println!("done (upserted: {upserted}, removed: {removed})")
                         }
+                        Err(e) => eprintln!("sync error: {e}"),
                     }
                     *last_sync = Instant::now();
                 }
