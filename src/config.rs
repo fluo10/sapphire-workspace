@@ -19,6 +19,12 @@ pub use sapphire_sync::config::{SyncBackendKind, SyncConfig};
 /// (`.sapphire-workspace/config.toml`) can provide shared defaults that
 /// are synced across devices; the per-user file then overrides any
 /// fields that need to differ per host.
+///
+/// To layer the two files, host applications typically load both as
+/// `toml::Value`, deep-merge them with
+/// [`util::merge_toml_values`](crate::util::merge_toml_values), and then
+/// deserialize the merged value into their own top-level config struct
+/// (which embeds `WorkspaceConfig` as one field).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct WorkspaceConfig {
     #[serde(default)]
