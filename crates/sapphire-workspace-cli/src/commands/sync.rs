@@ -8,12 +8,19 @@ use crate::WORKSPACE_CTX;
 pub fn run(workspace_dir: Option<&Path>) -> Result<()> {
     let (workspace, config) = open_workspace(workspace_dir)?;
 
-    let Some(config) = config else {
+    let Some(mut config) = config else {
         bail!(
             "no .sapphire-workspace/config.toml found — run `sapphire-workspace init` first, \
              or set [sync] backend in the config"
         );
     };
+
+    // Ensure a device_id is set in the user config, then re-load so the ID
+    // is present in the merged config passed to open_configured().
+    match crate::config::ensure_device_id() {
+        Ok(()) => config = crate::config::load_layered(&workspace.config_path())?,
+        Err(e) => eprintln!("warning: could not persist device_id: {e}"),
+    }
 
     let state = WorkspaceState::open_configured(workspace, &config)?;
 

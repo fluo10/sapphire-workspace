@@ -12,6 +12,8 @@ pub struct GitSync {
     search_path: PathBuf,
     /// Remote name (default: "origin").
     remote: String,
+    /// Commit message used when staging changes (default: `"auto: sync"`).
+    commit_message: String,
 }
 
 impl GitSync {
@@ -24,6 +26,7 @@ impl GitSync {
         Ok(Self {
             search_path: path.to_owned(),
             remote: "origin".to_owned(),
+            commit_message: "auto: sync".to_owned(),
         })
     }
 
@@ -34,7 +37,14 @@ impl GitSync {
         Ok(Self {
             search_path: path.to_owned(),
             remote: remote.to_owned(),
+            commit_message: "auto: sync".to_owned(),
         })
+    }
+
+    /// Override the commit message used when staging changes.
+    pub fn with_commit_message(mut self, message: impl Into<String>) -> Self {
+        self.commit_message = message.into();
+        self
     }
 
     fn with_repo<F, T>(&self, f: F) -> Result<T>
@@ -242,8 +252,9 @@ impl SyncBackend for GitSync {
     /// Full git sync cycle: commit staged changes → fetch+merge remote → push.
     fn sync(&self) -> Result<()> {
         let remote = self.remote.clone();
+        let message = self.commit_message.clone();
         self.with_repo(|repo, _workdir| {
-            Self::commit_staged(repo, "auto: sync")?;
+            Self::commit_staged(repo, &message)?;
             Self::sync_git(repo, &remote)?;
             Ok(())
         })
