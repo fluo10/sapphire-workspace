@@ -1,9 +1,14 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "sqlite-store")]
 use sapphire_retrieve::db::SCHEMA_VERSION;
-use sapphire_retrieve::{Document, Embedder, RetrieveDb, SearchResult};
+use sapphire_retrieve::{dedup_chunk_results, Document, Embedder, RetrieveStore, SearchResult};
+#[cfg(feature = "sqlite-store")]
+use sapphire_retrieve::{open_sqlite_fts, open_sqlite_vec};
+#[cfg(feature = "lancedb-store")]
+use sapphire_retrieve::open_lancedb;
 use tokio::sync::OnceCell;
 
 use crate::{
@@ -44,7 +49,7 @@ pub struct RetrieveParams<'a> {
 /// An open workspace paired with its lazily-initialised search infrastructure.
 pub struct WorkspaceState {
     pub workspace: Workspace,
-    retrieve_db: RetrieveDb,
+    retrieve_db: Mutex<Arc<dyn RetrieveStore + Send + Sync>>,
     embedder: OnceCell<Option<Box<dyn Embedder + Send + Sync>>>,
     sync_backend: Option<Box<dyn sapphire_sync::SyncBackend + Send + Sync>>,
 }
@@ -66,10 +71,10 @@ impl WorkspaceState {
     /// [`sapphire_sync::GitSync`] backend if the workspace root is inside a
     /// git repository.  Silently falls back to no backend if git is not found.
     pub fn open(workspace: Workspace) -> Result<Self> {
-        let retrieve_db = RetrieveDb::open(&workspace.retrieve_db_path())?;
+        let backend = Self::open_initial_backend(&workspace);
         let mut state = Self {
+            retrieve_db: Mutex::new(backend),
             workspace,
-            retrieve_db,
             embedder: OnceCell::new(),
             sync_backend: None,
         };
@@ -82,15 +87,17 @@ impl WorkspaceState {
 
     /// Delete and recreate the retrieve DB from scratch.
     pub fn rebuild(workspace: Workspace) -> Result<Self> {
-        let retrieve_db = RetrieveDb::rebuild(&workspace.retrieve_db_path())?;
+        #[cfg(feature = "sqlite-store")]
+        sapphire_retrieve::sqlite_store::wipe_db_files(&workspace.retrieve_db_path());
         #[cfg(feature = "lancedb-store")]
         {
             use sapphire_retrieve::lancedb_store;
             let _ = std::fs::remove_dir_all(lancedb_store::data_dir(&workspace.cache_dir()));
         }
+        let backend = Self::open_initial_backend(&workspace);
         Ok(Self {
+            retrieve_db: Mutex::new(backend),
             workspace,
-            retrieve_db,
             embedder: OnceCell::new(),
             sync_backend: None,
         })
@@ -162,8 +169,12 @@ impl WorkspaceState {
         self.sync_backend = Some(backend);
     }
 
-    pub fn retrieve_db(&self) -> &RetrieveDb {
-        &self.retrieve_db
+    /// Clone the active retrieve backend as an `Arc<dyn RetrieveStore>`.
+    ///
+    /// The lock is released immediately after cloning the `Arc`, so long-running
+    /// operations do not block other threads from checking the backend state.
+    pub fn retrieve_db(&self) -> Arc<dyn RetrieveStore + Send + Sync> {
+        Arc::clone(&*self.retrieve_db.lock().unwrap())
     }
 
     pub fn embedder(&self) -> Option<&dyn Embedder> {
@@ -197,15 +208,16 @@ impl WorkspaceState {
             .unwrap_or_default();
         let doc_id = path_to_doc_id(path);
 
-        self.retrieve_db.upsert_file(&path_str, mtime)?;
-        self.retrieve_db.upsert_document(&Document {
+        let db = self.retrieve_db();
+        db.upsert_file(&path_str, mtime)?;
+        db.upsert_document(&Document {
             id: doc_id,
             title,
             body,
             path: path_str,
             chunks: None,
         })?;
-        self.retrieve_db.rebuild_fts()?;
+        db.rebuild_fts()?;
 
         if let Some(sync) = &self.sync_backend {
             sync.add_file(path)?;
@@ -220,9 +232,10 @@ impl WorkspaceState {
         let path_str = path.to_string_lossy().into_owned();
         let doc_id = path_to_doc_id(path);
 
-        self.retrieve_db.remove_document(doc_id)?;
-        self.retrieve_db.remove_file(&path_str)?;
-        self.retrieve_db.rebuild_fts()?;
+        let db = self.retrieve_db();
+        db.remove_document(doc_id)?;
+        db.remove_file(&path_str)?;
+        db.rebuild_fts()?;
 
         if let Some(sync) = &self.sync_backend {
             sync.remove_file(path)?;
@@ -328,71 +341,18 @@ impl WorkspaceState {
 
     /// Initialise the vector backend (sync). Idempotent.
     pub fn load_retrieve_backend(&self, config: &UserConfig) -> Result<()> {
-        let Some(retrieve) = &config.retrieve else {
+        let Some((vector_db, dim)) = Self::extract_vector_config(config) else {
             return Ok(());
         };
-        let Some(embed_cfg) = &retrieve.embedding else {
-            return Ok(());
-        };
-        if !embed_cfg.enabled {
-            return Ok(());
+        if let Some(backend) = self.make_vector_backend(vector_db, dim)? {
+            *self.retrieve_db.lock().unwrap() = backend;
         }
-        let Some(dim) = embed_cfg.dimension else {
-            return Ok(());
-        };
-        self.init_vector_backend(retrieve.db, dim)
+        Ok(())
     }
 
     /// Async version of [`load_retrieve_backend`](Self::load_retrieve_backend).
     pub async fn load_retrieve_backend_async(&self, config: &UserConfig) -> Result<()> {
-        let Some(retrieve) = &config.retrieve else {
-            return Ok(());
-        };
-        let Some(embed_cfg) = &retrieve.embedding else {
-            return Ok(());
-        };
-        if !embed_cfg.enabled {
-            return Ok(());
-        }
-        let Some(dim) = embed_cfg.dimension else {
-            return Ok(());
-        };
-        let vector_db = retrieve.db;
-
-        #[cfg(feature = "lancedb-store")]
-        if vector_db == VectorDb::LanceDb {
-            use sapphire_retrieve::lancedb_store;
-            let lancedb_dir = lancedb_store::data_dir(&self.workspace.cache_dir());
-            self.retrieve_db.init_lancedb(&lancedb_dir, dim)?;
-            return Ok(());
-        }
-
-        self.init_vector_backend(vector_db, dim)
-    }
-
-    fn init_vector_backend(&self, vector_db: VectorDb, dim: u32) -> Result<()> {
-        match vector_db {
-            VectorDb::None => {}
-            #[cfg(feature = "sqlite-store")]
-            VectorDb::SqliteVec => {
-                self.retrieve_db.init_sqlite_vec(dim)?;
-            }
-            #[cfg(not(feature = "sqlite-store"))]
-            VectorDb::SqliteVec => {
-                return Err(crate::error::Error::SqliteStoreNotEnabled);
-            }
-            #[cfg(feature = "lancedb-store")]
-            VectorDb::LanceDb => {
-                use sapphire_retrieve::lancedb_store;
-                let lancedb_dir = lancedb_store::data_dir(&self.workspace.cache_dir());
-                self.retrieve_db.init_lancedb(&lancedb_dir, dim)?;
-            }
-            #[cfg(not(feature = "lancedb-store"))]
-            VectorDb::LanceDb => {
-                return Err(crate::error::Error::LanceDbNotEnabled);
-            }
-        }
-        Ok(())
+        self.load_retrieve_backend(config)
     }
 
     // ── embedder ──────────────────────────────────────────────────────────────
@@ -442,7 +402,7 @@ impl WorkspaceState {
 
     /// Scan the workspace and incrementally sync all files into the retrieve DB.
     pub fn sync(&self) -> Result<(usize, usize)> {
-        sync_workspace(&self.workspace, &self.retrieve_db)
+        sync_workspace(&self.workspace, self.retrieve_db())
     }
 
     /// Run the periodic sync cycle: git sync (if configured) followed by an
@@ -458,14 +418,14 @@ impl WorkspaceState {
         if let Some(backend) = &self.sync_backend {
             backend.sync()?;
         }
-        sync_workspace_incremental(&self.workspace, &self.retrieve_db)
+        sync_workspace_incremental(&self.workspace, self.retrieve_db())
     }
 
     /// Sync and, when embedding is configured, embed pending chunks.
     ///
     /// Returns `(upserted, removed, embedded)`.
     pub async fn sync_and_embed(&self, config: &UserConfig) -> Result<(usize, usize, usize)> {
-        let (upserted, removed) = sync_workspace(&self.workspace, &self.retrieve_db)?;
+        let (upserted, removed) = sync_workspace(&self.workspace, self.retrieve_db())?;
 
         let embed_cfg = config.retrieve.as_ref().and_then(|r| r.embedding.as_ref());
         let Some(embed_cfg) = embed_cfg else {
@@ -482,7 +442,7 @@ impl WorkspaceState {
             return Ok((upserted, removed, 0));
         };
 
-        let embedded = self.retrieve_db.embed_pending(embedder, |_, _| {})?;
+        let embedded = self.retrieve_db().embed_pending(embedder, &|_, _| {})?;
         Ok((upserted, removed, embedded))
     }
 
@@ -504,22 +464,20 @@ impl WorkspaceState {
         let Some(embedder) = self.embedder() else {
             return Ok(0);
         };
-        Ok(self.retrieve_db.embed_pending(embedder, on_progress)?)
+        Ok(self.retrieve_db().embed_pending(embedder, &on_progress)?)
     }
 
     // ── info ──────────────────────────────────────────────────────────────────
 
     pub fn db_info(&self) -> Result<DbInfo> {
         let db_path = self.workspace.retrieve_db_path();
-        let document_count = self.retrieve_db.document_count().unwrap_or(0);
-        let vec_info = self
-            .retrieve_db
-            .vec_info()
-            .unwrap_or(sapphire_retrieve::VecInfo {
-                embedding_dim: 0,
-                vector_count: 0,
-                pending_count: 0,
-            });
+        let db = self.retrieve_db();
+        let document_count = db.document_count().unwrap_or(0);
+        let vec_info = db.vec_info().unwrap_or(sapphire_retrieve::VecInfo {
+            embedding_dim: 0,
+            vector_count: 0,
+            pending_count: 0,
+        });
         Ok(DbInfo {
             db_path,
             #[cfg(feature = "sqlite-store")]
@@ -578,7 +536,7 @@ impl WorkspaceState {
     }
 
     fn search_fts_internal(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
-        Ok(self.retrieve_db.search_fts(query, limit)?)
+        Ok(self.retrieve_db().search_fts(query, limit)?)
     }
 
     fn search_semantic_internal(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
@@ -587,8 +545,8 @@ impl WorkspaceState {
         let query_vec = query_vecs.into_iter().next().ok_or_else(|| {
             sapphire_retrieve::Error::Embed("embedder returned empty result".into())
         })?;
-        let raw = self.retrieve_db.search_similar(&query_vec, limit * 3)?;
-        Ok(RetrieveDb::dedup_chunk_results(raw, limit))
+        let raw = self.retrieve_db().search_similar(&query_vec, limit * 3)?;
+        Ok(dedup_chunk_results(raw, limit))
     }
 
     fn search_hybrid_internal(
@@ -656,5 +614,58 @@ impl WorkspaceState {
             .into_iter()
             .filter(|r| r.path.starts_with(prefix_str.as_ref()))
             .collect()
+    }
+
+    // ── private helpers ───────────────────────────────────────────────────────
+
+    /// Create the initial (non-vector) backend appropriate for the compiled features.
+    fn open_initial_backend(workspace: &Workspace) -> Arc<dyn RetrieveStore + Send + Sync> {
+        #[cfg(feature = "sqlite-store")]
+        {
+            open_sqlite_fts(&workspace.retrieve_db_path())
+        }
+        #[cfg(not(feature = "sqlite-store"))]
+        {
+            let _ = workspace;
+            sapphire_retrieve::open_in_memory()
+        }
+    }
+
+    /// Extract `(vector_db, embedding_dim)` from config if vector search is enabled.
+    fn extract_vector_config(config: &UserConfig) -> Option<(VectorDb, u32)> {
+        let retrieve = config.retrieve.as_ref()?;
+        let embed_cfg = retrieve.embedding.as_ref()?;
+        if !embed_cfg.enabled {
+            return None;
+        }
+        let dim = embed_cfg.dimension?;
+        Some((retrieve.db, dim))
+    }
+
+    /// Construct a fully-initialised vector backend for the given `vector_db` kind.
+    ///
+    /// Returns `None` when `vector_db` is `VectorDb::None` (no vector search).
+    fn make_vector_backend(
+        &self,
+        vector_db: VectorDb,
+        dim: u32,
+    ) -> Result<Option<Arc<dyn RetrieveStore + Send + Sync>>> {
+        match vector_db {
+            VectorDb::None => Ok(None),
+            #[cfg(feature = "sqlite-store")]
+            VectorDb::SqliteVec => {
+                Ok(Some(open_sqlite_vec(&self.workspace.retrieve_db_path(), dim)?))
+            }
+            #[cfg(not(feature = "sqlite-store"))]
+            VectorDb::SqliteVec => Err(crate::error::Error::SqliteStoreNotEnabled),
+            #[cfg(feature = "lancedb-store")]
+            VectorDb::LanceDb => {
+                use sapphire_retrieve::lancedb_store;
+                let lancedb_dir = lancedb_store::data_dir(&self.workspace.cache_dir());
+                Ok(Some(open_lancedb(&lancedb_dir, dim)?))
+            }
+            #[cfg(not(feature = "lancedb-store"))]
+            VectorDb::LanceDb => Err(crate::error::Error::LanceDbNotEnabled),
+        }
     }
 }

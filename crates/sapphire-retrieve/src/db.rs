@@ -67,7 +67,6 @@ struct InMemoryState {
 }
 
 impl InMemoryStore {
-    #[allow(dead_code)]
     fn new() -> Self {
         Self {
             state: Mutex::new(InMemoryState::default()),
@@ -355,34 +354,13 @@ impl RetrieveDb {
     /// When multiple chunks from the same document match, only the best-scoring
     /// (lowest L2 distance) chunk is kept.  Returns up to `limit` results
     /// ordered by ascending score.
+    ///
+    /// # Deprecation
+    ///
+    /// Prefer the free function [`dedup_chunk_results`] instead.
+    #[deprecated(since = "0.7.0", note = "use the free function `dedup_chunk_results` instead")]
     pub fn dedup_chunk_results(results: Vec<ChunkSearchResult>, limit: usize) -> Vec<SearchResult> {
-        let mut best: HashMap<i64, ChunkSearchResult> = HashMap::new();
-        for r in results {
-            best.entry(r.doc_id)
-                .and_modify(|e| {
-                    if r.score < e.score {
-                        *e = r.clone();
-                    }
-                })
-                .or_insert(r);
-        }
-
-        let mut deduped: Vec<_> = best.into_values().collect();
-        deduped.sort_by(|a, b| {
-            a.score
-                .partial_cmp(&b.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        deduped.truncate(limit);
-        deduped
-            .into_iter()
-            .map(|r| SearchResult {
-                id: r.doc_id,
-                title: r.doc_title,
-                path: r.doc_path,
-                score: r.score,
-            })
-            .collect()
+        dedup_chunk_results(results, limit)
     }
 
     // ── embedding ─────────────────────────────────────────────────────────────
@@ -437,4 +415,72 @@ impl RetrieveDb {
     pub fn file_count(&self) -> Result<u64> {
         self.store().file_count()
     }
+}
+
+// ── free functions ────────────────────────────────────────────────────────────
+
+/// Deduplicate chunk search results to one [`SearchResult`] per document.
+///
+/// When multiple chunks from the same document match, only the best-scoring
+/// (lowest L2 distance) chunk is kept.  Returns up to `limit` results
+/// ordered by ascending score.
+pub fn dedup_chunk_results(results: Vec<ChunkSearchResult>, limit: usize) -> Vec<SearchResult> {
+    let mut best: HashMap<i64, ChunkSearchResult> = HashMap::new();
+    for r in results {
+        best.entry(r.doc_id)
+            .and_modify(|e| {
+                if r.score < e.score {
+                    *e = r.clone();
+                }
+            })
+            .or_insert(r);
+    }
+
+    let mut deduped: Vec<_> = best.into_values().collect();
+    deduped.sort_by(|a, b| {
+        a.score
+            .partial_cmp(&b.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    deduped.truncate(limit);
+    deduped
+        .into_iter()
+        .map(|r| SearchResult {
+            id: r.doc_id,
+            title: r.doc_title,
+            path: r.doc_path,
+            score: r.score,
+        })
+        .collect()
+}
+
+// ── backend factory functions ─────────────────────────────────────────────────
+
+/// Open or create an in-memory backend.
+///
+/// Data is not persisted to disk — all state is lost when the process exits.
+/// Use as a fallback when no storage feature is compiled in, or in tests.
+pub fn open_in_memory() -> Arc<dyn RetrieveStore + Send + Sync> {
+    Arc::new(InMemoryStore::new())
+}
+
+/// Open or create a SQLite FTS-only backend at `db_path`.
+///
+/// The SQLite file is created lazily on first use.
+/// Call [`open_sqlite_vec`] instead to enable vector search.
+#[cfg(feature = "sqlite-store")]
+pub fn open_sqlite_fts(db_path: &Path) -> Arc<dyn RetrieveStore + Send + Sync> {
+    Arc::new(SqliteStore::new_fts_only(db_path.to_owned()))
+}
+
+/// Open or create a SQLite + sqlite-vec backend at `db_path` with `dim`-dimensional embeddings.
+#[cfg(feature = "sqlite-store")]
+pub fn open_sqlite_vec(db_path: &Path, dim: u32) -> Result<Arc<dyn RetrieveStore + Send + Sync>> {
+    Ok(Arc::new(SqliteStore::new_with_vec(db_path.to_owned(), dim)?))
+}
+
+/// Open or create a LanceDB backend under `data_dir` with `dim`-dimensional embeddings.
+#[cfg(feature = "lancedb-store")]
+pub fn open_lancedb(data_dir: &Path, dim: u32) -> Result<Arc<dyn RetrieveStore + Send + Sync>> {
+    Ok(Arc::new(LanceDbBackend::new(data_dir, dim)?))
 }
