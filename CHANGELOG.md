@@ -5,6 +5,29 @@ All notable changes to `sapphire-workspace` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-04-11
+
+### Added
+
+- `WorkspaceState::retrieve_files` — unified search method supporting full-text, semantic, and hybrid (FTS + semantic via Reciprocal Rank Fusion) modes with configurable weights; accepts an optional folder path filter for scoping results.
+- `WorkspaceState::sync_workspace_incremental` — mtime-based incremental indexer that only re-indexes files changed since the last sync, making periodic background refreshes much cheaper than a full rescan.
+- `WorkspaceState::periodic_sync` — orchestrates a full sync cycle: git sync (if configured) followed by an incremental cache refresh.
+- `SyncConfig::device_id: Option<Uuid>` and `SyncConfig::ensure_device_id()` — per-device UUID embedded in git commit messages for tracing sync origin across devices.
+- CLI: layered config loading via the `config` crate — workspace-level `{marker}/config.toml` (shared across devices) merged with a per-user override file (`$XDG_CONFIG_HOME/sapphire-workspace/config.toml`).
+- CLI: per-device UUID managed in the user-level config; git commits carry the message `auto: sync [<uuid>]`.
+
+### Changed
+
+- `sync_interval_minutes` moved from `SyncConfig` (`sapphire-sync`) to `WorkspaceConfig` (`sapphire-workspace`); periodic sync is now orchestrated by `WorkspaceState` to cover both git sync and cache refresh.
+
+### Removed
+
+- `sapphire_workspace::util::merge_toml_values` — use the `config` crate directly for layered config merging.
+
+## [0.5.1] - 2026-04-08
+
+Internal repository restructure; no public API changes.
+
 ## [0.5.0] - 2026-04-08
 
 ### Added
@@ -73,6 +96,8 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - `fastembed-embed`, `lancedb-store`, `sqlite-store`, `git-sync` feature flags.
 - Re-exports of `sapphire-retrieve` and `sapphire-sync` public APIs.
 
+[0.6.0]: https://github.com/fluo10/sapphire-workspace/compare/workspace-v0.5.1...workspace-v0.6.0
+[0.5.1]: https://github.com/fluo10/sapphire-workspace/compare/workspace-v0.5.0...workspace-v0.5.1
 [0.5.0]: https://github.com/fluo10/sapphire-journal/compare/workspace-v0.4.0...workspace-v0.5.0
 [0.4.0]: https://github.com/fluo10/sapphire-journal/compare/workspace-v0.3.0...workspace-v0.4.0
 [0.3.0]: https://github.com/fluo10/sapphire-journal/compare/workspace-v0.2.0...workspace-v0.3.0
