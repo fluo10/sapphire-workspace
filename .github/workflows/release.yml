@@ -49,7 +49,7 @@ jobs:
         run: choco install protoc
 
       - name: Build
-        run: cargo build -p sapphire-workspace-cli --release --locked --target ${{ matrix.target }}
+        run: cargo build -p sapphire-workspace-cli --release --target ${{ matrix.target }}
 
       - name: Stage binary
         shell: bash
