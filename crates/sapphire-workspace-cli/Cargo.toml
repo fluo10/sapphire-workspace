@@ -31,6 +31,6 @@ tracing-subscriber.workspace = true
 notify = "7"
 notify-debouncer-mini = "0.4"
 config = { version = "0.15", default-features = false, features = ["toml"] }
-dirs = "5"
+dirs = "6"
 toml.workspace = true
 uuid.workspace = true
