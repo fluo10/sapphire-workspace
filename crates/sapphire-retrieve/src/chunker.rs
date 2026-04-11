@@ -288,8 +288,7 @@ fn chunks_from_json_value(raw: &str, value: &serde_json::Value) -> Vec<TextChunk
                         .iter()
                         .enumerate()
                         .map(|(i, v)| {
-                            let (line, column) =
-                                nested_positions.get(i).copied().unwrap_or((i, 0));
+                            let (line, column) = nested_positions.get(i).copied().unwrap_or((i, 0));
                             TextChunk {
                                 line,
                                 column,
