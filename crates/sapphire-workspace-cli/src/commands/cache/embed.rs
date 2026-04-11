@@ -28,9 +28,7 @@ pub fn run(workspace_dir: Option<&Path>) -> Result<()> {
         );
     }
     if retrieve.db == VectorDb::None {
-        anyhow::bail!(
-            "retrieve.db is \"none\" — set it to \"sqlite_vec\" or \"lancedb\""
-        );
+        anyhow::bail!("retrieve.db is \"none\" — set it to \"sqlite_vec\" or \"lancedb\"");
     }
     if embed_cfg.dimension.is_none() {
         anyhow::bail!(

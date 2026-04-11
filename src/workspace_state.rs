@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use sapphire_retrieve::{Document, Embedder, RetrieveDb, SearchResult};
 #[cfg(feature = "sqlite-store")]
 use sapphire_retrieve::db::SCHEMA_VERSION;
+use sapphire_retrieve::{Document, Embedder, RetrieveDb, SearchResult};
 use tokio::sync::OnceCell;
 
 use crate::{
@@ -152,14 +152,13 @@ impl WorkspaceState {
 
     /// Borrow the sync backend, if one is configured.
     pub fn sync_backend(&self) -> Option<&dyn sapphire_sync::SyncBackend> {
-        self.sync_backend.as_ref().map(|b| b.as_ref() as &dyn sapphire_sync::SyncBackend)
+        self.sync_backend
+            .as_ref()
+            .map(|b| b.as_ref() as &dyn sapphire_sync::SyncBackend)
     }
 
     /// Attach a sync backend (e.g. `GitSync`).  Called once after construction.
-    pub fn set_sync_backend(
-        &mut self,
-        backend: Box<dyn sapphire_sync::SyncBackend + Send + Sync>,
-    ) {
+    pub fn set_sync_backend(&mut self, backend: Box<dyn sapphire_sync::SyncBackend + Send + Sync>) {
         self.sync_backend = Some(backend);
     }
 
@@ -329,19 +328,35 @@ impl WorkspaceState {
 
     /// Initialise the vector backend (sync). Idempotent.
     pub fn load_retrieve_backend(&self, config: &UserConfig) -> Result<()> {
-        let Some(retrieve) = &config.retrieve else { return Ok(()); };
-        let Some(embed_cfg) = &retrieve.embedding else { return Ok(()); };
-        if !embed_cfg.enabled { return Ok(()); }
-        let Some(dim) = embed_cfg.dimension else { return Ok(()); };
+        let Some(retrieve) = &config.retrieve else {
+            return Ok(());
+        };
+        let Some(embed_cfg) = &retrieve.embedding else {
+            return Ok(());
+        };
+        if !embed_cfg.enabled {
+            return Ok(());
+        }
+        let Some(dim) = embed_cfg.dimension else {
+            return Ok(());
+        };
         self.init_vector_backend(retrieve.db, dim)
     }
 
     /// Async version of [`load_retrieve_backend`](Self::load_retrieve_backend).
     pub async fn load_retrieve_backend_async(&self, config: &UserConfig) -> Result<()> {
-        let Some(retrieve) = &config.retrieve else { return Ok(()); };
-        let Some(embed_cfg) = &retrieve.embedding else { return Ok(()); };
-        if !embed_cfg.enabled { return Ok(()); }
-        let Some(dim) = embed_cfg.dimension else { return Ok(()); };
+        let Some(retrieve) = &config.retrieve else {
+            return Ok(());
+        };
+        let Some(embed_cfg) = &retrieve.embedding else {
+            return Ok(());
+        };
+        if !embed_cfg.enabled {
+            return Ok(());
+        }
+        let Some(dim) = embed_cfg.dimension else {
+            return Ok(());
+        };
         let vector_db = retrieve.db;
 
         #[cfg(feature = "lancedb-store")]
@@ -478,8 +493,12 @@ impl WorkspaceState {
         on_progress: impl Fn(usize, usize),
     ) -> Result<usize> {
         let embed_cfg = config.retrieve.as_ref().and_then(|r| r.embedding.as_ref());
-        let Some(embed_cfg) = embed_cfg else { return Ok(0); };
-        if !embed_cfg.enabled { return Ok(0); }
+        let Some(embed_cfg) = embed_cfg else {
+            return Ok(0);
+        };
+        if !embed_cfg.enabled {
+            return Ok(0);
+        }
         self.load_retrieve_backend(config)?;
         self.load_embedder(config)?;
         let Some(embedder) = self.embedder() else {
@@ -562,17 +581,12 @@ impl WorkspaceState {
         Ok(self.retrieve_db.search_fts(query, limit)?)
     }
 
-    fn search_semantic_internal(
-        &self,
-        query: &str,
-        limit: usize,
-    ) -> Result<Vec<SearchResult>> {
+    fn search_semantic_internal(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
         let embedder = self.embedder().expect("caller verified embedder exists");
         let query_vecs = embedder.embed_texts(&[query])?;
-        let query_vec = query_vecs
-            .into_iter()
-            .next()
-            .ok_or_else(|| sapphire_retrieve::Error::Embed("embedder returned empty result".into()))?;
+        let query_vec = query_vecs.into_iter().next().ok_or_else(|| {
+            sapphire_retrieve::Error::Embed("embedder returned empty result".into())
+        })?;
         let raw = self.retrieve_db.search_similar(&query_vec, limit * 3)?;
         Ok(RetrieveDb::dedup_chunk_results(raw, limit))
     }
@@ -635,10 +649,7 @@ impl WorkspaceState {
             .collect()
     }
 
-    fn filter_by_folder(
-        results: Vec<SearchResult>,
-        folder: Option<&Path>,
-    ) -> Vec<SearchResult> {
+    fn filter_by_folder(results: Vec<SearchResult>, folder: Option<&Path>) -> Vec<SearchResult> {
         let Some(prefix) = folder else { return results };
         let prefix_str = prefix.to_string_lossy();
         results

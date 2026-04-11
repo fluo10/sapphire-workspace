@@ -21,8 +21,9 @@ impl GitSync {
     ///
     /// Returns an error if no repository is found.
     pub fn open(path: &Path) -> Result<Self> {
-        Repository::discover(path)
-            .map_err(|_| Error::NoRepository { path: path.to_owned() })?;
+        Repository::discover(path).map_err(|_| Error::NoRepository {
+            path: path.to_owned(),
+        })?;
         Ok(Self {
             search_path: path.to_owned(),
             remote: "origin".to_owned(),
@@ -32,8 +33,9 @@ impl GitSync {
 
     /// Create a `GitSync` that pushes/pulls against the specified remote.
     pub fn with_remote(path: &Path, remote: &str) -> Result<Self> {
-        Repository::discover(path)
-            .map_err(|_| Error::NoRepository { path: path.to_owned() })?;
+        Repository::discover(path).map_err(|_| Error::NoRepository {
+            path: path.to_owned(),
+        })?;
         Ok(Self {
             search_path: path.to_owned(),
             remote: remote.to_owned(),
@@ -51,11 +53,10 @@ impl GitSync {
     where
         F: FnOnce(&Repository, &Path) -> Result<T>,
     {
-        let repo = Repository::discover(&self.search_path)
-            .map_err(|_| Error::NoRepository { path: self.search_path.clone() })?;
-        let workdir = repo
-            .workdir()
-            .ok_or(Error::BareRepository)?;
+        let repo = Repository::discover(&self.search_path).map_err(|_| Error::NoRepository {
+            path: self.search_path.clone(),
+        })?;
+        let workdir = repo.workdir().ok_or(Error::BareRepository)?;
         f(&repo, workdir)
     }
 
@@ -106,7 +107,9 @@ impl GitSync {
         // ── 1. Fetch ──────────────────────────────────────────────────────────
         let mut remote = repo
             .find_remote(remote_name)
-            .map_err(|_| Error::RemoteNotFound { name: remote_name.to_owned() })?;
+            .map_err(|_| Error::RemoteNotFound {
+                name: remote_name.to_owned(),
+            })?;
 
         remote.fetch(&[] as &[&str], None, None)?;
 
@@ -205,11 +208,7 @@ impl GitSync {
         }
 
         // ── 4. Push ───────────────────────────────────────────────────────────
-        let head_name = repo
-            .head()?
-            .shorthand()
-            .unwrap_or("main")
-            .to_owned();
+        let head_name = repo.head()?.shorthand().unwrap_or("main").to_owned();
         let refspec = format!("refs/heads/{head_name}:refs/heads/{head_name}");
         let mut remote = repo.find_remote(remote_name)?;
         remote.push(&[refspec.as_str()], None)?;

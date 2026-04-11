@@ -50,7 +50,13 @@ impl RecallServer {
             let workspace = Workspace::resolve(&WORKSPACE_CTX, self.default_dir.as_deref())?;
             let state = WorkspaceState::open(workspace)?;
             let config = UserConfig::load()?;
-            if config.retrieve.as_ref().and_then(|r| r.embedding.as_ref()).map(|e| e.enabled).unwrap_or(false) {
+            if config
+                .retrieve
+                .as_ref()
+                .and_then(|r| r.embedding.as_ref())
+                .map(|e| e.enabled)
+                .unwrap_or(false)
+            {
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(async {
                         state.load_retrieve_backend_async(&config).await?;
@@ -78,7 +84,9 @@ struct SearchParams {
 
 #[tool_router]
 impl RecallServer {
-    #[tool(description = "Show workspace location, index path, schema version, and document count.")]
+    #[tool(
+        description = "Show workspace location, index path, schema version, and document count."
+    )]
     fn workspace_info(&self, _: Parameters<serde_json::Value>) -> Result<String, String> {
         (|| -> anyhow::Result<String> {
             self.with_state(|s| {
@@ -118,7 +126,8 @@ impl RecallServer {
                 Some(s) => s.workspace.root.clone(),
                 None => Workspace::resolve(&WORKSPACE_CTX, self.default_dir.as_deref())?.root,
             };
-            let state = WorkspaceState::rebuild(Workspace::from_root(&WORKSPACE_CTX, &workspace_root)?)?;
+            let state =
+                WorkspaceState::rebuild(Workspace::from_root(&WORKSPACE_CTX, &workspace_root)?)?;
             let (upserted, _removed) = state.sync()?;
             *guard = Some(state);
             Ok(format!("rebuilt: {upserted} files indexed"))
@@ -175,14 +184,13 @@ impl RecallServer {
 #[tool_handler]
 impl ServerHandler for RecallServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_instructions(
-                "sapphire-workspace indexes text files for full-text and semantic search. \
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
+            "sapphire-workspace indexes text files for full-text and semantic search. \
                  Use workspace_sync to keep the index up to date, workspace_info to \
                  inspect the index, workspace_rebuild to recreate it from scratch, \
                  and search to find relevant documents."
-                    .to_owned(),
-            )
+                .to_owned(),
+        )
     }
 }
 
@@ -190,7 +198,9 @@ impl ServerHandler for RecallServer {
 
 #[tokio::main]
 pub async fn run(workspace_dir: Option<&Path>) -> anyhow::Result<()> {
-    tracing_subscriber::fmt().with_writer(std::io::stderr).init();
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .init();
 
     let server = RecallServer::new(workspace_dir.map(|p| p.to_path_buf()));
     let service = server.serve(stdio()).await?;

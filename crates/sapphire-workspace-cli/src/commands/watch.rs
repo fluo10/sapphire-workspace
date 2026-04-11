@@ -40,8 +40,7 @@ pub fn run(workspace_dir: Option<&Path>, debounce_ms: u64) -> Result<()> {
     let (tx, rx) = std::sync::mpsc::channel::<DebounceEventResult>();
 
     let debounce = Duration::from_millis(debounce_ms);
-    let mut debouncer: Debouncer<notify::RecommendedWatcher> =
-        new_debouncer(debounce, tx)?;
+    let mut debouncer: Debouncer<notify::RecommendedWatcher> = new_debouncer(debounce, tx)?;
 
     debouncer
         .watcher()
@@ -51,13 +50,13 @@ pub fn run(workspace_dir: Option<&Path>, debounce_ms: u64) -> Result<()> {
 
     loop {
         // Block until an event arrives, or until the next sync is due.
-        let timeout = sync_interval.map(|interval| {
-            interval.saturating_sub(last_sync.elapsed())
-        });
+        let timeout = sync_interval.map(|interval| interval.saturating_sub(last_sync.elapsed()));
 
         let result = match timeout {
             Some(t) => rx.recv_timeout(t),
-            None => rx.recv().map_err(|_| std::sync::mpsc::RecvTimeoutError::Disconnected),
+            None => rx
+                .recv()
+                .map_err(|_| std::sync::mpsc::RecvTimeoutError::Disconnected),
         };
 
         // Run periodic sync when the interval has elapsed (timeout or after event processing).

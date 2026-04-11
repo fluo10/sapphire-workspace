@@ -27,7 +27,7 @@ use std::{
     sync::Once,
 };
 
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 
 use crate::{
     chunker::chunk_document,
@@ -85,12 +85,10 @@ CREATE INDEX IF NOT EXISTS idx_chunks_doc_id ON chunks(doc_id);
 static SQLITE_VEC_INIT: Once = Once::new();
 
 fn init_sqlite_vec_extension() {
-    SQLITE_VEC_INIT.call_once(|| {
-        unsafe {
-            rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
-                sqlite_vec::sqlite3_vec_init as *const (),
-            )));
-        }
+    SQLITE_VEC_INIT.call_once(|| unsafe {
+        rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
+            sqlite_vec::sqlite3_vec_init as *const (),
+        )));
     });
 }
 
@@ -124,7 +122,10 @@ impl SqliteStore {
         init_sqlite_vec_extension();
         let conn = open_or_init(&db_path)?;
         ensure_vec_tables(&conn, embedding_dim)?;
-        Ok(Self { db_path, dim: Some(embedding_dim) })
+        Ok(Self {
+            db_path,
+            dim: Some(embedding_dim),
+        })
     }
 
     /// Return the vector embedding dimension, or `None` if vector search is
@@ -148,7 +149,9 @@ impl RetrieveStore for SqliteStore {
         let conn = self.open_conn()?;
         let mut stmt = conn.prepare("SELECT path, file_mtime FROM files")?;
         let result = stmt
-            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?
             .collect::<rusqlite::Result<HashMap<_, _>>>()?;
         Ok(result)
     }
@@ -260,8 +263,9 @@ impl RetrieveStore for SqliteStore {
 
     fn document_count(&self) -> Result<u64> {
         let conn = self.open_conn()?;
-        let count: u64 =
-            conn.query_row("SELECT COUNT(*) FROM documents", [], |row| row.get::<_, i64>(0))? as u64;
+        let count: u64 = conn.query_row("SELECT COUNT(*) FROM documents", [], |row| {
+            row.get::<_, i64>(0)
+        })? as u64;
         Ok(count)
     }
 
@@ -293,14 +297,22 @@ impl RetrieveStore for SqliteStore {
 
     fn vec_info(&self) -> Result<VecInfo> {
         let Some(dim) = self.dim else {
-            return Ok(VecInfo { embedding_dim: 0, vector_count: 0, pending_count: 0 });
+            return Ok(VecInfo {
+                embedding_dim: 0,
+                vector_count: 0,
+                pending_count: 0,
+            });
         };
         let conn = self.open_conn()?;
         let vector_count: u64 = conn
-            .query_row("SELECT COUNT(*) FROM chunk_vectors", [], |row| row.get::<_, i64>(0))
+            .query_row("SELECT COUNT(*) FROM chunk_vectors", [], |row| {
+                row.get::<_, i64>(0)
+            })
             .unwrap_or(0) as u64;
         let chunk_count: u64 = conn
-            .query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get::<_, i64>(0))
+            .query_row("SELECT COUNT(*) FROM chunks", [], |row| {
+                row.get::<_, i64>(0)
+            })
             .unwrap_or(0) as u64;
         Ok(VecInfo {
             embedding_dim: dim,
@@ -361,7 +373,10 @@ pub(crate) fn open_or_init(db_path: &Path) -> Result<Connection> {
         return Ok(conn);
     }
 
-    Err(Error::SchemaTooNew { db_version, app_version: SCHEMA_VERSION })
+    Err(Error::SchemaTooNew {
+        db_version,
+        app_version: SCHEMA_VERSION,
+    })
 }
 
 pub(crate) fn wipe_db_files(db_path: &Path) {

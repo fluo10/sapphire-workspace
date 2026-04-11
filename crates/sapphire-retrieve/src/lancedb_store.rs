@@ -32,7 +32,10 @@ use arrow_array::{
 use arrow_schema::{DataType, Field, Schema};
 use futures::TryStreamExt as _;
 use lancedb::{
-    index::{Index, scalar::{FtsIndexBuilder, FullTextSearchQuery}},
+    index::{
+        Index,
+        scalar::{FtsIndexBuilder, FullTextSearchQuery},
+    },
     query::{ExecutableQuery, QueryBase, Select},
 };
 
@@ -105,10 +108,7 @@ fn chunk_vectors_schema(dim: i32) -> Arc<Schema> {
         Field::new("text", DataType::Utf8, false),
         Field::new(
             "embedding",
-            DataType::FixedSizeList(
-                Arc::new(Field::new("item", DataType::Float32, true)),
-                dim,
-            ),
+            DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, true)), dim),
             false,
         ),
     ]))
@@ -130,10 +130,7 @@ async fn open_or_create(
         Ok(db.open_table(name).execute().await?)
     } else {
         let empty = RecordBatch::new_empty(schema);
-        Ok(db
-            .create_table(name, empty)
-            .execute()
-            .await?)
+        Ok(db.create_table(name, empty).execute().await?)
     }
 }
 
@@ -173,19 +170,19 @@ impl LanceFullStore {
         let chunk_vectors =
             open_or_create(&db, TBL_CHUNK_VECTORS, chunk_vectors_schema(dim)).await?;
 
-        Ok(Self { files, documents, chunks_meta, chunk_vectors, dim })
+        Ok(Self {
+            files,
+            documents,
+            chunks_meta,
+            chunk_vectors,
+            dim,
+        })
     }
 
     // ── file tracking ─────────────────────────────────────────────────────────
 
     async fn file_mtimes(&self) -> Result<std::collections::HashMap<String, i64>> {
-        let batches: Vec<RecordBatch> = self
-            .files
-            .query()
-            .execute()
-            .await?
-            .try_collect()
-            .await?;
+        let batches: Vec<RecordBatch> = self.files.query().execute().await?.try_collect().await?;
 
         let mut map = std::collections::HashMap::new();
         for batch in &batches {
@@ -216,7 +213,9 @@ impl LanceFullStore {
         .map_err(|e| Error::Embed(e.to_string()))?;
 
         let mut merge = self.files.merge_insert(&["path"]);
-        merge.when_matched_update_all(None).when_not_matched_insert_all();
+        merge
+            .when_matched_update_all(None)
+            .when_not_matched_insert_all();
         merge
             .execute(Box::new(RecordBatchIterator::new(vec![Ok(batch)], schema)))
             .await?;
@@ -250,14 +249,20 @@ impl LanceFullStore {
         .map_err(|e| Error::Embed(e.to_string()))?;
 
         let mut merge = self.documents.merge_insert(&["id"]);
-        merge.when_matched_update_all(None).when_not_matched_insert_all();
+        merge
+            .when_matched_update_all(None)
+            .when_not_matched_insert_all();
         merge
             .execute(Box::new(RecordBatchIterator::new(vec![Ok(batch)], schema)))
             .await?;
 
         // Remove stale chunks.
-        self.chunks_meta.delete(&format!("doc_id = {}", doc.id)).await?;
-        self.chunk_vectors.delete(&format!("doc_id = {}", doc.id)).await?;
+        self.chunks_meta
+            .delete(&format!("doc_id = {}", doc.id))
+            .await?;
+        self.chunk_vectors
+            .delete(&format!("doc_id = {}", doc.id))
+            .await?;
 
         // Build (line, col, embed_text) tuples.
         let computed: Vec<(usize, usize, String)>;
@@ -298,10 +303,7 @@ impl LanceFullStore {
         )
         .map_err(|e| Error::Embed(e.to_string()))?;
 
-        self.chunks_meta
-            .add(vec![batch])
-            .execute()
-            .await?;
+        self.chunks_meta.add(vec![batch]).execute().await?;
 
         Ok(())
     }
@@ -441,7 +443,10 @@ impl LanceFullStore {
         let batches: Vec<RecordBatch> = self
             .chunk_vectors
             .query()
-            .select(Select::Columns(vec!["doc_id".to_string(), "line".to_string()]))
+            .select(Select::Columns(vec![
+                "doc_id".to_string(),
+                "line".to_string(),
+            ]))
             .execute()
             .await?
             .try_collect()
@@ -541,10 +546,7 @@ impl LanceFullStore {
         )
         .map_err(|e| Error::Embed(e.to_string()))?;
 
-        self.chunk_vectors
-            .add(vec![batch])
-            .execute()
-            .await?;
+        self.chunk_vectors.add(vec![batch]).execute().await?;
         Ok(())
     }
 
@@ -606,7 +608,11 @@ impl LanceDbBackend {
             .build()
             .map_err(|e| Error::Embed(format!("failed to create Tokio runtime: {e}")))?;
         let inner = Self::block_on_with(&rt, LanceFullStore::open(data_dir, embedding_dim))?;
-        Ok(Self { inner, rt, dim: embedding_dim })
+        Ok(Self {
+            inner,
+            rt,
+            dim: embedding_dim,
+        })
     }
 
     /// Run a future to completion, safely handling the case where we are
@@ -620,10 +626,7 @@ impl LanceDbBackend {
     /// Note: `block_in_place` panics when the *outer* runtime uses
     /// `flavor = "current_thread"`.  In that case callers should move the
     /// call to `spawn_blocking` before reaching this code.
-    fn block_on_with<F: std::future::Future>(
-        rt: &tokio::runtime::Runtime,
-        f: F,
-    ) -> F::Output {
+    fn block_on_with<F: std::future::Future>(rt: &tokio::runtime::Runtime, f: F) -> F::Output {
         match tokio::runtime::Handle::try_current() {
             Ok(handle) => tokio::task::block_in_place(|| handle.block_on(f)),
             Err(_) => rt.block_on(f),
@@ -672,7 +675,11 @@ impl LanceDbBackend {
 
     // ── vector search ─────────────────────────────────────────────────────────
 
-    pub fn search_similar(&self, query_vec: &[f32], limit: usize) -> Result<Vec<ChunkSearchResult>> {
+    pub fn search_similar(
+        &self,
+        query_vec: &[f32],
+        limit: usize,
+    ) -> Result<Vec<ChunkSearchResult>> {
         self.block_on(self.inner.search_similar(query_vec, limit))
     }
 

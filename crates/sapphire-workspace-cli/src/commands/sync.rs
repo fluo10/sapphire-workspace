@@ -38,9 +38,7 @@ pub fn run(workspace_dir: Option<&Path>) -> Result<()> {
 
 /// Try to find a workspace with a marker directory; fall back to `resolve()`.
 /// Returns the workspace and, if a marker was found, the loaded `WorkspaceConfig`.
-pub fn open_workspace(
-    explicit: Option<&Path>,
-) -> Result<(Workspace, Option<WorkspaceConfig>)> {
+pub fn open_workspace(explicit: Option<&Path>) -> Result<(Workspace, Option<WorkspaceConfig>)> {
     // If an explicit path was given, use it directly.
     let start = if let Some(dir) = explicit {
         std::borrow::Cow::Owned(

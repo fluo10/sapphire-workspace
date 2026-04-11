@@ -68,7 +68,9 @@ struct InMemoryState {
 
 impl InMemoryStore {
     fn new() -> Self {
-        Self { state: Mutex::new(InMemoryState::default()) }
+        Self {
+            state: Mutex::new(InMemoryState::default()),
+        }
     }
 }
 
@@ -78,7 +80,11 @@ impl RetrieveStore for InMemoryStore {
     }
 
     fn upsert_file(&self, path: &str, mtime: i64) -> Result<()> {
-        self.state.lock().unwrap().files.insert(path.to_owned(), mtime);
+        self.state
+            .lock()
+            .unwrap()
+            .files
+            .insert(path.to_owned(), mtime);
         Ok(())
     }
 
@@ -92,7 +98,11 @@ impl RetrieveStore for InMemoryStore {
     }
 
     fn upsert_document(&self, doc: &Document) -> Result<()> {
-        self.state.lock().unwrap().documents.insert(doc.id, doc.clone());
+        self.state
+            .lock()
+            .unwrap()
+            .documents
+            .insert(doc.id, doc.clone());
         Ok(())
     }
 
@@ -112,8 +122,7 @@ impl RetrieveStore for InMemoryStore {
             .documents
             .values()
             .filter(|doc| {
-                doc.title.to_lowercase().contains(&q)
-                    || doc.body.to_lowercase().contains(&q)
+                doc.title.to_lowercase().contains(&q) || doc.body.to_lowercase().contains(&q)
             })
             .take(limit)
             .map(|doc| SearchResult {
@@ -128,7 +137,14 @@ impl RetrieveStore for InMemoryStore {
     }
 
     fn document_ids(&self) -> Result<Vec<i64>> {
-        Ok(self.state.lock().unwrap().documents.keys().copied().collect())
+        Ok(self
+            .state
+            .lock()
+            .unwrap()
+            .documents
+            .keys()
+            .copied()
+            .collect())
     }
 
     fn document_count(&self) -> Result<u64> {
@@ -144,14 +160,14 @@ impl RetrieveStore for InMemoryStore {
     }
 
     fn vec_info(&self) -> Result<VecInfo> {
-        Ok(VecInfo { embedding_dim: 0, vector_count: 0, pending_count: 0 })
+        Ok(VecInfo {
+            embedding_dim: 0,
+            vector_count: 0,
+            pending_count: 0,
+        })
     }
 
-    fn search_similar(
-        &self,
-        _query_vec: &[f32],
-        _limit: usize,
-    ) -> Result<Vec<ChunkSearchResult>> {
+    fn search_similar(&self, _query_vec: &[f32], _limit: usize) -> Result<Vec<ChunkSearchResult>> {
         Ok(vec![])
     }
 }
@@ -337,10 +353,7 @@ impl RetrieveDb {
     /// When multiple chunks from the same document match, only the best-scoring
     /// (lowest L2 distance) chunk is kept.  Returns up to `limit` results
     /// ordered by ascending score.
-    pub fn dedup_chunk_results(
-        results: Vec<ChunkSearchResult>,
-        limit: usize,
-    ) -> Vec<SearchResult> {
+    pub fn dedup_chunk_results(results: Vec<ChunkSearchResult>, limit: usize) -> Vec<SearchResult> {
         let mut best: HashMap<i64, ChunkSearchResult> = HashMap::new();
         for r in results {
             best.entry(r.doc_id)
@@ -354,12 +367,19 @@ impl RetrieveDb {
 
         let mut deduped: Vec<_> = best.into_values().collect();
         deduped.sort_by(|a, b| {
-            a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal)
+            a.score
+                .partial_cmp(&b.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
         deduped.truncate(limit);
         deduped
             .into_iter()
-            .map(|r| SearchResult { id: r.doc_id, title: r.doc_title, path: r.doc_path, score: r.score })
+            .map(|r| SearchResult {
+                id: r.doc_id,
+                title: r.doc_title,
+                path: r.doc_path,
+                score: r.score,
+            })
             .collect()
     }
 

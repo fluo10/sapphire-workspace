@@ -31,14 +31,19 @@ impl Workspace {
 
     /// Walk up from `start` until a directory containing `.{ctx.app_name}` is found.
     pub fn find_from(ctx: &'static AppContext, start: &Path) -> Result<Self> {
-        let start = start
-            .canonicalize()
-            .map_err(|e| Error::Access { path: start.to_owned(), source: e })?;
+        let start = start.canonicalize().map_err(|e| Error::Access {
+            path: start.to_owned(),
+            source: e,
+        })?;
         let marker = format!(".{}", ctx.app_name);
         let mut current = start.as_path();
         loop {
             if current.join(&marker).is_dir() {
-                return Ok(Self { root: current.to_owned(), uuid: path_uuid(current), ctx });
+                return Ok(Self {
+                    root: current.to_owned(),
+                    uuid: path_uuid(current),
+                    ctx,
+                });
             }
             match current.parent() {
                 Some(p) => current = p,
@@ -46,7 +51,7 @@ impl Workspace {
                     return Err(Error::MarkerNotFound {
                         marker,
                         start: start.to_owned(),
-                    })
+                    });
                 }
             }
         }
@@ -61,14 +66,19 @@ impl Workspace {
     ///
     /// Returns an error if the marker directory does not exist.
     pub fn from_root(ctx: &'static AppContext, root: &Path) -> Result<Self> {
-        let root = root
-            .canonicalize()
-            .map_err(|e| Error::Access { path: root.to_owned(), source: e })?;
+        let root = root.canonicalize().map_err(|e| Error::Access {
+            path: root.to_owned(),
+            source: e,
+        })?;
         let marker = format!(".{}", ctx.app_name);
         if !root.join(&marker).is_dir() {
             return Err(Error::MarkerDirMissing { marker, root });
         }
-        Ok(Self { uuid: path_uuid(&root), root, ctx })
+        Ok(Self {
+            uuid: path_uuid(&root),
+            root,
+            ctx,
+        })
     }
 
     /// `true` if the marker directory (`.{app_name}`) exists under `root`.
@@ -94,20 +104,28 @@ impl Workspace {
     /// 3. Current working directory (TTY: ask for confirmation; non-TTY: use directly)
     pub fn resolve(ctx: &'static AppContext, explicit: Option<&Path>) -> Result<Self> {
         let root = if let Some(dir) = explicit {
-            dir.canonicalize()
-                .map_err(|e| Error::Access { path: dir.to_owned(), source: e })?
+            dir.canonicalize().map_err(|e| Error::Access {
+                path: dir.to_owned(),
+                source: e,
+            })?
         } else if let Ok(val) = std::env::var("SAPPHIRE_WORKSPACE_DIR") {
             if !val.is_empty() {
                 let p = PathBuf::from(&val);
-                p.canonicalize()
-                    .map_err(|e| Error::Access { path: p.clone(), source: e })?
+                p.canonicalize().map_err(|e| Error::Access {
+                    path: p.clone(),
+                    source: e,
+                })?
             } else {
                 resolve_cwd()?
             }
         } else {
             resolve_cwd()?
         };
-        Ok(Self { uuid: path_uuid(&root), root, ctx })
+        Ok(Self {
+            uuid: path_uuid(&root),
+            root,
+            ctx,
+        })
     }
 
     // ── override constructors ─────────────────────────────────────────────────
@@ -120,15 +138,24 @@ impl Workspace {
     /// directly as the cache-directory key.
     ///
     /// The marker directory (`.{ctx.app_name}`) must already exist under `root`.
-    pub fn from_root_with_uuid(ctx: &'static AppContext, root: &Path, id: uuid::Uuid) -> Result<Self> {
-        let root = root
-            .canonicalize()
-            .map_err(|e| Error::Access { path: root.to_owned(), source: e })?;
+    pub fn from_root_with_uuid(
+        ctx: &'static AppContext,
+        root: &Path,
+        id: uuid::Uuid,
+    ) -> Result<Self> {
+        let root = root.canonicalize().map_err(|e| Error::Access {
+            path: root.to_owned(),
+            source: e,
+        })?;
         let marker = format!(".{}", ctx.app_name);
         if !root.join(&marker).is_dir() {
             return Err(Error::MarkerDirMissing { marker, root });
         }
-        Ok(Self { uuid: id, root, ctx })
+        Ok(Self {
+            uuid: id,
+            root,
+            ctx,
+        })
     }
 
     /// Open a workspace at `root`, using `id` as the UUID and `app_name` as
@@ -137,7 +164,11 @@ impl Workspace {
     /// A new [`AppContext`] is heap-allocated and leaked to satisfy the
     /// `'static` lifetime requirement.  This is appropriate for long-lived
     /// application contexts (e.g. mobile app startup).
-    pub fn from_root_with_uuid_with_app_name(root: &Path, id: uuid::Uuid, app_name: &'static str) -> Result<Self> {
+    pub fn from_root_with_uuid_with_app_name(
+        root: &Path,
+        id: uuid::Uuid,
+        app_name: &'static str,
+    ) -> Result<Self> {
         let ctx: &'static AppContext = Box::leak(Box::new(AppContext::new(app_name)));
         Self::from_root_with_uuid(ctx, root, id)
     }
@@ -172,7 +203,9 @@ impl Workspace {
         #[cfg(feature = "sqlite-store")]
         {
             use sapphire_retrieve::db::SCHEMA_VERSION;
-            return self.cache_dir().join(format!("retrieve_v{SCHEMA_VERSION}.db"));
+            return self
+                .cache_dir()
+                .join(format!("retrieve_v{SCHEMA_VERSION}.db"));
         }
         #[cfg(not(feature = "sqlite-store"))]
         self.cache_dir().join("retrieve.db")
@@ -182,10 +215,7 @@ impl Workspace {
 fn resolve_cwd() -> Result<PathBuf> {
     let cwd = std::env::current_dir()?;
     if std::io::stdin().is_terminal() {
-        eprint!(
-            "No workspace specified. Use '{}'? [Y/n]: ",
-            cwd.display()
-        );
+        eprint!("No workspace specified. Use '{}'? [Y/n]: ", cwd.display());
         let mut line = String::new();
         std::io::stdin().read_line(&mut line)?;
         let trimmed = line.trim();
@@ -214,4 +244,3 @@ pub fn path_uuid(root: &Path) -> uuid::Uuid {
     bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant = RFC 4122 (10xx)
     uuid::Uuid::from_bytes(bytes)
 }
-
