@@ -109,7 +109,10 @@ impl WorkspaceState {
         let mut state = Self::open(workspace)?;
         match config.sync.backend {
             SyncBackendKind::Auto => {
-                // Already handled by `open`; nothing more to do.
+                // Re-create the backend so we can apply the device_id commit message.
+                if let Ok(git) = sapphire_sync::GitSync::open(&state.workspace.root) {
+                    state.set_sync_backend(Box::new(Self::apply_device_id(git, &config.sync)));
+                }
             }
             SyncBackendKind::Git => {
                 // Explicit git: use the configured remote and fail hard if
@@ -118,7 +121,7 @@ impl WorkspaceState {
                     &state.workspace.root,
                     config.sync.remote(),
                 )?;
-                state.set_sync_backend(Box::new(git));
+                state.set_sync_backend(Box::new(Self::apply_device_id(git, &config.sync)));
             }
             SyncBackendKind::None => {
                 // Explicitly disabled: remove whatever `open` may have set.
@@ -126,6 +129,18 @@ impl WorkspaceState {
             }
         }
         Ok(state)
+    }
+
+    /// Apply `device_id` from the sync config as the git commit message.
+    #[cfg(feature = "git-sync")]
+    fn apply_device_id(
+        git: sapphire_sync::GitSync,
+        sync: &crate::config::SyncConfig,
+    ) -> sapphire_sync::GitSync {
+        match sync.device_id {
+            Some(id) => git.with_commit_message(format!("auto: sync [{id}]")),
+            None => git,
+        }
     }
 
     /// Open workspace and configure the sync backend from [`WorkspaceConfig`].

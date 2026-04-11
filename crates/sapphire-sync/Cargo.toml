@@ -15,4 +15,5 @@ git = ["dep:git2"]
 [dependencies]
 thiserror.workspace = true
 serde.workspace = true
+uuid.workspace = true
 git2 = { version = "0.20", optional = true }

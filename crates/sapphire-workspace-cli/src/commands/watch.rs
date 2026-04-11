@@ -9,7 +9,16 @@ use sapphire_workspace::WorkspaceState;
 use crate::commands::sync::open_workspace;
 
 pub fn run(workspace_dir: Option<&Path>, debounce_ms: u64) -> Result<()> {
-    let (workspace, config) = open_workspace(workspace_dir)?;
+    let (workspace, mut config) = open_workspace(workspace_dir)?;
+
+    // Ensure a device_id is set in the user config, then re-load the layered
+    // config so the generated ID is included in the merged result.
+    if let Some(ws_cfg_path) = config.as_ref().map(|_| workspace.config_path()) {
+        match crate::config::ensure_device_id() {
+            Ok(()) => config = Some(crate::config::load_layered(&ws_cfg_path)?),
+            Err(e) => eprintln!("warning: could not persist device_id: {e}"),
+        }
+    }
 
     let watch_root = workspace.root.clone();
     let sync_interval = config.as_ref().and_then(|c| c.sync_interval());

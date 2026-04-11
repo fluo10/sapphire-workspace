@@ -17,6 +17,28 @@ use sapphire_workspace::WorkspaceConfig;
 
 use crate::WORKSPACE_CTX;
 
+/// Load only the user-level config (not merged with the workspace config).
+fn load_user_config() -> WorkspaceConfig {
+    WorkspaceConfig::load_from(&user_config_path()).unwrap_or_default()
+}
+
+/// Ensure `sync.device_id` is present in the user-level config.
+///
+/// If absent, a random UUID v4 is generated via [`SyncConfig::ensure_device_id`]
+/// and written back to the user config file.
+///
+/// Errors are propagated so the caller can decide whether to abort or
+/// continue without a device ID.
+pub fn ensure_device_id() -> Result<()> {
+    let mut user_cfg = load_user_config();
+    if user_cfg.sync.ensure_device_id() {
+        user_cfg
+            .save_to(&user_config_path())
+            .context("failed to write device_id to user config")?;
+    }
+    Ok(())
+}
+
 /// Per-user config path: `$XDG_CONFIG_HOME/{app_name}/config.toml`.
 pub fn user_config_path() -> PathBuf {
     dirs::config_dir()
