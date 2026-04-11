@@ -1,7 +1,6 @@
 pub mod config;
 pub mod context;
 pub mod indexer;
-pub mod util;
 pub mod workspace;
 pub mod workspace_state;
 

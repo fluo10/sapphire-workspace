@@ -20,11 +20,9 @@ pub use sapphire_sync::config::{SyncBackendKind, SyncConfig};
 /// are synced across devices; the per-user file then overrides any
 /// fields that need to differ per host.
 ///
-/// To layer the two files, host applications typically load both as
-/// `toml::Value`, deep-merge them with
-/// [`util::merge_toml_values`](crate::util::merge_toml_values), and then
-/// deserialize the merged value into their own top-level config struct
-/// (which embeds `WorkspaceConfig` as one field).
+/// Layering the two files is the responsibility of the host
+/// application; `sapphire-workspace-cli` uses the
+/// [`config`](https://docs.rs/config) crate for this purpose.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct WorkspaceConfig {
     #[serde(default)]
