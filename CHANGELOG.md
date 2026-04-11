@@ -5,6 +5,20 @@ All notable changes to `sapphire-workspace` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-04-11
+
+### Changed
+
+- `WorkspaceState::retrieve_db()` now returns `Arc<dyn RetrieveStore>` instead of the concrete `RetrieveDb` type.  Callers that previously called methods on `RetrieveDb` directly should switch to the `RetrieveStore` trait interface.
+- `sapphire-retrieve`: added backend factory functions `open_sqlite_fts`, `open_sqlite_vec`, `open_lancedb`, `open_in_memory` — each returns `Arc<dyn RetrieveStore + Send + Sync>` (feature-gated as before).
+- `sapphire-retrieve`: `RetrieveDb::dedup_chunk_results` moved to a crate-level free function `dedup_chunk_results`; the method on `RetrieveDb` is kept as a deprecated shim.
+- `sapphire-retrieve`: `wipe_db_files` is now `pub` (was `pub(crate)`).
+- `sqlite-store` feature is now enabled by default (previously opt-in); the default feature set now includes `sqlite-store`, `lancedb-store`, `fastembed-embed`, and `git-sync`.
+
+### Deprecated
+
+- `RetrieveDb` — use `Arc<dyn RetrieveStore>` returned by `WorkspaceState::retrieve_db()` instead.  `RetrieveDb` re-export is kept for one release to ease migration.
+
 ## [0.6.0] - 2026-04-11
 
 ### Added
@@ -96,6 +110,7 @@ Internal repository restructure; no public API changes.
 - `fastembed-embed`, `lancedb-store`, `sqlite-store`, `git-sync` feature flags.
 - Re-exports of `sapphire-retrieve` and `sapphire-sync` public APIs.
 
+[0.7.0]: https://github.com/fluo10/sapphire-workspace/compare/workspace-v0.6.0...workspace-v0.7.0
 [0.6.0]: https://github.com/fluo10/sapphire-workspace/compare/workspace-v0.5.1...workspace-v0.6.0
 [0.5.1]: https://github.com/fluo10/sapphire-workspace/compare/workspace-v0.5.0...workspace-v0.5.1
 [0.5.0]: https://github.com/fluo10/sapphire-journal/compare/workspace-v0.4.0...workspace-v0.5.0
