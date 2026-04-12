@@ -28,6 +28,7 @@ tokio = { version = "1" }
 toml = "1.1"
 tracing-subscriber = "0.3"
 uuid = { version = "1", features = ["v4", "serde"] }
+dirs = "5"
 
 [profile.dev.package."*"]
 opt-level = 1
@@ -60,4 +61,4 @@ indexmap.workspace = true
 walkdir = "2"
 uuid.workspace = true
 md-5 = "0.10"
-dirs = "5"
+dirs.workspace = true
