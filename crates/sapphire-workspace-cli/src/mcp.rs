@@ -10,7 +10,9 @@ use rmcp::{
     schemars, tool, tool_handler, tool_router,
     transport::stdio,
 };
-use sapphire_workspace::{UserConfig, Workspace, WorkspaceState, dedup_chunk_results};
+use sapphire_workspace::{Workspace, WorkspaceState, dedup_chunk_results};
+
+use crate::config::UserConfig;
 
 use crate::WORKSPACE_CTX;
 use serde::Deserialize;
@@ -52,15 +54,15 @@ impl RecallServer {
             let config = UserConfig::load()?;
             if config
                 .retrieve
+                .embedding
                 .as_ref()
-                .and_then(|r| r.embedding.as_ref())
                 .map(|e| e.enabled)
                 .unwrap_or(false)
             {
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(async {
-                        state.load_retrieve_backend_async(&config).await?;
-                        state.load_embedder_async(&config).await
+                        state.load_retrieve_backend_async(&config.retrieve).await?;
+                        state.load_embedder_async(&config.retrieve).await
                     })
                 })?;
             }

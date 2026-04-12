@@ -2,7 +2,7 @@ use std::path::Path;
 
 pub mod config;
 mod error;
-pub use config::{SyncBackendKind, SyncConfig};
+pub use config::{SyncBackendKind, SyncConfig, UserSyncConfig, WorkspaceSyncConfig};
 pub use error::{Error, Result};
 
 #[cfg(feature = "git")]

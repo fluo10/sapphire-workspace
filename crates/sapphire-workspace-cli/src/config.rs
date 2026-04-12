@@ -1,90 +1,172 @@
-//! Layered config loading for `sapphire-workspace-cli`.
+//! User config for `sapphire-workspace-cli`.
 //!
-//! Uses the [`config`](https://docs.rs/config) crate to stack the
-//! workspace-level file (`{marker}/config.toml`, shared defaults synced
-//! across devices) with the per-user override file
-//! (`$XDG_CONFIG_HOME/sapphire-workspace/config.toml`, host-specific
-//! settings such as the embedding model).
-//!
-//! The per-user file wins key-by-key: fields it doesn't set inherit
-//! from the workspace-level file.
+//! All settings are read from a single user-level file
+//! (`$XDG_CONFIG_HOME/sapphire-workspace-cli/config.toml`).
+//! There is no workspace-level config layer — every setting is per-host.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use config::{Config, File, FileFormat};
-use sapphire_workspace::WorkspaceConfig;
+use sapphire_workspace::{EmbeddingConfig, RetrieveConfig, SyncConfig, VectorDb};
+use serde::{Deserialize, Serialize};
 
 use crate::WORKSPACE_CTX;
 
-/// Load only the user-level config (not merged with the workspace config).
-fn load_user_config() -> WorkspaceConfig {
-    WorkspaceConfig::load_from(&user_config_path()).unwrap_or_default()
+// ── UserConfig ────────────────────────────────────────────────────────────────
+
+/// Per-user (per-host) configuration.
+///
+/// Stored at `$XDG_CONFIG_HOME/sapphire-workspace-cli/config.toml`.
+/// All settings here are host-specific: the embedding model depends on
+/// local hardware, and `sync.device_id` must be unique per device.
+///
+/// TOML structure:
+///
+/// ```toml
+/// [sync]
+/// backend = "git"
+/// remote = "origin"
+/// sync_interval_minutes = 15
+/// device_id = "..."
+///
+/// [retrieve]
+/// db = "sqlite_vec"
+/// sync_interval_minutes = 30
+///
+/// [retrieve.embedding]
+/// enabled = true
+/// provider = "fastembed"
+/// model = "..."
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct UserConfig {
+    #[serde(default)]
+    pub sync: SyncConfig,
+    #[serde(default)]
+    pub retrieve: RetrieveConfig,
 }
 
-/// Ensure `sync.device_id` is present in the user-level config.
+impl UserConfig {
+    /// Canonical path: `$XDG_CONFIG_HOME/{app_name}/config.toml`.
+    pub fn path() -> PathBuf {
+        dirs::config_dir()
+            .unwrap_or_else(std::env::temp_dir)
+            .join(WORKSPACE_CTX.app_name)
+            .join("config.toml")
+    }
+
+    /// Load config from disk, then apply environment variable overrides.
+    ///
+    /// Returns the default config if the file does not exist.
+    pub fn load() -> Result<Self> {
+        let path = Self::path();
+        let mut config = if !path.exists() {
+            UserConfig::default()
+        } else {
+            let contents =
+                std::fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+            toml::from_str(&contents)
+                .with_context(|| format!("failed to parse config at {}", path.display()))?
+        };
+        config.apply_env_overrides();
+        Ok(config)
+    }
+
+    /// Serialize and write to `path` (creates parent directories).
+    pub fn save_to(&self, path: &Path) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create dir {}", parent.display()))?;
+        }
+        let contents = toml::to_string_pretty(self).context("failed to serialize config")?;
+        std::fs::write(path, contents)
+            .with_context(|| format!("failed to write config to {}", path.display()))?;
+        Ok(())
+    }
+
+    /// Serialize and write to the canonical [`UserConfig::path`].
+    pub fn save(&self) -> Result<()> {
+        self.save_to(&Self::path())
+    }
+
+    fn apply_env_overrides(&mut self) {
+        let db = std::env::var("SAPPHIRE_WORKSPACE_RETRIEVE_DB")
+            .ok()
+            .and_then(|v| match v.as_str() {
+                "none" => Some(VectorDb::None),
+                "sqlite_vec" => Some(VectorDb::SqliteVec),
+                "lancedb" => Some(VectorDb::LanceDb),
+                _ => None,
+            });
+        let enabled = std::env::var("SAPPHIRE_WORKSPACE_EMBEDDING_ENABLED")
+            .ok()
+            .map(|v| matches!(v.as_str(), "1" | "true" | "yes"));
+        let provider = std::env::var("SAPPHIRE_WORKSPACE_EMBEDDING_PROVIDER").ok();
+        let model = std::env::var("SAPPHIRE_WORKSPACE_EMBEDDING_MODEL").ok();
+        let api_key_env = std::env::var("SAPPHIRE_WORKSPACE_EMBEDDING_API_KEY_ENV").ok();
+        let base_url = std::env::var("SAPPHIRE_WORKSPACE_EMBEDDING_BASE_URL").ok();
+        let dimension = std::env::var("SAPPHIRE_WORKSPACE_EMBEDDING_DIMENSION")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok());
+
+        let any = db.is_some()
+            || enabled.is_some()
+            || provider.is_some()
+            || model.is_some()
+            || api_key_env.is_some()
+            || base_url.is_some()
+            || dimension.is_some();
+
+        if any {
+            let retrieve = &mut self.retrieve;
+            if let Some(v) = db {
+                retrieve.db = v;
+            }
+            let embed = retrieve
+                .embedding
+                .get_or_insert_with(EmbeddingConfig::default);
+            if let Some(v) = enabled {
+                embed.enabled = v;
+            }
+            if let Some(v) = provider {
+                embed.provider = v;
+            }
+            if let Some(v) = model {
+                embed.model = v;
+            }
+            if let Some(v) = api_key_env {
+                embed.api_key_env = Some(v);
+            }
+            if let Some(v) = base_url {
+                embed.base_url = Some(v);
+            }
+            if let Some(v) = dimension {
+                embed.dimension = Some(v);
+            }
+        }
+    }
+}
+
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+/// Load the user config from disk (with environment variable overrides applied).
 ///
-/// If absent, a random UUID v4 is generated via [`SyncConfig::ensure_device_id`]
-/// and written back to the user config file.
+/// Returns the default `UserConfig` if the file does not exist.
+pub fn load_user_config() -> Result<UserConfig> {
+    UserConfig::load()
+}
+
+/// Ensure `sync.device_id` is present in the user config.
 ///
-/// Errors are propagated so the caller can decide whether to abort or
-/// continue without a device ID.
+/// If absent, a random UUID v4 is generated and written back to the user
+/// config file. Errors are propagated so the caller can decide whether to
+/// abort or continue without a device ID.
 pub fn ensure_device_id() -> Result<()> {
-    let mut user_cfg = load_user_config();
-    if user_cfg.sync.ensure_device_id() {
-        user_cfg
-            .save_to(&user_config_path())
+    let mut config = UserConfig::load().context("failed to load user config for device_id")?;
+    if config.sync.ensure_device_id() {
+        config
+            .save()
             .context("failed to write device_id to user config")?;
     }
     Ok(())
-}
-
-/// Per-user config path: `$XDG_CONFIG_HOME/{app_name}/config.toml`.
-pub fn user_config_path() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(std::env::temp_dir)
-        .join(WORKSPACE_CTX.app_name)
-        .join("config.toml")
-}
-
-/// Load the workspace-level config and overlay the per-user config on top.
-///
-/// Sources (later wins, merged key-by-key by the `config` crate):
-/// 1. `workspace_config_path` — shared defaults
-/// 2. [`user_config_path`] — host-specific overrides
-///
-/// Both files are optional; if neither exists, the default
-/// `WorkspaceConfig` is returned.
-pub fn load_layered(workspace_config_path: &Path) -> Result<WorkspaceConfig> {
-    let user_path = user_config_path();
-
-    let builder = Config::builder()
-        .add_source(
-            File::from(workspace_config_path.to_owned())
-                .format(FileFormat::Toml)
-                .required(false),
-        )
-        .add_source(
-            File::from(user_path.clone())
-                .format(FileFormat::Toml)
-                .required(false),
-        );
-
-    let settings = builder.build().with_context(|| {
-        format!(
-            "failed to load layered config from '{}' + '{}'",
-            workspace_config_path.display(),
-            user_path.display()
-        )
-    })?;
-
-    settings
-        .try_deserialize::<WorkspaceConfig>()
-        .with_context(|| {
-            format!(
-                "failed to deserialize layered config ('{}' + '{}')",
-                workspace_config_path.display(),
-                user_path.display()
-            )
-        })
 }
