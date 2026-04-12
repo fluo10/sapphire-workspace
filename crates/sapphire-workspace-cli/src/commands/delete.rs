@@ -8,10 +8,7 @@ use crate::commands::sync::open_workspace;
 pub fn run(workspace_dir: Option<&Path>, path: &Path) -> Result<()> {
     let (workspace, config) = open_workspace(workspace_dir)?;
 
-    let state = match config {
-        Some(ref cfg) => WorkspaceState::open_configured(workspace, cfg)?,
-        None => WorkspaceState::open(workspace)?,
-    };
+    let state = WorkspaceState::open_configured(workspace, &config.sync)?;
 
     let abs_path = if path.is_absolute() {
         path.to_owned()

@@ -12,7 +12,7 @@ use sapphire_retrieve::{open_sqlite_fts, open_sqlite_vec};
 use tokio::sync::OnceCell;
 
 use crate::{
-    config::{HybridConfig, UserConfig, VectorDb, WorkspaceConfig},
+    config::{HybridConfig, RetrieveConfig, VectorDb},
     error::Result,
     indexer::{path_to_doc_id, sync_workspace, sync_workspace_incremental},
     workspace::Workspace,
@@ -103,7 +103,7 @@ impl WorkspaceState {
         })
     }
 
-    /// Open workspace and configure the sync backend from [`WorkspaceConfig`].
+    /// Open workspace and configure the sync backend from [`SyncConfig`].
     ///
     /// - `SyncBackendKind::Auto` (default) — same as [`open`](Self::open):
     ///   attach git if a repository is found, silently no-op otherwise.
@@ -111,24 +111,22 @@ impl WorkspaceState {
     ///   returns an error if no repository is found.
     /// - `SyncBackendKind::None` — disable sync even inside a git repository.
     #[cfg(feature = "git-sync")]
-    pub fn open_configured(workspace: Workspace, config: &WorkspaceConfig) -> Result<Self> {
+    pub fn open_configured(workspace: Workspace, sync: &crate::config::SyncConfig) -> Result<Self> {
         use crate::config::SyncBackendKind;
         let mut state = Self::open(workspace)?;
-        match config.sync.backend {
+        match sync.workspace.backend {
             SyncBackendKind::Auto => {
                 // Re-create the backend so we can apply the device_id commit message.
                 if let Ok(git) = sapphire_sync::GitSync::open(&state.workspace.root) {
-                    state.set_sync_backend(Box::new(Self::apply_device_id(git, &config.sync)));
+                    state.set_sync_backend(Box::new(Self::apply_device_id(git, sync)));
                 }
             }
             SyncBackendKind::Git => {
                 // Explicit git: use the configured remote and fail hard if
                 // no repository is found.
-                let git = sapphire_sync::GitSync::with_remote(
-                    &state.workspace.root,
-                    config.sync.remote(),
-                )?;
-                state.set_sync_backend(Box::new(Self::apply_device_id(git, &config.sync)));
+                let git =
+                    sapphire_sync::GitSync::with_remote(&state.workspace.root, sync.remote())?;
+                state.set_sync_backend(Box::new(Self::apply_device_id(git, sync)));
             }
             SyncBackendKind::None => {
                 // Explicitly disabled: remove whatever `open` may have set.
@@ -144,16 +142,19 @@ impl WorkspaceState {
         git: sapphire_sync::GitSync,
         sync: &crate::config::SyncConfig,
     ) -> sapphire_sync::GitSync {
-        match sync.device_id {
+        match sync.user.device_id {
             Some(id) => git.with_commit_message(format!("auto: sync [{id}]")),
             None => git,
         }
     }
 
-    /// Open workspace and configure the sync backend from [`WorkspaceConfig`].
+    /// Open workspace and configure the sync backend from [`SyncConfig`].
     /// (no-op version when the `git-sync` feature is not compiled in)
     #[cfg(not(feature = "git-sync"))]
-    pub fn open_configured(workspace: Workspace, _config: &WorkspaceConfig) -> Result<Self> {
+    pub fn open_configured(
+        workspace: Workspace,
+        _sync: &crate::config::SyncConfig,
+    ) -> Result<Self> {
         Self::open(workspace)
     }
 
@@ -340,8 +341,8 @@ impl WorkspaceState {
     // ── vector backend ────────────────────────────────────────────────────────
 
     /// Initialise the vector backend (sync). Idempotent.
-    pub fn load_retrieve_backend(&self, config: &UserConfig) -> Result<()> {
-        let Some((vector_db, dim)) = Self::extract_vector_config(config) else {
+    pub fn load_retrieve_backend(&self, retrieve: &RetrieveConfig) -> Result<()> {
+        let Some((vector_db, dim)) = Self::extract_vector_config(retrieve) else {
             return Ok(());
         };
         if let Some(backend) = self.make_vector_backend(vector_db, dim)? {
@@ -351,21 +352,20 @@ impl WorkspaceState {
     }
 
     /// Async version of [`load_retrieve_backend`](Self::load_retrieve_backend).
-    pub async fn load_retrieve_backend_async(&self, config: &UserConfig) -> Result<()> {
-        self.load_retrieve_backend(config)
+    pub async fn load_retrieve_backend_async(&self, retrieve: &RetrieveConfig) -> Result<()> {
+        self.load_retrieve_backend(retrieve)
     }
 
     // ── embedder ──────────────────────────────────────────────────────────────
 
     /// Initialise the embedder (sync). Idempotent.
-    pub fn load_embedder(&self, config: &UserConfig) -> Result<()> {
+    pub fn load_embedder(&self, retrieve: &RetrieveConfig) -> Result<()> {
         if self.embedder.initialized() {
             return Ok(());
         }
-        let embedder = config
-            .retrieve
+        let embedder = retrieve
+            .embedding
             .as_ref()
-            .and_then(|r| r.embedding.as_ref())
             .filter(|c| c.enabled)
             .map(|c| {
                 let mut cfg = c.to_embedder_config();
@@ -378,14 +378,13 @@ impl WorkspaceState {
     }
 
     /// Async version of [`load_embedder`](Self::load_embedder).
-    pub async fn load_embedder_async(&self, config: &UserConfig) -> Result<()> {
+    pub async fn load_embedder_async(&self, retrieve: &RetrieveConfig) -> Result<()> {
         let model_cache_dir = self.workspace.ctx.model_cache_dir();
         self.embedder
             .get_or_try_init(|| async {
-                config
-                    .retrieve
+                retrieve
+                    .embedding
                     .as_ref()
-                    .and_then(|r| r.embedding.as_ref())
                     .filter(|c| c.enabled)
                     .map(|c| {
                         let mut cfg = c.to_embedder_config();
@@ -405,38 +404,52 @@ impl WorkspaceState {
         sync_workspace(&self.workspace, self.retrieve_db())
     }
 
-    /// Run the periodic sync cycle: git sync (if configured) followed by an
-    /// mtime-based incremental cache update.
+    /// Run a mtime-based incremental retrieve cache refresh.
     ///
-    /// This is the intended entry point for interval-based background
-    /// refreshes.  It first synchronises with the remote (commit → pull →
-    /// push), then walks the workspace and re-indexes only the files whose
-    /// mtime has changed since the last run.
+    /// Only re-indexes files whose mtime has changed since the last run.
+    /// Does **not** perform any git sync.
     ///
     /// Returns `(upserted, removed)`.
-    pub fn periodic_sync(&self) -> Result<(usize, usize)> {
+    pub fn sync_retrieve(&self) -> Result<(usize, usize)> {
+        sync_workspace_incremental(&self.workspace, self.retrieve_db())
+    }
+
+    /// Run a full git sync cycle (commit → pull → push), if a sync backend is
+    /// configured.  Does **not** update the retrieve cache.
+    pub fn sync_git(&self) -> Result<()> {
         if let Some(backend) = &self.sync_backend {
             backend.sync()?;
         }
-        sync_workspace_incremental(&self.workspace, self.retrieve_db())
+        Ok(())
+    }
+
+    /// Run the periodic sync cycle: git sync (if configured) followed by an
+    /// mtime-based incremental cache update.
+    ///
+    /// Convenience wrapper that calls [`sync_git`](Self::sync_git) then
+    /// [`sync_retrieve`](Self::sync_retrieve).
+    ///
+    /// Returns `(upserted, removed)`.
+    pub fn periodic_sync(&self) -> Result<(usize, usize)> {
+        self.sync_git()?;
+        self.sync_retrieve()
     }
 
     /// Sync and, when embedding is configured, embed pending chunks.
     ///
     /// Returns `(upserted, removed, embedded)`.
-    pub async fn sync_and_embed(&self, config: &UserConfig) -> Result<(usize, usize, usize)> {
+    pub async fn sync_and_embed(&self, retrieve: &RetrieveConfig) -> Result<(usize, usize, usize)> {
         let (upserted, removed) = sync_workspace(&self.workspace, self.retrieve_db())?;
 
-        let embed_cfg = config.retrieve.as_ref().and_then(|r| r.embedding.as_ref());
-        let Some(embed_cfg) = embed_cfg else {
+        let Some(embed_cfg) = retrieve.embedding.as_ref() else {
             return Ok((upserted, removed, 0));
         };
         if !embed_cfg.enabled {
             return Ok((upserted, removed, 0));
         }
 
-        self.load_retrieve_backend_async(config).await?;
-        self.load_embedder_async(config).await?;
+        self.load_retrieve_backend_async(retrieve).await?;
+        self.load_embedder_async(retrieve).await?;
 
         let Some(embedder) = self.embedder() else {
             return Ok((upserted, removed, 0));
@@ -449,18 +462,17 @@ impl WorkspaceState {
     /// Embed all pending chunks (sync). Loads backend and embedder if needed.
     pub fn embed_pending(
         &self,
-        config: &UserConfig,
+        retrieve: &RetrieveConfig,
         on_progress: impl Fn(usize, usize),
     ) -> Result<usize> {
-        let embed_cfg = config.retrieve.as_ref().and_then(|r| r.embedding.as_ref());
-        let Some(embed_cfg) = embed_cfg else {
+        let Some(embed_cfg) = retrieve.embedding.as_ref() else {
             return Ok(0);
         };
         if !embed_cfg.enabled {
             return Ok(0);
         }
-        self.load_retrieve_backend(config)?;
-        self.load_embedder(config)?;
+        self.load_retrieve_backend(retrieve)?;
+        self.load_embedder(retrieve)?;
         let Some(embedder) = self.embedder() else {
             return Ok(0);
         };
@@ -632,8 +644,7 @@ impl WorkspaceState {
     }
 
     /// Extract `(vector_db, embedding_dim)` from config if vector search is enabled.
-    fn extract_vector_config(config: &UserConfig) -> Option<(VectorDb, u32)> {
-        let retrieve = config.retrieve.as_ref()?;
+    fn extract_vector_config(retrieve: &RetrieveConfig) -> Option<(VectorDb, u32)> {
         let embed_cfg = retrieve.embedding.as_ref()?;
         if !embed_cfg.enabled {
             return None;

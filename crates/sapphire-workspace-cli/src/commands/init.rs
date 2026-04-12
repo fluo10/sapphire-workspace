@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use anyhow::{Context, bail};
-use sapphire_workspace::{WorkspaceConfig, workspace::DEFAULT_WORKSPACE_MARKER};
+use sapphire_workspace::workspace::DEFAULT_WORKSPACE_MARKER;
 
 pub fn run(path: Option<&Path>) -> anyhow::Result<()> {
     let target = path.unwrap_or(Path::new("."));
@@ -23,12 +23,7 @@ pub fn run(path: Option<&Path>) -> anyhow::Result<()> {
     std::fs::create_dir(&marker_dir)
         .with_context(|| format!("failed to create '{}'", marker_dir.display()))?;
 
-    let config = WorkspaceConfig::default();
-    let config_path = marker_dir.join("config.toml");
-    config.save_to(&config_path)?;
-    println!("created: {}", config_path.display());
-
-    // Keep cache dir out of git while keeping config.toml tracked.
+    // Keep the cache dir out of git tracking.
     std::fs::write(marker_dir.join(".gitignore"), "cache/\n")
         .context("failed to write .gitignore")?;
 

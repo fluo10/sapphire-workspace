@@ -2,8 +2,10 @@ use std::path::Path;
 
 use anyhow::Result;
 use sapphire_workspace::{
-    RETRIEVE_SCHEMA_VERSION as SCHEMA_VERSION, UserConfig, VectorDb, Workspace, WorkspaceState,
+    RETRIEVE_SCHEMA_VERSION as SCHEMA_VERSION, VectorDb, Workspace, WorkspaceState,
 };
+
+use crate::config::UserConfig;
 
 use crate::WORKSPACE_CTX;
 
@@ -40,7 +42,8 @@ pub fn run(workspace_dir: Option<&Path>) -> Result<()> {
         );
     }
 
-    if let Some(retrieve) = &config.retrieve {
+    {
+        let retrieve = &config.retrieve;
         if let Some(embed_cfg) = &retrieve.embedding {
             let enabled_str = if embed_cfg.enabled {
                 "enabled"
@@ -57,7 +60,7 @@ pub fn run(workspace_dir: Option<&Path>) -> Result<()> {
                 VectorDb::SqliteVec => {
                     if embed_cfg.dimension.is_some() {
                         state
-                            .load_retrieve_backend(&config)
+                            .load_retrieve_backend(&config.retrieve)
                             .map_err(anyhow::Error::msg)?;
                         match state.retrieve_db().vec_info() {
                             Ok(vi) => {
@@ -81,7 +84,7 @@ pub fn run(workspace_dir: Option<&Path>) -> Result<()> {
                         println!("vector backend: lancedb");
                         println!("lancedb path:   {}", dir.display());
                         state
-                            .load_retrieve_backend(&config)
+                            .load_retrieve_backend(&config.retrieve)
                             .map_err(anyhow::Error::msg)?;
                         match state.retrieve_db().vec_info() {
                             Ok(vi) => {
@@ -120,7 +123,7 @@ pub fn run(workspace_dir: Option<&Path>) -> Result<()> {
                 }
             }
         } // end if let Some(embed_cfg)
-    } // end if let Some(retrieve)
+    }
 
     Ok(())
 }
