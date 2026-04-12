@@ -10,8 +10,7 @@ use rmcp::{
     schemars, tool, tool_handler, tool_router,
     transport::stdio,
 };
-use sapphire_retrieve::dedup_chunk_results;
-use sapphire_workspace::{UserConfig, Workspace, WorkspaceState};
+use sapphire_workspace::{UserConfig, Workspace, WorkspaceState, dedup_chunk_results};
 
 use crate::WORKSPACE_CTX;
 use serde::Deserialize;
@@ -155,7 +154,7 @@ impl RecallServer {
                         .map(|vi| vi.pending_count)
                         .unwrap_or(0);
                     if pending > 0 && pending <= 50 {
-                        let _ = s.retrieve_db().embed_pending(embedder, |_, _| {});
+                        let _ = s.retrieve_db().embed_pending(embedder, &|_, _| {});
                     }
 
                     let query_vecs = embedder.embed_texts(&[p.query.as_str()])?;
