@@ -5,6 +5,23 @@ All notable changes to `sapphire-workspace` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-04-12
+
+### Changed
+
+- `sapphire-sync`: `SyncConfig` split into three types — `WorkspaceSyncConfig` (workspace-level: `backend`, `remote`, `branch`, `sync_interval_minutes`), `UserSyncConfig` (device-level: `device_id`), and `SyncConfig` (flattened combination; TOML `[sync]` section layout unchanged).
+- `sapphire-retrieve`: `RetrieveConfig` gains `sync_interval_minutes: Option<u32>` and a `sync_interval()` helper, enabling independent scheduling of the retrieve cache refresh from git sync.
+- `sapphire-workspace`: `WorkspaceState::open_configured` now takes `&SyncConfig` instead of `&WorkspaceConfig`.  `load_retrieve_backend`, `load_embedder`, `sync_and_embed`, and `embed_pending` now take `&RetrieveConfig` directly.
+- `sapphire-workspace`: added `sync_git(&SyncConfig)` and `sync_retrieve(&RetrieveConfig)` as independent public methods; `periodic_sync()` is now a convenience wrapper over the two.
+- `sapphire-workspace`: `src/config.rs` is now re-exports only (`sapphire_retrieve::config` and `sapphire_sync::config`); all config struct definitions live in their home crates.
+- `sapphire-workspace-cli`: `UserConfig` (with `load`, `save`, and env-var overrides) moved into the CLI crate.  Layered config loading (`load_layered`) removed — a single user config file is used.
+- `sapphire-workspace-cli`: `watch` command now runs two independent timers: one for git sync (`config.sync.sync_interval()`) and one for retrieve cache refresh (`config.retrieve.sync_interval()`).
+
+### Removed
+
+- `WorkspaceConfig` and `UserConfig` removed from the public API of `sapphire-workspace`.
+- `.sapphire-workspace/config.toml` is no longer read for sync or retrieve settings (the marker directory is still used for workspace root discovery).
+
 ## [0.7.1] - 2026-04-12
 
 ### Fixed
@@ -116,6 +133,7 @@ Internal repository restructure; no public API changes.
 - `fastembed-embed`, `lancedb-store`, `sqlite-store`, `git-sync` feature flags.
 - Re-exports of `sapphire-retrieve` and `sapphire-sync` public APIs.
 
+[0.8.0]: https://github.com/fluo10/sapphire-workspace/compare/workspace-v0.7.1...workspace-v0.8.0
 [0.7.1]: https://github.com/fluo10/sapphire-workspace/compare/workspace-v0.7.0...workspace-v0.7.1
 [0.7.0]: https://github.com/fluo10/sapphire-workspace/compare/workspace-v0.6.0...workspace-v0.7.0
 [0.6.0]: https://github.com/fluo10/sapphire-workspace/compare/workspace-v0.5.1...workspace-v0.6.0
