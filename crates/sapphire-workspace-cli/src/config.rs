@@ -63,8 +63,8 @@ impl UserConfig {
         let mut config = if !path.exists() {
             UserConfig::default()
         } else {
-            let contents =
-                std::fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+            let contents = std::fs::read_to_string(&path)
+                .with_context(|| format!("failed to read {}", path.display()))?;
             toml::from_str(&contents)
                 .with_context(|| format!("failed to parse config at {}", path.display()))?
         };

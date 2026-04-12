@@ -124,10 +124,8 @@ impl WorkspaceState {
             SyncBackendKind::Git => {
                 // Explicit git: use the configured remote and fail hard if
                 // no repository is found.
-                let git = sapphire_sync::GitSync::with_remote(
-                    &state.workspace.root,
-                    sync.remote(),
-                )?;
+                let git =
+                    sapphire_sync::GitSync::with_remote(&state.workspace.root, sync.remote())?;
                 state.set_sync_backend(Box::new(Self::apply_device_id(git, sync)));
             }
             SyncBackendKind::None => {
@@ -153,7 +151,10 @@ impl WorkspaceState {
     /// Open workspace and configure the sync backend from [`SyncConfig`].
     /// (no-op version when the `git-sync` feature is not compiled in)
     #[cfg(not(feature = "git-sync"))]
-    pub fn open_configured(workspace: Workspace, _sync: &crate::config::SyncConfig) -> Result<Self> {
+    pub fn open_configured(
+        workspace: Workspace,
+        _sync: &crate::config::SyncConfig,
+    ) -> Result<Self> {
         Self::open(workspace)
     }
 
