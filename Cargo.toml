@@ -7,7 +7,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.7.0"
+version = "0.7.1"
 description = "Workspace management library for indexing, search, and sync of file-based documents"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/fluo10/sapphire-workspace"
@@ -51,8 +51,8 @@ fastembed-embed = ["sapphire-retrieve/fastembed-embed"]
 git-sync        = ["sapphire-sync/git"]
 
 [dependencies]
-sapphire-retrieve = { version = "0.7.0", path = "crates/sapphire-retrieve", default-features = false }
-sapphire-sync     = { version = "0.7.0", path = "crates/sapphire-sync", default-features = false }
+sapphire-retrieve = { version = "0.7.1", path = "crates/sapphire-retrieve", default-features = false }
+sapphire-sync     = { version = "0.7.1", path = "crates/sapphire-sync", default-features = false }
 thiserror.workspace = true
 serde.workspace = true
 toml.workspace = true
