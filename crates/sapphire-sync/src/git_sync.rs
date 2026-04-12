@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use git2::{MergeOptions, Repository, Signature};
+use git2::{Cred, FetchOptions, MergeOptions, PushOptions, RemoteCallbacks, Repository, Signature};
 
 use crate::{Error, Result, SyncBackend};
 
@@ -99,6 +99,53 @@ impl GitSync {
         Ok(())
     }
 
+    /// Build `RemoteCallbacks` that authenticate via SSH.
+    ///
+    /// Strategy:
+    /// 1. Try `ssh-agent` first (works when the agent is running and has the key loaded).
+    /// 2. Fall back to key files under `~/.ssh/`, tried in this order:
+    ///    `id_ed25519`, `id_ecdsa`, `id_rsa`
+    fn ssh_callbacks<'cb>() -> RemoteCallbacks<'cb> {
+        const KEY_NAMES: &[&str] = &["id_ed25519", "id_ecdsa", "id_rsa"];
+
+        let mut callbacks = RemoteCallbacks::new();
+        callbacks.credentials(|_url, username_from_url, _allowed_types| {
+            let username = username_from_url.unwrap_or("git");
+
+            // 1. Try ssh-agent.
+            if let Ok(cred) = Cred::ssh_key_from_agent(username) {
+                return Ok(cred);
+            }
+
+            // 2. Fall back to key files.
+            let home = dirs::home_dir().ok_or_else(|| {
+                git2::Error::from_str("cannot determine home directory for SSH key fallback")
+            })?;
+            let ssh_dir = home.join(".ssh");
+
+            for name in KEY_NAMES {
+                let private_key = ssh_dir.join(name);
+                if !private_key.exists() {
+                    continue;
+                }
+                let public_key = ssh_dir.join(format!("{name}.pub"));
+                let pub_key_opt = if public_key.exists() {
+                    Some(public_key.as_path())
+                } else {
+                    None
+                };
+                if let Ok(cred) = Cred::ssh_key(username, pub_key_opt, &private_key, None) {
+                    return Ok(cred);
+                }
+            }
+
+            Err(git2::Error::from_str(
+                "no usable SSH key found (tried ssh-agent and ~/.ssh/{id_ed25519,id_ecdsa,id_rsa})",
+            ))
+        });
+        callbacks
+    }
+
     /// Fetch from remote, merge the remote tracking branch into HEAD, then push.
     ///
     /// Conflict resolution: when two sides modify the same file, the version
@@ -111,7 +158,9 @@ impl GitSync {
                 name: remote_name.to_owned(),
             })?;
 
-        remote.fetch(&[] as &[&str], None, None)?;
+        let mut fetch_opts = FetchOptions::new();
+        fetch_opts.remote_callbacks(Self::ssh_callbacks());
+        remote.fetch(&[] as &[&str], Some(&mut fetch_opts), None)?;
 
         // ── 2. Find the remote tracking ref ──────────────────────────────────
         let fetch_head = repo.find_reference("FETCH_HEAD")?;
@@ -211,7 +260,9 @@ impl GitSync {
         let head_name = repo.head()?.shorthand().unwrap_or("main").to_owned();
         let refspec = format!("refs/heads/{head_name}:refs/heads/{head_name}");
         let mut remote = repo.find_remote(remote_name)?;
-        remote.push(&[refspec.as_str()], None)?;
+        let mut push_opts = PushOptions::new();
+        push_opts.remote_callbacks(Self::ssh_callbacks());
+        remote.push(&[refspec.as_str()], Some(&mut push_opts))?;
 
         Ok(())
     }
