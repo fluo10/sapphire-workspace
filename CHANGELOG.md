@@ -5,6 +5,12 @@ All notable changes to `sapphire-workspace` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] - 2026-04-12
+
+### Fixed
+
+- `sapphire-sync`: SSH push and fetch now authenticate correctly via libgit2.  Previously `remote.push()` / `remote.fetch()` were called without `RemoteCallbacks`, causing push to silently fail against SSH remotes.  Authentication is now attempted in order: ssh-agent → `~/.ssh/id_ed25519` → `~/.ssh/id_ecdsa` → `~/.ssh/id_rsa`. (#30)
+
 ## [0.7.0] - 2026-04-11
 
 ### Changed
@@ -110,6 +116,7 @@ Internal repository restructure; no public API changes.
 - `fastembed-embed`, `lancedb-store`, `sqlite-store`, `git-sync` feature flags.
 - Re-exports of `sapphire-retrieve` and `sapphire-sync` public APIs.
 
+[0.7.1]: https://github.com/fluo10/sapphire-workspace/compare/workspace-v0.7.0...workspace-v0.7.1
 [0.7.0]: https://github.com/fluo10/sapphire-workspace/compare/workspace-v0.6.0...workspace-v0.7.0
 [0.6.0]: https://github.com/fluo10/sapphire-workspace/compare/workspace-v0.5.1...workspace-v0.6.0
 [0.5.1]: https://github.com/fluo10/sapphire-workspace/compare/workspace-v0.5.0...workspace-v0.5.1
