@@ -13,6 +13,7 @@ default = ["git"]
 git = ["dep:git2", "dep:dirs"]
 
 [dependencies]
+tracing.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 uuid.workspace = true
