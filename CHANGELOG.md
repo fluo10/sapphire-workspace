@@ -5,6 +5,17 @@ All notable changes to `sapphire-workspace` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1] - 2026-04-13
+
+### Fixed
+
+- `sapphire-sync`: SSH credentials callback no longer loops infinitely when `ssh-agent` returns a credential that fails authentication. The callback now tracks attempt index and cycles through methods (ssh-agent → key files) instead of retrying the same method. (#38)
+- `sapphire-sync`: remote push rejections are now logged via `tracing::warn` (previously silently ignored due to missing `push_update_reference` callback).
+
+### Added
+
+- `sapphire-sync`: `tracing` instrumentation in `sync_git` for observability (fetch/merge/push cycle start, early-return, push result).
+
 ## [0.8.0] - 2026-04-12
 
 ### Changed
@@ -133,6 +144,7 @@ Internal repository restructure; no public API changes.
 - `fastembed-embed`, `lancedb-store`, `sqlite-store`, `git-sync` feature flags.
 - Re-exports of `sapphire-retrieve` and `sapphire-sync` public APIs.
 
+[0.8.1]: https://github.com/fluo10/sapphire-workspace/compare/workspace-v0.8.0...workspace-v0.8.1
 [0.8.0]: https://github.com/fluo10/sapphire-workspace/compare/workspace-v0.7.1...workspace-v0.8.0
 [0.7.1]: https://github.com/fluo10/sapphire-workspace/compare/workspace-v0.7.0...workspace-v0.7.1
 [0.7.0]: https://github.com/fluo10/sapphire-workspace/compare/workspace-v0.6.0...workspace-v0.7.0
