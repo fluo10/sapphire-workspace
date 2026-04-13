@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use git2::{Cred, FetchOptions, MergeOptions, PushOptions, RemoteCallbacks, Repository, Signature};
+use tracing::{info, warn};
 
 use crate::{Error, Result, SyncBackend};
 
@@ -101,31 +102,45 @@ impl GitSync {
 
     /// Build `RemoteCallbacks` that authenticate via SSH.
     ///
-    /// Strategy:
-    /// 1. Try `ssh-agent` first (works when the agent is running and has the key loaded).
-    /// 2. Fall back to key files under `~/.ssh/`, tried in this order:
-    ///    `id_ed25519`, `id_ecdsa`, `id_rsa`
+    /// Strategy (each attempt index tries the next method):
+    /// 0. `ssh-agent`
+    /// 1. `~/.ssh/id_ed25519`
+    /// 2. `~/.ssh/id_ecdsa`
+    /// 3. `~/.ssh/id_rsa`
+    ///
+    /// libgit2 re-invokes the callback when an attempt fails.  The `attempt`
+    /// counter ensures we never retry the same method and eventually return an
+    /// error instead of looping forever.
     fn ssh_callbacks<'cb>() -> RemoteCallbacks<'cb> {
         const KEY_NAMES: &[&str] = &["id_ed25519", "id_ecdsa", "id_rsa"];
 
+        let attempt = std::cell::Cell::new(0usize);
+
         let mut callbacks = RemoteCallbacks::new();
-        callbacks.credentials(|_url, username_from_url, _allowed_types| {
+        callbacks.credentials(move |_url, username_from_url, _allowed_types| {
+            let i = attempt.get();
+            attempt.set(i + 1);
             let username = username_from_url.unwrap_or("git");
 
-            // 1. Try ssh-agent.
-            if let Ok(cred) = Cred::ssh_key_from_agent(username) {
-                return Ok(cred);
+            // Attempt 0: ssh-agent.
+            if i == 0 {
+                if let Ok(cred) = Cred::ssh_key_from_agent(username) {
+                    return Ok(cred);
+                }
+                // ssh-agent unavailable — fall through to key files immediately.
             }
 
-            // 2. Fall back to key files.
+            // Attempts 1..=KEY_NAMES.len(): key files.
+            let key_idx = if i == 0 { 0 } else { i - 1 };
             let home = dirs::home_dir().ok_or_else(|| {
                 git2::Error::from_str("cannot determine home directory for SSH key fallback")
             })?;
             let ssh_dir = home.join(".ssh");
 
-            for name in KEY_NAMES {
+            for name in KEY_NAMES.iter().skip(key_idx) {
                 let private_key = ssh_dir.join(name);
                 if !private_key.exists() {
+                    attempt.set(attempt.get() + 1);
                     continue;
                 }
                 let public_key = ssh_dir.join(format!("{name}.pub"));
@@ -137,6 +152,11 @@ impl GitSync {
                 if let Ok(cred) = Cred::ssh_key(username, pub_key_opt, &private_key, None) {
                     return Ok(cred);
                 }
+                // This key file failed to parse — let libgit2 call us again
+                // for the next one.
+                return Err(git2::Error::from_str(&format!(
+                    "failed to load SSH key: {name}"
+                )));
             }
 
             Err(git2::Error::from_str(
@@ -151,6 +171,8 @@ impl GitSync {
     /// Conflict resolution: when two sides modify the same file, the version
     /// from the commit with the newer (higher) author timestamp is kept.
     fn sync_git(repo: &Repository, remote_name: &str) -> Result<()> {
+        info!(remote = remote_name, "sync_git: starting fetch → merge → push cycle");
+
         // ── 1. Fetch ──────────────────────────────────────────────────────────
         let mut remote = repo
             .find_remote(remote_name)
@@ -174,8 +196,15 @@ impl GitSync {
         };
 
         if head_commit.id() == remote_commit.id() {
+            info!("sync_git: local HEAD and remote are identical, nothing to do");
             return Ok(()); // already in sync
         }
+
+        info!(
+            local = %head_commit.id(),
+            remote = %remote_commit.id(),
+            "sync_git: HEAD differs from remote, proceeding with merge/push"
+        );
 
         // ── 3. Merge ──────────────────────────────────────────────────────────
         let remote_annotated = repo.find_annotated_commit(remote_commit.id())?;
@@ -259,9 +288,19 @@ impl GitSync {
         // ── 4. Push ───────────────────────────────────────────────────────────
         let head_name = repo.head()?.shorthand().unwrap_or("main").to_owned();
         let refspec = format!("refs/heads/{head_name}:refs/heads/{head_name}");
+        info!(refspec = %refspec, "sync_git: pushing to remote");
         let mut remote = repo.find_remote(remote_name)?;
         let mut push_opts = PushOptions::new();
-        push_opts.remote_callbacks(Self::ssh_callbacks());
+        let mut callbacks = Self::ssh_callbacks();
+        callbacks.push_update_reference(|refname, status| {
+            if let Some(msg) = status {
+                warn!(refname, error = msg, "sync_git: remote rejected push");
+            } else {
+                info!(refname, "sync_git: push accepted by remote");
+            }
+            Ok(())
+        });
+        push_opts.remote_callbacks(callbacks);
         remote.push(&[refspec.as_str()], Some(&mut push_opts))?;
 
         Ok(())
