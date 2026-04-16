@@ -37,16 +37,11 @@ pub fn path_to_doc_id(path: &Path) -> i64 {
 ///
 /// # Supported file types
 ///
-/// | Extension | Chunking | `line` in results |
-/// |-----------|----------|-------------------|
-/// | `md`, `markdown`, `txt`, `rst`, `org` | paragraph split | paragraph start line |
-/// | `json` | message/element extraction | source line of element `{` |
-/// | `jsonl` | one message per line | line index |
-///
-/// For JSON/JSONL files the body stored in the database is extracted message
-/// text (no JSON syntax noise), and each chunk's `line` value in
-/// [`ChunkSearchResult`](sapphire_retrieve::ChunkSearchResult) is the 0-based
-/// source line number of that message in the original file.
+/// | Extension | Chunking | line range in results |
+/// |-----------|----------|-----------------------|
+/// | `md`, `markdown`, `txt`, `rst`, `org` | paragraph split | start/end line of paragraph |
+/// | `json` | message/element extraction | source line range of element |
+/// | `jsonl` | one message per line | `line_start == line_end` |
 pub fn sync_workspace(
     workspace: &Workspace,
     retrieve_db: Arc<dyn RetrieveStore + Send + Sync>,
@@ -120,7 +115,7 @@ pub fn sync_workspace(
                     } else {
                         format!("{title}\n\n{}", c.text)
                     };
-                    (c.line, c.column, embed)
+                    (c.line_start, c.line_end, embed)
                 })
                 .collect();
             Document {
@@ -251,7 +246,7 @@ pub fn sync_workspace_incremental(
                     } else {
                         format!("{title}\n\n{}", c.text)
                     };
-                    (c.line, c.column, embed)
+                    (c.line_start, c.line_end, embed)
                 })
                 .collect();
             Document {

@@ -1,26 +1,22 @@
 #![cfg(feature = "lancedb-store")]
 //! Full LanceDB backend for [`RetrieveDb`].
 //!
-//! When LanceDB is selected as the vector backend, this module provides an
-//! implementation that stores *all* data — files, documents, chunks, and
-//! embeddings — in LanceDB, with no SQLite dependency.
+//! When LanceDB is selected as the vector backend, this module stores *all*
+//! data — files, documents, chunks, and embeddings — in LanceDB tables.
 //!
 //! # Tables
 //!
-//! | table           | columns                                                       | purpose                         |
-//! |-----------------|---------------------------------------------------------------|---------------------------------|
-//! | `files`         | `path Utf8, mtime Int64`                                      | file mtime tracking             |
-//! | `documents`     | `id Int64, title Utf8, body Utf8, path Utf8`                  | FTS index source                |
-//! | `chunks_meta`   | `doc_id Int64, line Int32, col Int32, text Utf8, doc_title Utf8, doc_path Utf8` | pending-embedding tracking |
-//! | `chunk_vectors` | `doc_id Int64, line Int32, col Int32, doc_title Utf8, doc_path Utf8, text Utf8, embedding FixedSizeList<Float32>` | vector search |
+//! | table           | columns                                                                                          |
+//! |-----------------|--------------------------------------------------------------------------------------------------|
+//! | `files`         | `path Utf8, mtime Int64`                                                                         |
+//! | `documents`     | `id Int64, title Utf8, path Utf8`                                                                |
+//! | `chunks_meta`   | `doc_id Int64, line_start Int32, line_end Int32, text Utf8, doc_title Utf8, doc_path Utf8`       |
+//! | `chunk_vectors` | `doc_id Int64, line_start Int32, line_end Int32, doc_title Utf8, doc_path Utf8, text Utf8, embedding FixedSizeList<Float32>` |
 //!
-//! # Directory layout
-//!
-//! All tables live inside `{root}/lancedb_full_v{SCHEMA_VERSION}/`.
-//! This is distinct from the old hybrid-mode directory `lancedb_v1/`.
+//! FTS is built on `chunks_meta.text` (chunk-level).
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -43,8 +39,10 @@ use crate::{
     chunker::chunk_document,
     embed::Embedder,
     error::{Error, Result},
-    retrieve_store::{Document, FtsQuery, RetrieveStore, SearchResult, VectorQuery},
-    vector_store::{Chunk, ChunkSearchResult, VecInfo},
+    retrieve_store::{
+        ChunkHit, Document, FileSearchResult, FtsQuery, RetrieveStore, VectorQuery,
+    },
+    vector_store::{Chunk, VecInfo},
 };
 
 // ── versioning ────────────────────────────────────────────────────────────────
@@ -55,7 +53,8 @@ use crate::{
 /// - 1: initial schema
 /// - 2: LanceDB full-backend
 /// - 3: replace `chunk_index` with `line` + `col` (source positions)
-pub const SCHEMA_VERSION: i32 = 3;
+/// - 4: chunk-level FTS, `line_start`/`line_end`, drop `documents.body`
+pub const SCHEMA_VERSION: i32 = 4;
 
 /// Returns the full-backend LanceDB directory for the given cache root.
 pub fn data_dir(root: &Path) -> PathBuf {
@@ -82,7 +81,6 @@ fn documents_schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
         Field::new("id", DataType::Int64, false),
         Field::new("title", DataType::Utf8, false),
-        Field::new("body", DataType::Utf8, false),
         Field::new("path", DataType::Utf8, false),
     ]))
 }
@@ -90,8 +88,8 @@ fn documents_schema() -> Arc<Schema> {
 fn chunks_meta_schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
         Field::new("doc_id", DataType::Int64, false),
-        Field::new("line", DataType::Int32, false),
-        Field::new("col", DataType::Int32, false),
+        Field::new("line_start", DataType::Int32, false),
+        Field::new("line_end", DataType::Int32, false),
         Field::new("text", DataType::Utf8, false),
         Field::new("doc_title", DataType::Utf8, false),
         Field::new("doc_path", DataType::Utf8, false),
@@ -101,8 +99,8 @@ fn chunks_meta_schema() -> Arc<Schema> {
 fn chunk_vectors_schema(dim: i32) -> Arc<Schema> {
     Arc::new(Schema::new(vec![
         Field::new("doc_id", DataType::Int64, false),
-        Field::new("line", DataType::Int32, false),
-        Field::new("col", DataType::Int32, false),
+        Field::new("line_start", DataType::Int32, false),
+        Field::new("line_end", DataType::Int32, false),
         Field::new("doc_title", DataType::Utf8, false),
         Field::new("doc_path", DataType::Utf8, false),
         Field::new("text", DataType::Utf8, false),
@@ -181,10 +179,10 @@ impl LanceFullStore {
 
     // ── file tracking ─────────────────────────────────────────────────────────
 
-    async fn file_mtimes(&self) -> Result<std::collections::HashMap<String, i64>> {
+    async fn file_mtimes(&self) -> Result<HashMap<String, i64>> {
         let batches: Vec<RecordBatch> = self.files.query().execute().await?.try_collect().await?;
 
-        let mut map = std::collections::HashMap::new();
+        let mut map = HashMap::new();
         for batch in &batches {
             let paths = batch
                 .column_by_name("path")
@@ -235,14 +233,12 @@ impl LanceFullStore {
     // ── document management ───────────────────────────────────────────────────
 
     async fn upsert_document(&self, doc: &Document) -> Result<()> {
-        // Upsert into documents table.
         let schema = documents_schema();
         let batch = RecordBatch::try_new(
             schema.clone(),
             vec![
                 Arc::new(Int64Array::from(vec![doc.id])),
                 Arc::new(StringArray::from(vec![doc.title.as_str()])),
-                Arc::new(StringArray::from(vec![doc.body.as_str()])),
                 Arc::new(StringArray::from(vec![doc.path.as_str()])),
             ],
         )
@@ -264,7 +260,7 @@ impl LanceFullStore {
             .delete(&format!("doc_id = {}", doc.id))
             .await?;
 
-        // Build (line, col, embed_text) tuples.
+        // Build (line_start, line_end, embed_text) tuples.
         let computed: Vec<(usize, usize, String)>;
         let chunks: &[(usize, usize, String)] = if let Some(ref c) = doc.chunks {
             c.as_slice()
@@ -272,7 +268,7 @@ impl LanceFullStore {
             computed = chunk_document(&doc.title, &doc.body)
                 .into_iter()
                 .enumerate()
-                .map(|(i, t)| (i, 0usize, t))
+                .map(|(i, t)| (i, i, t))
                 .collect();
             &computed
         };
@@ -284,8 +280,8 @@ impl LanceFullStore {
         let schema = chunks_meta_schema();
         let n = chunks.len();
         let doc_ids = vec![doc.id; n];
-        let lines: Vec<i32> = chunks.iter().map(|(l, _, _)| *l as i32).collect();
-        let cols: Vec<i32> = chunks.iter().map(|(_, c, _)| *c as i32).collect();
+        let line_starts: Vec<i32> = chunks.iter().map(|(s, _, _)| *s as i32).collect();
+        let line_ends: Vec<i32> = chunks.iter().map(|(_, e, _)| *e as i32).collect();
         let titles = vec![doc.title.as_str(); n];
         let paths = vec![doc.path.as_str(); n];
         let texts: Vec<&str> = chunks.iter().map(|(_, _, t)| t.as_str()).collect();
@@ -294,8 +290,8 @@ impl LanceFullStore {
             schema.clone(),
             vec![
                 Arc::new(Int64Array::from(doc_ids)),
-                Arc::new(Int32Array::from(lines)),
-                Arc::new(Int32Array::from(cols)),
+                Arc::new(Int32Array::from(line_starts)),
+                Arc::new(Int32Array::from(line_ends)),
                 Arc::new(StringArray::from(texts)),
                 Arc::new(StringArray::from(titles)),
                 Arc::new(StringArray::from(paths)),
@@ -316,9 +312,9 @@ impl LanceFullStore {
     }
 
     async fn rebuild_fts(&self) -> Result<()> {
-        self.documents
+        self.chunks_meta
             .create_index(
-                &["title", "body"],
+                &["text"],
                 Index::FTS(FtsIndexBuilder::default().base_tokenizer("ngram".to_owned())),
             )
             .replace(true)
@@ -327,104 +323,109 @@ impl LanceFullStore {
         Ok(())
     }
 
+    // ── search ────────────────────────────────────────────────────────────────
+
     async fn search_fts(
         &self,
         query: &str,
         limit: usize,
         path_prefix: Option<&str>,
-    ) -> Result<Vec<SearchResult>> {
+    ) -> Result<Vec<FileSearchResult>> {
+        let over_fetch = limit.saturating_mul(5);
         let mut qb = self
-            .documents
+            .chunks_meta
             .query()
             .full_text_search(FullTextSearchQuery::new(query.to_owned()))
             .select(Select::Columns(vec![
-                "id".to_string(),
-                "title".to_string(),
-                "path".to_string(),
+                "doc_id".to_string(),
+                "doc_title".to_string(),
+                "doc_path".to_string(),
+                "line_start".to_string(),
+                "line_end".to_string(),
+                "text".to_string(),
             ]))
-            .limit(limit);
+            .limit(over_fetch);
         if let Some(pfx) = path_prefix {
-            qb = qb.only_if(format!(
-                "path LIKE '{}%'",
-                escape_sql_string(pfx)
-            ));
+            qb = qb.only_if(format!("doc_path LIKE '{}%'", escape_sql_string(pfx)));
         }
-        let batches: Vec<RecordBatch> = qb
-            .execute()
-            .await?
-            .try_collect()
-            .await?;
+        let batches: Vec<RecordBatch> = qb.execute().await?.try_collect().await?;
 
-        let mut results = Vec::new();
+        let mut rows = Vec::new();
         for batch in &batches {
-            let ids = batch
-                .column_by_name("id")
+            let doc_ids = batch
+                .column_by_name("doc_id")
                 .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
             let titles = batch
-                .column_by_name("title")
+                .column_by_name("doc_title")
                 .and_then(|c| c.as_any().downcast_ref::<StringArray>());
             let paths = batch
-                .column_by_name("path")
+                .column_by_name("doc_path")
                 .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-            // _score is positive BM25 score (higher = more relevant)
+            let line_starts = batch
+                .column_by_name("line_start")
+                .and_then(|c| c.as_any().downcast_ref::<Int32Array>());
+            let line_ends = batch
+                .column_by_name("line_end")
+                .and_then(|c| c.as_any().downcast_ref::<Int32Array>());
+            let texts = batch
+                .column_by_name("text")
+                .and_then(|c| c.as_any().downcast_ref::<StringArray>());
             let scores = batch
                 .column_by_name("_score")
                 .and_then(|c| c.as_any().downcast_ref::<Float32Array>());
 
-            if let (Some(ids), Some(titles), Some(paths)) = (ids, titles, paths) {
+            if let (Some(dids), Some(ttls), Some(pths), Some(ls), Some(le), Some(txts)) =
+                (doc_ids, titles, paths, line_starts, line_ends, texts)
+            {
                 for i in 0..batch.num_rows() {
-                    results.push(SearchResult {
-                        id: ids.value(i),
-                        title: titles.value(i).to_owned(),
-                        path: paths.value(i).to_owned(),
+                    rows.push(RawHit {
+                        doc_id: dids.value(i),
+                        title: ttls.value(i).to_owned(),
+                        path: pths.value(i).to_owned(),
+                        line_start: ls.value(i) as usize,
+                        line_end: le.value(i) as usize,
+                        text: txts.value(i).to_owned(),
                         score: scores.map_or(0.0, |s| s.value(i) as f64),
                     });
                 }
             }
         }
-        Ok(results)
+        // BM25 _score: higher = more relevant.
+        Ok(group_by_file(rows, limit, |a, b| a > b))
     }
-
-    // ── vector search ─────────────────────────────────────────────────────────
 
     async fn search_similar(
         &self,
         query_vec: &[f32],
         limit: usize,
         path_prefix: Option<&str>,
-    ) -> Result<Vec<ChunkSearchResult>> {
+    ) -> Result<Vec<FileSearchResult>> {
+        let over_fetch = limit.saturating_mul(5);
         let mut qb = self
             .chunk_vectors
             .vector_search(query_vec)
             .map_err(|e| Error::Embed(e.to_string()))?
             .column("embedding")
-            .limit(limit);
+            .limit(over_fetch);
         if let Some(pfx) = path_prefix {
-            qb = qb.only_if(format!(
-                "doc_path LIKE '{}%'",
-                escape_sql_string(pfx)
-            ));
+            qb = qb.only_if(format!("doc_path LIKE '{}%'", escape_sql_string(pfx)));
         }
-        let batches: Vec<RecordBatch> = qb
-            .execute()
-            .await?
-            .try_collect()
-            .await?;
+        let batches: Vec<RecordBatch> = qb.execute().await?.try_collect().await?;
 
-        let mut results = Vec::new();
+        let mut rows = Vec::new();
         for batch in &batches {
             let doc_ids = batch
                 .column_by_name("doc_id")
                 .and_then(|c| c.as_any().downcast_ref::<Int64Array>())
                 .ok_or_else(|| Error::Embed("missing `doc_id` in search result".into()))?;
-            let lines = batch
-                .column_by_name("line")
+            let line_starts = batch
+                .column_by_name("line_start")
                 .and_then(|c| c.as_any().downcast_ref::<Int32Array>())
-                .ok_or_else(|| Error::Embed("missing `line` in search result".into()))?;
-            let cols = batch
-                .column_by_name("col")
+                .ok_or_else(|| Error::Embed("missing `line_start` in search result".into()))?;
+            let line_ends = batch
+                .column_by_name("line_end")
                 .and_then(|c| c.as_any().downcast_ref::<Int32Array>())
-                .ok_or_else(|| Error::Embed("missing `col` in search result".into()))?;
+                .ok_or_else(|| Error::Embed("missing `line_end` in search result".into()))?;
             let titles = batch
                 .column_by_name("doc_title")
                 .and_then(|c| c.as_any().downcast_ref::<StringArray>())
@@ -443,18 +444,19 @@ impl LanceFullStore {
                 .ok_or_else(|| Error::Embed("missing `_distance` in search result".into()))?;
 
             for i in 0..batch.num_rows() {
-                results.push(ChunkSearchResult {
+                rows.push(RawHit {
                     doc_id: doc_ids.value(i),
-                    line: lines.value(i) as usize,
-                    column: cols.value(i) as usize,
-                    doc_title: titles.value(i).to_owned(),
-                    doc_path: paths.value(i).to_owned(),
-                    chunk_text: texts.value(i).to_owned(),
+                    title: titles.value(i).to_owned(),
+                    path: paths.value(i).to_owned(),
+                    line_start: line_starts.value(i) as usize,
+                    line_end: line_ends.value(i) as usize,
+                    text: texts.value(i).to_owned(),
                     score: dists.value(i) as f64,
                 });
             }
         }
-        Ok(results)
+        // Vector distance: lower = better.
+        Ok(group_by_file(rows, limit, |a, b| a < b))
     }
 
     // ── embedding ─────────────────────────────────────────────────────────────
@@ -465,7 +467,7 @@ impl LanceFullStore {
             .query()
             .select(Select::Columns(vec![
                 "doc_id".to_string(),
-                "line".to_string(),
+                "line_start".to_string(),
             ]))
             .execute()
             .await?
@@ -477,10 +479,10 @@ impl LanceFullStore {
             let doc_ids = batch
                 .column_by_name("doc_id")
                 .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
-            let lines = batch
-                .column_by_name("line")
+            let line_starts = batch
+                .column_by_name("line_start")
                 .and_then(|c| c.as_any().downcast_ref::<Int32Array>());
-            if let (Some(dids), Some(ls)) = (doc_ids, lines) {
+            if let (Some(dids), Some(ls)) = (doc_ids, line_starts) {
                 for i in 0..batch.num_rows() {
                     keys.insert((dids.value(i), ls.value(i) as usize));
                 }
@@ -503,11 +505,11 @@ impl LanceFullStore {
             let doc_ids = batch
                 .column_by_name("doc_id")
                 .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
-            let lines = batch
-                .column_by_name("line")
+            let line_starts = batch
+                .column_by_name("line_start")
                 .and_then(|c| c.as_any().downcast_ref::<Int32Array>());
-            let cols = batch
-                .column_by_name("col")
+            let line_ends = batch
+                .column_by_name("line_end")
                 .and_then(|c| c.as_any().downcast_ref::<Int32Array>());
             let texts = batch
                 .column_by_name("text")
@@ -519,16 +521,16 @@ impl LanceFullStore {
                 .column_by_name("doc_path")
                 .and_then(|c| c.as_any().downcast_ref::<StringArray>());
 
-            if let (Some(dids), Some(ls), Some(cs), Some(txts), Some(ttls), Some(pths)) =
-                (doc_ids, lines, cols, texts, titles, paths)
+            if let (Some(dids), Some(ls), Some(le), Some(txts), Some(ttls), Some(pths)) =
+                (doc_ids, line_starts, line_ends, texts, titles, paths)
             {
                 for i in 0..batch.num_rows() {
                     let key = (dids.value(i), ls.value(i) as usize);
                     if !embedded.contains(&key) {
                         chunks.push(Chunk {
                             doc_id: key.0,
-                            line: key.1,
-                            column: cs.value(i) as usize,
+                            line_start: key.1,
+                            line_end: le.value(i) as usize,
                             text: txts.value(i).to_owned(),
                             doc_title: ttls.value(i).to_owned(),
                             doc_path: pths.value(i).to_owned(),
@@ -546,8 +548,8 @@ impl LanceFullStore {
         }
         let schema = chunk_vectors_schema(self.dim);
         let doc_ids: Vec<i64> = chunks.iter().map(|c| c.doc_id).collect();
-        let lines: Vec<i32> = chunks.iter().map(|c| c.line as i32).collect();
-        let cols: Vec<i32> = chunks.iter().map(|c| c.column as i32).collect();
+        let line_starts: Vec<i32> = chunks.iter().map(|c| c.line_start as i32).collect();
+        let line_ends: Vec<i32> = chunks.iter().map(|c| c.line_end as i32).collect();
         let titles: Vec<&str> = chunks.iter().map(|c| c.doc_title.as_str()).collect();
         let paths: Vec<&str> = chunks.iter().map(|c| c.doc_path.as_str()).collect();
         let texts: Vec<&str> = chunks.iter().map(|c| c.text.as_str()).collect();
@@ -556,8 +558,8 @@ impl LanceFullStore {
             schema.clone(),
             vec![
                 Arc::new(Int64Array::from(doc_ids)),
-                Arc::new(Int32Array::from(lines)),
-                Arc::new(Int32Array::from(cols)),
+                Arc::new(Int32Array::from(line_starts)),
+                Arc::new(Int32Array::from(line_ends)),
                 Arc::new(StringArray::from(titles)),
                 Arc::new(StringArray::from(paths)),
                 Arc::new(StringArray::from(texts)),
@@ -611,10 +613,70 @@ impl LanceFullStore {
     }
 }
 
+// ── raw hit + grouping ────────────────────────────────────────────────────────
+
+struct RawHit {
+    doc_id: i64,
+    title: String,
+    path: String,
+    line_start: usize,
+    line_end: usize,
+    text: String,
+    score: f64,
+}
+
+fn group_by_file<F>(rows: Vec<RawHit>, limit: usize, is_better: F) -> Vec<FileSearchResult>
+where
+    F: Fn(f64, f64) -> bool + Copy,
+{
+    let mut by_doc: HashMap<i64, FileSearchResult> = HashMap::new();
+
+    for r in rows {
+        let entry = by_doc.entry(r.doc_id).or_insert_with(|| FileSearchResult {
+            id: r.doc_id,
+            title: r.title.clone(),
+            path: r.path.clone(),
+            score: r.score,
+            chunks: Vec::new(),
+        });
+        if is_better(r.score, entry.score) {
+            entry.score = r.score;
+        }
+        entry.chunks.push(ChunkHit {
+            line_start: r.line_start,
+            line_end: r.line_end,
+            text: r.text,
+            score: r.score,
+        });
+    }
+
+    let mut files: Vec<FileSearchResult> = by_doc.into_values().collect();
+    for f in &mut files {
+        f.chunks.sort_by(|a, b| {
+            if is_better(a.score, b.score) {
+                std::cmp::Ordering::Less
+            } else if is_better(b.score, a.score) {
+                std::cmp::Ordering::Greater
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        });
+    }
+    files.sort_by(|a, b| {
+        if is_better(a.score, b.score) {
+            std::cmp::Ordering::Less
+        } else if is_better(b.score, a.score) {
+            std::cmp::Ordering::Greater
+        } else {
+            std::cmp::Ordering::Equal
+        }
+    });
+    files.truncate(limit);
+    files
+}
+
 // ── public sync wrapper ───────────────────────────────────────────────────────
 
-/// Full LanceDB backend: stores files, documents, chunks, and embeddings
-/// entirely within LanceDB — no SQLite required.
 pub(crate) struct LanceDbBackend {
     inner: LanceFullStore,
     rt: tokio::runtime::Runtime,
@@ -635,17 +697,6 @@ impl LanceDbBackend {
         })
     }
 
-    /// Run a future to completion, safely handling the case where we are
-    /// already executing inside a Tokio runtime.
-    ///
-    /// - **Outside a runtime**: delegates to `rt.block_on(f)`.
-    /// - **Inside a multi-thread runtime**: uses `tokio::task::block_in_place`
-    ///   so that other tasks on the thread pool can continue running while
-    ///   this thread blocks.
-    ///
-    /// Note: `block_in_place` panics when the *outer* runtime uses
-    /// `flavor = "current_thread"`.  In that case callers should move the
-    /// call to `spawn_blocking` before reaching this code.
     fn block_on_with<F: std::future::Future>(rt: &tokio::runtime::Runtime, f: F) -> F::Output {
         match tokio::runtime::Handle::try_current() {
             Ok(handle) => tokio::task::block_in_place(|| handle.block_on(f)),
@@ -659,7 +710,7 @@ impl LanceDbBackend {
 
     // ── file tracking ─────────────────────────────────────────────────────────
 
-    pub fn file_mtimes(&self) -> Result<std::collections::HashMap<String, i64>> {
+    pub fn file_mtimes(&self) -> Result<HashMap<String, i64>> {
         self.block_on(self.inner.file_mtimes())
     }
 
@@ -689,21 +740,23 @@ impl LanceDbBackend {
         self.block_on(self.inner.rebuild_fts())
     }
 
-    pub fn search_fts(&self, q: &FtsQuery<'_>) -> Result<Vec<SearchResult>> {
+    pub fn search_fts(&self, q: &FtsQuery<'_>) -> Result<Vec<FileSearchResult>> {
         let pfx = q.path_prefix.map(|p| p.to_string_lossy().to_string());
-        self.block_on(
-            self.inner
-                .search_fts(q.query, q.limit, pfx.as_deref()),
-        )
+        self.block_on(self.inner.search_fts(q.query, q.limit, pfx.as_deref()))
     }
 
     // ── vector search ─────────────────────────────────────────────────────────
 
-    pub fn search_similar(&self, q: &VectorQuery<'_>) -> Result<Vec<ChunkSearchResult>> {
+    pub fn search_similar(&self, q: &VectorQuery<'_>) -> Result<Vec<FileSearchResult>> {
+        let query_vecs = q.embedder.embed_texts(&[q.query])?;
+        let query_vec = query_vecs
+            .into_iter()
+            .next()
+            .ok_or_else(|| Error::Embed("embedder returned empty result".into()))?;
         let pfx = q.path_prefix.map(|p| p.to_string_lossy().to_string());
         self.block_on(
             self.inner
-                .search_similar(q.query_vec, q.limit, pfx.as_deref()),
+                .search_similar(&query_vec, q.limit, pfx.as_deref()),
         )
     }
 
@@ -747,7 +800,7 @@ impl LanceDbBackend {
 // ── RetrieveStore impl ────────────────────────────────────────────────────────
 
 impl RetrieveStore for LanceDbBackend {
-    fn file_mtimes(&self) -> Result<std::collections::HashMap<String, i64>> {
+    fn file_mtimes(&self) -> Result<HashMap<String, i64>> {
         self.file_mtimes()
     }
 
@@ -775,7 +828,7 @@ impl RetrieveStore for LanceDbBackend {
         self.rebuild_fts()
     }
 
-    fn search_fts(&self, q: &FtsQuery<'_>) -> Result<Vec<SearchResult>> {
+    fn search_fts(&self, q: &FtsQuery<'_>) -> Result<Vec<FileSearchResult>> {
         self.search_fts(q)
     }
 
@@ -799,7 +852,7 @@ impl RetrieveStore for LanceDbBackend {
         self.vec_info()
     }
 
-    fn search_similar(&self, q: &VectorQuery<'_>) -> Result<Vec<ChunkSearchResult>> {
+    fn search_similar(&self, q: &VectorQuery<'_>) -> Result<Vec<FileSearchResult>> {
         self.search_similar(q)
     }
 }

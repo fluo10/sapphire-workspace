@@ -23,13 +23,10 @@ pub use sapphire_retrieve::db::SCHEMA_VERSION as RETRIEVE_SCHEMA_VERSION;
 #[cfg(feature = "lancedb-store")]
 pub use sapphire_retrieve::lancedb_store;
 pub use sapphire_retrieve::{
-    Chunk, ChunkSearchResult, Document, Embedder, EmbedderConfig, Error as RetrieveError,
-    FtsQuery, HybridQuery, RetrieveStore, SearchResult, VecInfo, VectorQuery, build_embedder,
-    dedup_chunk_results, merge_rrf,
+    Chunk, ChunkHit, Document, Embedder, EmbedderConfig, Error as RetrieveError, FileSearchResult,
+    FtsQuery, HybridQuery, RetrieveDb, RetrieveStore, VecInfo, VectorQuery, build_embedder,
+    default_hybrid, merge_rrf_files,
 };
-// RetrieveDb is kept for backwards compatibility; prefer RetrieveStore + factory functions.
-#[allow(deprecated)]
-pub use sapphire_retrieve::RetrieveDb;
 
 // Re-export sapphire-sync public API.
 #[cfg(feature = "git-sync")]

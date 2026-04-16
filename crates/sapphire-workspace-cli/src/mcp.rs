@@ -10,7 +10,7 @@ use rmcp::{
     schemars, tool, tool_handler, tool_router,
     transport::stdio,
 };
-use sapphire_workspace::{FtsQuery, VectorQuery, Workspace, WorkspaceState, dedup_chunk_results};
+use sapphire_workspace::{HybridQuery, Workspace, WorkspaceState};
 
 use crate::config::UserConfig;
 
@@ -137,18 +137,19 @@ impl RecallServer {
         .map_err(|e| e.to_string())
     }
 
-    #[tool(description = "Search indexed documents. \
-        When `embedding.enabled = true` in the user config, uses approximate \
-        (vector/semantic) search. Otherwise falls back to full-text search \
-        (FTS5 trigram index, supports substring and CJK queries). \
-        Returns a JSON array of results ordered by relevance, each with \
-        `id`, `title`, `path`, and `score`.")]
+    #[tool(description = "Search indexed documents using hybrid (FTS + vector) search. \
+        When an embedder is configured, merges full-text and semantic search via \
+        Reciprocal Rank Fusion; otherwise falls back to FTS-only. \
+        Returns a JSON array of files ordered by relevance, each with \
+        `id`, `title`, `path`, `score`, and a `chunks` array giving the matched \
+        line ranges (`line_start`, `line_end`) and text within each file.")]
     fn search(&self, Parameters(p): Parameters<SearchParams>) -> Result<String, String> {
         (|| -> anyhow::Result<String> {
             self.with_state(|s| {
                 s.sync()?;
                 let limit = p.limit.unwrap_or(10);
 
+                // Opportunistically embed a small backlog before searching.
                 if let Some(embedder) = s.embedder() {
                     let pending = s
                         .retrieve_db()
@@ -158,25 +159,16 @@ impl RecallServer {
                     if pending > 0 && pending <= 50 {
                         let _ = s.retrieve_db().embed_pending(embedder, &|_, _| {});
                     }
-
-                    let query_vecs = embedder.embed_texts(&[p.query.as_str()])?;
-                    let query_vec = query_vecs
-                        .into_iter()
-                        .next()
-                        .ok_or_else(|| anyhow::anyhow!("embedder returned empty result"))?;
-                    let vq = VectorQuery::new(&query_vec).limit(limit * 3);
-                    let raw = s
-                        .retrieve_db()
-                        .search_similar(&vq)
-                        .map_err(anyhow::Error::msg)?;
-                    let results = dedup_chunk_results(raw, limit);
-                    return Ok(serde_json::to_string_pretty(&results)?);
                 }
 
-                let fq = FtsQuery::new(&p.query).limit(limit);
+                let mut hq = HybridQuery::new(p.query.as_str()).limit(limit);
+                if let Some(e) = s.embedder() {
+                    hq = hq.embedder(e);
+                }
+
                 let results = s
                     .retrieve_db()
-                    .search_fts(&fq)
+                    .search_hybrid(&hq)
                     .map_err(anyhow::Error::msg)?;
                 Ok(serde_json::to_string_pretty(&results)?)
             })

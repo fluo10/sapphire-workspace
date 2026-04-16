@@ -6,8 +6,7 @@ use sapphire_retrieve::db::SCHEMA_VERSION;
 #[cfg(feature = "lancedb-store")]
 use sapphire_retrieve::open_lancedb;
 use sapphire_retrieve::{
-    Document, Embedder, FtsQuery, HybridQuery, RetrieveStore, SearchResult, VectorQuery,
-    dedup_chunk_results,
+    Document, Embedder, FileSearchResult, FtsQuery, HybridQuery, RetrieveStore, VectorQuery,
 };
 #[cfg(feature = "sqlite-store")]
 use sapphire_retrieve::{open_sqlite_fts, open_sqlite_vec};
@@ -521,74 +520,46 @@ impl WorkspaceState {
         &self,
         params: &RetrieveParams<'_>,
         hybrid_config: &HybridConfig,
-    ) -> Result<Vec<SearchResult>> {
+    ) -> Result<Vec<FileSearchResult>> {
         // Fall back to FTS when the embedder is not available.
         let effective_mode = match params.mode {
-            SearchMode::Semantic | SearchMode::Hybrid if self.embedder().is_none() => {
-                SearchMode::Fts
-            }
+            SearchMode::Semantic if self.embedder().is_none() => SearchMode::Fts,
             other => other,
         };
 
         let results = match effective_mode {
             SearchMode::Fts => {
-                let q = FtsQuery::new(params.query).limit(params.limit);
-                let q = if let Some(f) = params.folder {
-                    q.path_prefix(f)
-                } else {
-                    q
-                };
+                let mut q = FtsQuery::new(params.query).limit(params.limit);
+                if let Some(f) = params.folder {
+                    q = q.path_prefix(f);
+                }
                 self.retrieve_db().search_fts(&q)?
             }
             SearchMode::Semantic => {
-                self.search_semantic_internal(params.query, params.limit, params.folder)?
+                let embedder = self.embedder().expect("caller verified embedder exists");
+                let mut vq = VectorQuery::new(params.query, embedder).limit(params.limit);
+                if let Some(f) = params.folder {
+                    vq = vq.path_prefix(f);
+                }
+                self.retrieve_db().search_similar(&vq)?
             }
             SearchMode::Hybrid => {
-                self.search_hybrid_internal(params, hybrid_config)?
+                let mut hq = HybridQuery::new(params.query)
+                    .limit(params.limit)
+                    .rrf_k(hybrid_config.rrf_k as f64)
+                    .weight_fts(hybrid_config.fts_weight)
+                    .weight_sem(1.0 - hybrid_config.fts_weight);
+                if let Some(e) = self.embedder() {
+                    hq = hq.embedder(e);
+                }
+                if let Some(f) = params.folder {
+                    hq = hq.path_prefix(f);
+                }
+                self.retrieve_db().search_hybrid(&hq)?
             }
         };
 
         Ok(results)
-    }
-
-    fn search_semantic_internal(
-        &self,
-        query: &str,
-        limit: usize,
-        folder: Option<&Path>,
-    ) -> Result<Vec<SearchResult>> {
-        let embedder = self.embedder().expect("caller verified embedder exists");
-        let query_vecs = embedder.embed_texts(&[query])?;
-        let query_vec = query_vecs.into_iter().next().ok_or_else(|| {
-            sapphire_retrieve::Error::Embed("embedder returned empty result".into())
-        })?;
-        let mut vq = VectorQuery::new(&query_vec).limit(limit * 3);
-        if let Some(f) = folder {
-            vq = vq.path_prefix(f);
-        }
-        let raw = self.retrieve_db().search_similar(&vq)?;
-        Ok(dedup_chunk_results(raw, limit))
-    }
-
-    fn search_hybrid_internal(
-        &self,
-        params: &RetrieveParams<'_>,
-        config: &HybridConfig,
-    ) -> Result<Vec<SearchResult>> {
-        let embedder = self.embedder().expect("caller verified embedder exists");
-        let query_vecs = embedder.embed_texts(&[params.query])?;
-        let query_vec = query_vecs.into_iter().next().ok_or_else(|| {
-            sapphire_retrieve::Error::Embed("embedder returned empty result".into())
-        })?;
-        let mut hq = HybridQuery::new(params.query, &query_vec)
-            .limit(params.limit)
-            .rrf_k(config.rrf_k as f64)
-            .weight_fts(config.fts_weight)
-            .weight_sem(1.0 - config.fts_weight);
-        if let Some(f) = params.folder {
-            hq = hq.path_prefix(f);
-        }
-        Ok(self.retrieve_db().search_hybrid(&hq)?)
     }
 
     // ── private helpers ───────────────────────────────────────────────────────
