@@ -43,7 +43,7 @@ use crate::{
     chunker::chunk_document,
     embed::Embedder,
     error::{Error, Result},
-    retrieve_store::{Document, RetrieveStore, SearchResult},
+    retrieve_store::{Document, FtsQuery, RetrieveStore, SearchResult, VectorQuery},
     vector_store::{Chunk, ChunkSearchResult, VecInfo},
 };
 
@@ -327,8 +327,13 @@ impl LanceFullStore {
         Ok(())
     }
 
-    async fn search_fts(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
-        let batches: Vec<RecordBatch> = self
+    async fn search_fts(
+        &self,
+        query: &str,
+        limit: usize,
+        path_prefix: Option<&str>,
+    ) -> Result<Vec<SearchResult>> {
+        let mut qb = self
             .documents
             .query()
             .full_text_search(FullTextSearchQuery::new(query.to_owned()))
@@ -337,7 +342,14 @@ impl LanceFullStore {
                 "title".to_string(),
                 "path".to_string(),
             ]))
-            .limit(limit)
+            .limit(limit);
+        if let Some(pfx) = path_prefix {
+            qb = qb.only_if(format!(
+                "path LIKE '{}%'",
+                escape_sql_string(pfx)
+            ));
+        }
+        let batches: Vec<RecordBatch> = qb
             .execute()
             .await?
             .try_collect()
@@ -379,13 +391,21 @@ impl LanceFullStore {
         &self,
         query_vec: &[f32],
         limit: usize,
+        path_prefix: Option<&str>,
     ) -> Result<Vec<ChunkSearchResult>> {
-        let batches: Vec<RecordBatch> = self
+        let mut qb = self
             .chunk_vectors
             .vector_search(query_vec)
             .map_err(|e| Error::Embed(e.to_string()))?
             .column("embedding")
-            .limit(limit)
+            .limit(limit);
+        if let Some(pfx) = path_prefix {
+            qb = qb.only_if(format!(
+                "doc_path LIKE '{}%'",
+                escape_sql_string(pfx)
+            ));
+        }
+        let batches: Vec<RecordBatch> = qb
             .execute()
             .await?
             .try_collect()
@@ -669,18 +689,22 @@ impl LanceDbBackend {
         self.block_on(self.inner.rebuild_fts())
     }
 
-    pub fn search_fts(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
-        self.block_on(self.inner.search_fts(query, limit))
+    pub fn search_fts(&self, q: &FtsQuery<'_>) -> Result<Vec<SearchResult>> {
+        let pfx = q.path_prefix.map(|p| p.to_string_lossy().to_string());
+        self.block_on(
+            self.inner
+                .search_fts(q.query, q.limit, pfx.as_deref()),
+        )
     }
 
     // ── vector search ─────────────────────────────────────────────────────────
 
-    pub fn search_similar(
-        &self,
-        query_vec: &[f32],
-        limit: usize,
-    ) -> Result<Vec<ChunkSearchResult>> {
-        self.block_on(self.inner.search_similar(query_vec, limit))
+    pub fn search_similar(&self, q: &VectorQuery<'_>) -> Result<Vec<ChunkSearchResult>> {
+        let pfx = q.path_prefix.map(|p| p.to_string_lossy().to_string());
+        self.block_on(
+            self.inner
+                .search_similar(q.query_vec, q.limit, pfx.as_deref()),
+        )
     }
 
     // ── embedding ─────────────────────────────────────────────────────────────
@@ -751,8 +775,8 @@ impl RetrieveStore for LanceDbBackend {
         self.rebuild_fts()
     }
 
-    fn search_fts(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
-        self.search_fts(query, limit)
+    fn search_fts(&self, q: &FtsQuery<'_>) -> Result<Vec<SearchResult>> {
+        self.search_fts(q)
     }
 
     fn document_ids(&self) -> Result<Vec<i64>> {
@@ -775,7 +799,7 @@ impl RetrieveStore for LanceDbBackend {
         self.vec_info()
     }
 
-    fn search_similar(&self, query_vec: &[f32], limit: usize) -> Result<Vec<ChunkSearchResult>> {
-        self.search_similar(query_vec, limit)
+    fn search_similar(&self, q: &VectorQuery<'_>) -> Result<Vec<ChunkSearchResult>> {
+        self.search_similar(q)
     }
 }

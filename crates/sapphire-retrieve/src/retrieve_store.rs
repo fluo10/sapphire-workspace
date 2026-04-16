@@ -14,12 +14,122 @@
 //! operations inside a dedicated Tokio runtime.
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use crate::{
     embed::Embedder,
     error::Result,
     vector_store::{ChunkSearchResult, VecInfo},
 };
+
+// ── query structs ────────────────────────────────────────────────────────────
+
+/// Full-text search query.
+#[derive(Debug, Clone)]
+pub struct FtsQuery<'a> {
+    pub query: &'a str,
+    pub limit: usize,
+    pub path_prefix: Option<&'a Path>,
+}
+
+impl<'a> FtsQuery<'a> {
+    pub fn new(query: &'a str) -> Self {
+        Self {
+            query,
+            limit: 10,
+            path_prefix: None,
+        }
+    }
+
+    pub fn limit(mut self, n: usize) -> Self {
+        self.limit = n;
+        self
+    }
+
+    pub fn path_prefix(mut self, p: &'a Path) -> Self {
+        self.path_prefix = Some(p);
+        self
+    }
+}
+
+/// Vector similarity search query (chunk-level).
+#[derive(Debug, Clone)]
+pub struct VectorQuery<'a> {
+    pub query_vec: &'a [f32],
+    pub limit: usize,
+    pub path_prefix: Option<&'a Path>,
+}
+
+impl<'a> VectorQuery<'a> {
+    pub fn new(query_vec: &'a [f32]) -> Self {
+        Self {
+            query_vec,
+            limit: 10,
+            path_prefix: None,
+        }
+    }
+
+    pub fn limit(mut self, n: usize) -> Self {
+        self.limit = n;
+        self
+    }
+
+    pub fn path_prefix(mut self, p: &'a Path) -> Self {
+        self.path_prefix = Some(p);
+        self
+    }
+}
+
+/// Hybrid (FTS + vector) search query, merged via Reciprocal Rank Fusion.
+#[derive(Debug, Clone)]
+pub struct HybridQuery<'a> {
+    pub text: &'a str,
+    pub query_vec: &'a [f32],
+    pub limit: usize,
+    pub path_prefix: Option<&'a Path>,
+    pub rrf_k: f64,
+    pub weight_fts: f64,
+    pub weight_sem: f64,
+}
+
+impl<'a> HybridQuery<'a> {
+    pub fn new(text: &'a str, query_vec: &'a [f32]) -> Self {
+        Self {
+            text,
+            query_vec,
+            limit: 10,
+            path_prefix: None,
+            rrf_k: 60.0,
+            weight_fts: 1.0,
+            weight_sem: 1.0,
+        }
+    }
+
+    pub fn limit(mut self, n: usize) -> Self {
+        self.limit = n;
+        self
+    }
+
+    pub fn path_prefix(mut self, p: &'a Path) -> Self {
+        self.path_prefix = Some(p);
+        self
+    }
+
+    pub fn rrf_k(mut self, k: f64) -> Self {
+        self.rrf_k = k;
+        self
+    }
+
+    pub fn weight_fts(mut self, w: f64) -> Self {
+        self.weight_fts = w;
+        self
+    }
+
+    pub fn weight_sem(mut self, w: f64) -> Self {
+        self.weight_sem = w;
+        self
+    }
+}
 
 // ── shared domain types ───────────────────────────────────────────────────────
 
@@ -121,9 +231,9 @@ pub trait RetrieveStore: Send + Sync {
 
     /// Full-text search; returns up to `limit` results ordered by relevance.
     ///
-    /// SQLite mode uses the FTS5 trigram index (substring / CJK aware).
-    /// LanceDB mode uses the ngram tokenizer (better BM25 ranking).
-    fn search_fts(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>>;
+    /// When `q.path_prefix` is set, only documents whose path starts with
+    /// the given prefix are returned.
+    fn search_fts(&self, q: &FtsQuery<'_>) -> Result<Vec<SearchResult>>;
 
     /// Return the IDs of all documents in the database.
     fn document_ids(&self) -> Result<Vec<i64>>;
@@ -150,6 +260,19 @@ pub trait RetrieveStore: Send + Sync {
     /// Find the `limit` most similar chunks to `query_vec`, ordered by
     /// ascending distance.
     ///
+    /// When `q.path_prefix` is set, only chunks belonging to documents
+    /// whose path starts with the given prefix are returned.
+    ///
     /// Returns an empty `Vec` when no vector backend is configured.
-    fn search_similar(&self, query_vec: &[f32], limit: usize) -> Result<Vec<ChunkSearchResult>>;
+    fn search_similar(&self, q: &VectorQuery<'_>) -> Result<Vec<ChunkSearchResult>>;
+
+    /// Hybrid search combining FTS and vector similarity via RRF.
+    ///
+    /// The default implementation calls [`search_fts`](Self::search_fts) and
+    /// [`search_similar`](Self::search_similar), deduplicates chunks, and
+    /// merges via [`crate::db::merge_rrf`]. Backends may override for
+    /// native hybrid support.
+    fn search_hybrid(&self, q: &HybridQuery<'_>) -> Result<Vec<SearchResult>> {
+        crate::db::default_hybrid(self, q)
+    }
 }

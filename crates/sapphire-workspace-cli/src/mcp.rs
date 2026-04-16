@@ -10,7 +10,7 @@ use rmcp::{
     schemars, tool, tool_handler, tool_router,
     transport::stdio,
 };
-use sapphire_workspace::{Workspace, WorkspaceState, dedup_chunk_results};
+use sapphire_workspace::{FtsQuery, VectorQuery, Workspace, WorkspaceState, dedup_chunk_results};
 
 use crate::config::UserConfig;
 
@@ -164,17 +164,19 @@ impl RecallServer {
                         .into_iter()
                         .next()
                         .ok_or_else(|| anyhow::anyhow!("embedder returned empty result"))?;
+                    let vq = VectorQuery::new(&query_vec).limit(limit * 3);
                     let raw = s
                         .retrieve_db()
-                        .search_similar(&query_vec, limit * 3)
+                        .search_similar(&vq)
                         .map_err(anyhow::Error::msg)?;
                     let results = dedup_chunk_results(raw, limit);
                     return Ok(serde_json::to_string_pretty(&results)?);
                 }
 
+                let fq = FtsQuery::new(&p.query).limit(limit);
                 let results = s
                     .retrieve_db()
-                    .search_fts(&p.query, limit)
+                    .search_fts(&fq)
                     .map_err(anyhow::Error::msg)?;
                 Ok(serde_json::to_string_pretty(&results)?)
             })

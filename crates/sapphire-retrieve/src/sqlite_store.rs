@@ -33,7 +33,7 @@ use crate::{
     chunker::chunk_document,
     embed::Embedder,
     error::{Error, Result},
-    retrieve_store::{Document, RetrieveStore, SearchResult},
+    retrieve_store::{Document, FtsQuery, RetrieveStore, SearchResult, VectorQuery},
     vector_store::{Chunk, ChunkSearchResult, VecInfo, vec_serialize},
 };
 
@@ -45,7 +45,8 @@ use crate::{
 /// - 1: initial schema
 /// - 2: sqlite-vec integration
 /// - 3: replace `chunk_index` with `line` + `column` (source positions)
-pub const SCHEMA_VERSION: i32 = 3;
+/// - 4: add index on `documents(path)` for path-prefix filtering
+pub const SCHEMA_VERSION: i32 = 4;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS files (
@@ -60,6 +61,7 @@ CREATE TABLE IF NOT EXISTS documents (
     path  TEXT    NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_documents_title ON documents(title);
+CREATE INDEX IF NOT EXISTS idx_documents_path ON documents(path);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
     title,
@@ -230,18 +232,27 @@ impl RetrieveStore for SqliteStore {
         Ok(())
     }
 
-    fn search_fts(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
+    fn search_fts(&self, q: &FtsQuery<'_>) -> Result<Vec<SearchResult>> {
         let conn = self.open_conn()?;
-        let mut stmt = conn.prepare(
+        let prefix_glob = q.path_prefix.map(|p| format!("{}*", p.to_string_lossy()));
+        let sql = if prefix_glob.is_some() {
+            "SELECT d.id, d.title, d.path, fts.rank
+             FROM documents_fts fts
+             JOIN documents d ON d.id = fts.rowid
+             WHERE documents_fts MATCH ?1 AND d.path GLOB ?3
+             ORDER BY fts.rank
+             LIMIT ?2"
+        } else {
             "SELECT d.id, d.title, d.path, fts.rank
              FROM documents_fts fts
              JOIN documents d ON d.id = fts.rowid
              WHERE documents_fts MATCH ?1
              ORDER BY fts.rank
-             LIMIT ?2",
-        )?;
-        let results = stmt
-            .query_map(params![query, limit as i64], |row| {
+             LIMIT ?2"
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let results = if let Some(ref glob) = prefix_glob {
+            stmt.query_map(params![q.query, q.limit as i64, glob], |row| {
                 Ok(SearchResult {
                     id: row.get::<_, i64>(0)?,
                     title: row.get::<_, String>(1)?,
@@ -249,7 +260,18 @@ impl RetrieveStore for SqliteStore {
                     score: row.get::<_, f64>(3).unwrap_or(0.0),
                 })
             })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+            .collect::<rusqlite::Result<Vec<_>>>()?
+        } else {
+            stmt.query_map(params![q.query, q.limit as i64], |row| {
+                Ok(SearchResult {
+                    id: row.get::<_, i64>(0)?,
+                    title: row.get::<_, String>(1)?,
+                    path: row.get::<_, String>(2)?,
+                    score: row.get::<_, f64>(3).unwrap_or(0.0),
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+        };
         Ok(results)
     }
 
@@ -322,12 +344,21 @@ impl RetrieveStore for SqliteStore {
         })
     }
 
-    fn search_similar(&self, query_vec: &[f32], limit: usize) -> Result<Vec<ChunkSearchResult>> {
+    fn search_similar(&self, q: &VectorQuery<'_>) -> Result<Vec<ChunkSearchResult>> {
         if self.dim.is_none() {
             return Ok(Vec::new());
         }
         let conn = self.open_conn()?;
-        let blob = vec_serialize(query_vec);
+        let blob = vec_serialize(q.query_vec);
+
+        // sqlite-vec doesn't support WHERE filters on the virtual table join
+        // directly, so we over-fetch and post-filter when a path prefix is given.
+        let over_fetch = if q.path_prefix.is_some() {
+            q.limit * 5
+        } else {
+            q.limit
+        };
+
         let mut stmt = conn.prepare(
             "SELECT d.id, d.title, d.path, c.line, c.col, c.text, cv.distance
              FROM chunk_vectors cv
@@ -336,8 +367,9 @@ impl RetrieveStore for SqliteStore {
              WHERE cv.embedding MATCH ?1 AND k = ?2
              ORDER BY cv.distance",
         )?;
-        let results = stmt
-            .query_map(params![blob, limit as i64], |row| {
+        let prefix = q.path_prefix.map(|p| p.to_string_lossy().to_string());
+        let results: Vec<ChunkSearchResult> = stmt
+            .query_map(params![blob, over_fetch as i64], |row| {
                 Ok(ChunkSearchResult {
                     doc_id: row.get::<_, i64>(0)?,
                     doc_title: row.get::<_, String>(1)?,
@@ -348,7 +380,14 @@ impl RetrieveStore for SqliteStore {
                     score: row.get::<_, f64>(6).unwrap_or(0.0),
                 })
             })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+            .filter_map(|r| r.ok())
+            .filter(|r| {
+                prefix
+                    .as_ref()
+                    .map_or(true, |pfx| r.doc_path.starts_with(pfx.as_str()))
+            })
+            .take(q.limit)
+            .collect();
         Ok(results)
     }
 }
@@ -374,10 +413,23 @@ pub(crate) fn open_or_init(db_path: &Path) -> Result<Connection> {
         return Ok(conn);
     }
 
+    if db_version < SCHEMA_VERSION {
+        apply_migrations(&conn, db_version)?;
+        conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
+        return Ok(conn);
+    }
+
     Err(Error::SchemaTooNew {
         db_version,
         app_version: SCHEMA_VERSION,
     })
+}
+
+fn apply_migrations(conn: &Connection, from_version: i32) -> Result<()> {
+    if from_version < 4 {
+        conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_documents_path ON documents(path)")?;
+    }
+    Ok(())
 }
 
 pub fn wipe_db_files(db_path: &Path) {

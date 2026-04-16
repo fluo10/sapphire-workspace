@@ -32,7 +32,7 @@ use std::{
 use crate::{
     embed::Embedder,
     error::Result,
-    retrieve_store::RetrieveStore,
+    retrieve_store::{FtsQuery, HybridQuery, RetrieveStore, VectorQuery},
     vector_store::{ChunkSearchResult, VecInfo},
 };
 
@@ -115,16 +115,23 @@ impl RetrieveStore for InMemoryStore {
         Ok(())
     }
 
-    fn search_fts(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
+    fn search_fts(&self, q: &FtsQuery<'_>) -> Result<Vec<SearchResult>> {
         let state = self.state.lock().unwrap();
-        let q = query.to_lowercase();
+        let needle = q.query.to_lowercase();
+        let prefix = q.path_prefix.map(|p| p.to_string_lossy().to_string());
         let mut results: Vec<SearchResult> = state
             .documents
             .values()
             .filter(|doc| {
-                doc.title.to_lowercase().contains(&q) || doc.body.to_lowercase().contains(&q)
+                if let Some(ref pfx) = prefix {
+                    if !doc.path.starts_with(pfx.as_str()) {
+                        return false;
+                    }
+                }
+                doc.title.to_lowercase().contains(&needle)
+                    || doc.body.to_lowercase().contains(&needle)
             })
-            .take(limit)
+            .take(q.limit)
             .map(|doc| SearchResult {
                 id: doc.id,
                 title: doc.title.clone(),
@@ -167,7 +174,7 @@ impl RetrieveStore for InMemoryStore {
         })
     }
 
-    fn search_similar(&self, _query_vec: &[f32], _limit: usize) -> Result<Vec<ChunkSearchResult>> {
+    fn search_similar(&self, _q: &VectorQuery<'_>) -> Result<Vec<ChunkSearchResult>> {
         Ok(vec![])
     }
 }
@@ -334,19 +341,20 @@ impl RetrieveDb {
     /// SQLite mode uses the FTS5 trigram index (substring / CJK aware).
     /// LanceDB mode uses the ngram tokenizer (better BM25 ranking).
     /// In-memory mode uses a simple case-insensitive substring scan.
-    pub fn search_fts(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
-        self.store().search_fts(query, limit)
+    pub fn search_fts(&self, q: &FtsQuery<'_>) -> Result<Vec<SearchResult>> {
+        self.store().search_fts(q)
     }
 
     /// Find the `limit` most similar chunks to `query_vec`.
     ///
     /// Returns an empty `Vec` when no vector backend is configured.
-    pub fn search_similar(
-        &self,
-        query_vec: &[f32],
-        limit: usize,
-    ) -> Result<Vec<ChunkSearchResult>> {
-        self.store().search_similar(query_vec, limit)
+    pub fn search_similar(&self, q: &VectorQuery<'_>) -> Result<Vec<ChunkSearchResult>> {
+        self.store().search_similar(q)
+    }
+
+    /// Hybrid search combining FTS and vector similarity via RRF.
+    pub fn search_hybrid(&self, q: &HybridQuery<'_>) -> Result<Vec<SearchResult>> {
+        self.store().search_hybrid(q)
     }
 
     /// Deduplicate chunk search results to one `SearchResult` per document.
@@ -455,6 +463,74 @@ pub fn dedup_chunk_results(results: Vec<ChunkSearchResult>, limit: usize) -> Vec
             score: r.score,
         })
         .collect()
+}
+
+/// Merge two ranked result lists via Reciprocal Rank Fusion.
+///
+/// `score(d) = w_fts / (k + rank_fts) + w_sem / (k + rank_sem)`
+///
+/// Documents appearing in only one list receive a contribution from that
+/// list alone.  The returned list is sorted by descending RRF score.
+pub fn merge_rrf(
+    fts: &[SearchResult],
+    sem: &[SearchResult],
+    k: f64,
+    w_fts: f64,
+    w_sem: f64,
+    limit: usize,
+) -> Vec<SearchResult> {
+    let mut scores: HashMap<String, (SearchResult, f64)> = HashMap::new();
+
+    for (rank, result) in fts.iter().enumerate() {
+        let rrf = w_fts / (k + (rank + 1) as f64);
+        scores
+            .entry(result.path.clone())
+            .and_modify(|(_, s)| *s += rrf)
+            .or_insert_with(|| (result.clone(), rrf));
+    }
+
+    for (rank, result) in sem.iter().enumerate() {
+        let rrf = w_sem / (k + (rank + 1) as f64);
+        scores
+            .entry(result.path.clone())
+            .and_modify(|(_, s)| *s += rrf)
+            .or_insert_with(|| (result.clone(), rrf));
+    }
+
+    let mut merged: Vec<_> = scores.into_values().collect();
+    merged.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    merged.truncate(limit);
+
+    merged
+        .into_iter()
+        .map(|(mut result, rrf_score)| {
+            result.score = rrf_score;
+            result
+        })
+        .collect()
+}
+
+/// Default hybrid search implementation used by [`RetrieveStore::search_hybrid`].
+///
+/// Calls `search_fts` + `search_similar` on the given store, deduplicates
+/// chunks, and merges via [`merge_rrf`].
+pub fn default_hybrid<S: RetrieveStore + ?Sized>(
+    store: &S,
+    q: &HybridQuery<'_>,
+) -> Result<Vec<SearchResult>> {
+    let over_fetch = q.limit * 3;
+    let fts = store.search_fts(&FtsQuery {
+        query: q.text,
+        limit: over_fetch,
+        path_prefix: q.path_prefix,
+    })?;
+    let raw = store.search_similar(&VectorQuery {
+        query_vec: q.query_vec,
+        limit: over_fetch,
+        path_prefix: q.path_prefix,
+    })?;
+    let sem = dedup_chunk_results(raw, over_fetch);
+    Ok(merge_rrf(&fts, &sem, q.rrf_k, q.weight_fts, q.weight_sem, q.limit))
 }
 
 // ── backend factory functions ─────────────────────────────────────────────────
