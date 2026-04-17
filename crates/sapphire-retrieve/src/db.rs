@@ -3,25 +3,6 @@
 //! [`RetrieveDb`] is the main entry point.  It manages one of the available
 //! storage backends and exposes a unified API for file tracking, document
 //! management, full-text search, and vector search.
-//!
-//! # Choosing a backend
-//!
-//! Call one of the `init_*` methods after [`RetrieveDb::open`]:
-//!
-//! | Method | Backend | Notes |
-//! |--------|---------|-------|
-//! | *(none)* | SQLite FTS only | Default when `sqlite-store` is enabled |
-//! | [`init_sqlite_vec`](Self::init_sqlite_vec) | SQLite + sqlite-vec | Lightweight; requires `sqlite-store` |
-//! | [`init_lancedb`](Self::init_lancedb) | LanceDB (full) | Requires `lancedb-store` feature; no SQLite file |
-//!
-//! When neither `sqlite-store` nor `lancedb-store` is compiled in, an
-//! in-memory backend is used: documents are stored in a `HashMap` and
-//! a simple substring search is available.  Data is not persisted to disk.
-//!
-//! # Thread safety
-//!
-//! [`RetrieveDb`] is `Send + Sync`.  Each public method briefly acquires an
-//! internal lock to clone the `Arc`-wrapped backend, then operates independently.
 
 use std::{
     collections::HashMap,
@@ -32,11 +13,11 @@ use std::{
 use crate::{
     embed::Embedder,
     error::Result,
-    retrieve_store::RetrieveStore,
-    vector_store::{ChunkSearchResult, VecInfo},
+    retrieve_store::{
+        ChunkHit, Document, FileSearchResult, FtsQuery, HybridQuery, RetrieveStore, VectorQuery,
+    },
+    vector_store::VecInfo,
 };
-
-pub use crate::retrieve_store::{Document, SearchResult};
 
 #[cfg(feature = "sqlite-store")]
 use crate::sqlite_store::SqliteStore;
@@ -44,7 +25,6 @@ use crate::sqlite_store::SqliteStore;
 #[cfg(feature = "lancedb-store")]
 use crate::lancedb_store::LanceDbBackend;
 
-// Re-export the SQLite schema version (used by workspace helpers and the CLI).
 #[cfg(feature = "sqlite-store")]
 pub use crate::sqlite_store::SCHEMA_VERSION;
 
@@ -52,10 +32,7 @@ pub use crate::sqlite_store::SCHEMA_VERSION;
 
 /// In-memory backend used when no persistent storage feature is compiled in.
 ///
-/// All data lives in `HashMap`s and is lost when the process exits.
-/// FTS is implemented as a simple case-insensitive substring scan.
-/// This backend is also the *initial* state when the [`lancedb-store`] feature
-/// is enabled but [`RetrieveDb::init_lancedb`] has not yet been called.
+/// Data lives in `HashMap`s and is lost when the process exits.
 struct InMemoryStore {
     state: Mutex<InMemoryState>,
 }
@@ -115,21 +92,34 @@ impl RetrieveStore for InMemoryStore {
         Ok(())
     }
 
-    fn search_fts(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
+    fn search_fts(&self, q: &FtsQuery<'_>) -> Result<Vec<FileSearchResult>> {
         let state = self.state.lock().unwrap();
-        let q = query.to_lowercase();
-        let mut results: Vec<SearchResult> = state
+        let needle = q.query.to_lowercase();
+        let prefix = q.path_prefix.map(|p| p.to_string_lossy().to_string());
+        let mut results: Vec<FileSearchResult> = state
             .documents
             .values()
             .filter(|doc| {
-                doc.title.to_lowercase().contains(&q) || doc.body.to_lowercase().contains(&q)
+                if let Some(ref pfx) = prefix {
+                    if !doc.path.starts_with(pfx.as_str()) {
+                        return false;
+                    }
+                }
+                doc.title.to_lowercase().contains(&needle)
+                    || doc.body.to_lowercase().contains(&needle)
             })
-            .take(limit)
-            .map(|doc| SearchResult {
+            .take(q.limit)
+            .map(|doc| FileSearchResult {
                 id: doc.id,
                 title: doc.title.clone(),
                 path: doc.path.clone(),
                 score: 0.0,
+                chunks: vec![ChunkHit {
+                    line_start: 0,
+                    line_end: 0,
+                    text: doc.title.clone(),
+                    score: 0.0,
+                }],
             })
             .collect();
         results.sort_by(|a, b| a.title.cmp(&b.title));
@@ -167,7 +157,7 @@ impl RetrieveStore for InMemoryStore {
         })
     }
 
-    fn search_similar(&self, _query_vec: &[f32], _limit: usize) -> Result<Vec<ChunkSearchResult>> {
+    fn search_similar(&self, _q: &VectorQuery<'_>) -> Result<Vec<FileSearchResult>> {
         Ok(vec![])
     }
 }
@@ -175,22 +165,15 @@ impl RetrieveStore for InMemoryStore {
 // ── backend state ─────────────────────────────────────────────────────────────
 
 enum BackendState {
-    /// In-memory backend — data is not persisted.
-    ///
-    /// Used when neither `sqlite-store` nor `lancedb-store` is compiled in,
-    /// and as the initial state before [`RetrieveDb::init_lancedb`] is called.
     #[allow(dead_code)]
     InMemory(Arc<InMemoryStore>),
-    /// SQLite backend (FTS only or FTS + sqlite-vec).
     #[cfg(feature = "sqlite-store")]
     Sqlite(Arc<SqliteStore>),
-    /// Full LanceDB backend.
     #[cfg(feature = "lancedb-store")]
     LanceDb(Arc<LanceDbBackend>),
 }
 
 impl BackendState {
-    /// Return the underlying [`RetrieveStore`] as a cloned `Arc`.
     fn as_store(&self) -> Arc<dyn RetrieveStore> {
         match self {
             BackendState::InMemory(s) => Arc::clone(s) as Arc<dyn RetrieveStore>,
@@ -201,7 +184,6 @@ impl BackendState {
         }
     }
 
-    /// Returns `true` when the backend should be replaced by an `init_*` call.
     fn needs_init(&self) -> bool {
         match self {
             BackendState::InMemory(_) => true,
@@ -215,30 +197,12 @@ impl BackendState {
 
 // ── RetrieveDb ────────────────────────────────────────────────────────────────
 
-/// Manages the retrieve backend for full-text and (optionally) vector search.
-///
-/// Create with [`RetrieveDb::open`], then call:
-/// - [`upsert_document`](Self::upsert_document) / [`remove_document`](Self::remove_document) to keep the index in sync.
-/// - [`rebuild_fts`](Self::rebuild_fts) after a batch of upserts/removes.
-/// - [`search_fts`](Self::search_fts) for full-text search.
-/// - Optionally call [`init_sqlite_vec`](Self::init_sqlite_vec) or
-///   [`init_lancedb`](Self::init_lancedb), then use
-///   [`embed_pending`](Self::embed_pending) and
-///   [`search_similar`](Self::search_similar) for vector search.
 pub struct RetrieveDb {
     db_path: PathBuf,
     backend: Mutex<BackendState>,
 }
 
 impl RetrieveDb {
-    /// Open the retrieve database at `db_path`.
-    ///
-    /// When `sqlite-store` is enabled, defaults to the SQLite FTS-only backend
-    /// (the SQLite file is created lazily on first use).  When no storage
-    /// feature is compiled in, opens an in-memory backend.
-    ///
-    /// Call [`init_sqlite_vec`](Self::init_sqlite_vec) or
-    /// [`init_lancedb`](Self::init_lancedb) to enable vector search.
     pub fn open(db_path: &Path) -> Result<Self> {
         #[cfg(feature = "sqlite-store")]
         {
@@ -256,18 +220,12 @@ impl RetrieveDb {
         })
     }
 
-    /// Delete the existing database and create a fresh one.
     pub fn rebuild(db_path: &Path) -> Result<Self> {
         #[cfg(feature = "sqlite-store")]
         crate::sqlite_store::wipe_db_files(db_path);
         Self::open(db_path)
     }
 
-    // ── vector backend init ───────────────────────────────────────────────────
-
-    /// Enable the sqlite-vec vector backend with `embedding_dim` dimensions.
-    ///
-    /// Idempotent — if the backend is already initialised this is a no-op.
     #[cfg(feature = "sqlite-store")]
     pub fn init_sqlite_vec(&self, embedding_dim: u32) -> Result<()> {
         let mut guard = self.backend.lock().unwrap();
@@ -278,10 +236,6 @@ impl RetrieveDb {
         Ok(())
     }
 
-    /// Enable the LanceDB full backend (files + documents + chunks + vectors).
-    ///
-    /// When active, all data lives in LanceDB tables under `lancedb_dir`.
-    /// No SQLite file is created.  Idempotent.
     #[cfg(feature = "lancedb-store")]
     pub fn init_lancedb(&self, lancedb_dir: &Path, embedding_dim: u32) -> Result<()> {
         let mut guard = self.backend.lock().unwrap();
@@ -292,88 +246,40 @@ impl RetrieveDb {
         Ok(())
     }
 
-    // ── helpers ───────────────────────────────────────────────────────────────
-
-    /// Clone the active backend as an `Arc<dyn RetrieveStore>`.
-    ///
-    /// The lock is released immediately after cloning the `Arc`, so long-running
-    /// operations do not block other threads from checking the backend state.
     fn store(&self) -> Arc<dyn RetrieveStore> {
         self.backend.lock().unwrap().as_store()
     }
 
     // ── document management ───────────────────────────────────────────────────
 
-    /// Insert or replace a document in the retrieve database.
-    ///
-    /// Also re-chunks the document body and updates the chunks table.
-    /// Stale embeddings for changed chunks are removed automatically.
-    ///
-    /// Call [`rebuild_fts`](Self::rebuild_fts) after a batch of upserts.
     pub fn upsert_document(&self, doc: &Document) -> Result<()> {
         self.store().upsert_document(doc)
     }
 
-    /// Remove a document (and its chunks / embeddings) from the database.
     pub fn remove_document(&self, id: i64) -> Result<()> {
         self.store().remove_document(id)
     }
 
-    /// Rebuild the FTS index from the current `documents` table.
-    ///
-    /// Call this after a batch of [`upsert_document`](Self::upsert_document)
-    /// calls or whenever the FTS index may be out of date.
     pub fn rebuild_fts(&self) -> Result<()> {
         self.store().rebuild_fts()
     }
 
     // ── search ────────────────────────────────────────────────────────────────
 
-    /// Full-text search.
-    ///
-    /// SQLite mode uses the FTS5 trigram index (substring / CJK aware).
-    /// LanceDB mode uses the ngram tokenizer (better BM25 ranking).
-    /// In-memory mode uses a simple case-insensitive substring scan.
-    pub fn search_fts(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
-        self.store().search_fts(query, limit)
+    pub fn search_fts(&self, q: &FtsQuery<'_>) -> Result<Vec<FileSearchResult>> {
+        self.store().search_fts(q)
     }
 
-    /// Find the `limit` most similar chunks to `query_vec`.
-    ///
-    /// Returns an empty `Vec` when no vector backend is configured.
-    pub fn search_similar(
-        &self,
-        query_vec: &[f32],
-        limit: usize,
-    ) -> Result<Vec<ChunkSearchResult>> {
-        self.store().search_similar(query_vec, limit)
+    pub fn search_similar(&self, q: &VectorQuery<'_>) -> Result<Vec<FileSearchResult>> {
+        self.store().search_similar(q)
     }
 
-    /// Deduplicate chunk search results to one `SearchResult` per document.
-    ///
-    /// When multiple chunks from the same document match, only the best-scoring
-    /// (lowest L2 distance) chunk is kept.  Returns up to `limit` results
-    /// ordered by ascending score.
-    ///
-    /// # Deprecation
-    ///
-    /// Prefer the free function [`dedup_chunk_results`] instead.
-    #[deprecated(
-        since = "0.7.0",
-        note = "use the free function `dedup_chunk_results` instead"
-    )]
-    pub fn dedup_chunk_results(results: Vec<ChunkSearchResult>, limit: usize) -> Vec<SearchResult> {
-        dedup_chunk_results(results, limit)
+    pub fn search_hybrid(&self, q: &HybridQuery<'_>) -> Result<Vec<FileSearchResult>> {
+        self.store().search_hybrid(q)
     }
 
     // ── embedding ─────────────────────────────────────────────────────────────
 
-    /// Generate and store embeddings for all pending (unembedded) chunks.
-    ///
-    /// Returns the number of newly embedded chunks.  Returns 0 immediately
-    /// when no vector backend is configured.
-    ///
-    /// `on_progress(done, total)` is called after each batch of 100 chunks.
     pub fn embed_pending(
         &self,
         embedder: &dyn Embedder,
@@ -382,39 +288,32 @@ impl RetrieveDb {
         self.store().embed_pending(embedder, &on_progress)
     }
 
-    /// Read vector index statistics.
     pub fn vec_info(&self) -> Result<VecInfo> {
         self.store().vec_info()
     }
 
-    /// Return the IDs of all documents in the database.
     pub fn document_ids(&self) -> Result<Vec<i64>> {
         self.store().document_ids()
     }
 
-    /// Return the total number of documents in the database.
     pub fn document_count(&self) -> Result<u64> {
         self.store().document_count()
     }
 
     // ── file tracking ─────────────────────────────────────────────────────────
 
-    /// Return all tracked (path, file_mtime) pairs.
     pub fn file_mtimes(&self) -> Result<HashMap<String, i64>> {
         self.store().file_mtimes()
     }
 
-    /// Insert or replace a file record.
     pub fn upsert_file(&self, path: &str, mtime: i64) -> Result<()> {
         self.store().upsert_file(path, mtime)
     }
 
-    /// Delete a file record.
     pub fn remove_file(&self, path: &str) -> Result<()> {
         self.store().remove_file(path)
     }
 
-    /// Return the total number of tracked files.
     pub fn file_count(&self) -> Result<u64> {
         self.store().file_count()
     }
@@ -422,61 +321,117 @@ impl RetrieveDb {
 
 // ── free functions ────────────────────────────────────────────────────────────
 
-/// Deduplicate chunk search results to one [`SearchResult`] per document.
+/// Merge FTS and semantic file-level results via Reciprocal Rank Fusion.
 ///
-/// When multiple chunks from the same document match, only the best-scoring
-/// (lowest L2 distance) chunk is kept.  Returns up to `limit` results
-/// ordered by ascending score.
-pub fn dedup_chunk_results(results: Vec<ChunkSearchResult>, limit: usize) -> Vec<SearchResult> {
-    let mut best: HashMap<i64, ChunkSearchResult> = HashMap::new();
-    for r in results {
-        best.entry(r.doc_id)
-            .and_modify(|e| {
-                if r.score < e.score {
-                    *e = r.clone();
-                }
-            })
-            .or_insert(r);
+/// `score(d) = w_fts / (k + rank_fts) + w_sem / (k + rank_sem)`.  Chunks from
+/// both inputs are merged (deduplicated by `(line_start, line_end)`, keeping
+/// the best per-chunk score).  Output is sorted by descending RRF score.
+pub fn merge_rrf_files(
+    fts: &[FileSearchResult],
+    sem: &[FileSearchResult],
+    k: f64,
+    w_fts: f64,
+    w_sem: f64,
+    limit: usize,
+) -> Vec<FileSearchResult> {
+    // Index FTS results by path (stable id alternative would work too).
+    let mut acc: HashMap<String, (FileSearchResult, f64)> = HashMap::new();
+
+    for (rank, file) in fts.iter().enumerate() {
+        let rrf = w_fts / (k + (rank + 1) as f64);
+        acc.insert(file.path.clone(), (file.clone(), rrf));
     }
 
-    let mut deduped: Vec<_> = best.into_values().collect();
-    deduped.sort_by(|a, b| {
-        a.score
-            .partial_cmp(&b.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    deduped.truncate(limit);
-    deduped
+    for (rank, file) in sem.iter().enumerate() {
+        let rrf = w_sem / (k + (rank + 1) as f64);
+        acc.entry(file.path.clone())
+            .and_modify(|(existing, s)| {
+                *s += rrf;
+                merge_chunk_hits(&mut existing.chunks, &file.chunks);
+            })
+            .or_insert_with(|| (file.clone(), rrf));
+    }
+
+    let mut merged: Vec<_> = acc.into_values().collect();
+    merged.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    merged.truncate(limit);
+
+    merged
         .into_iter()
-        .map(|r| SearchResult {
-            id: r.doc_id,
-            title: r.doc_title,
-            path: r.doc_path,
-            score: r.score,
+        .map(|(mut file, rrf_score)| {
+            file.score = rrf_score;
+            file
         })
         .collect()
+}
+
+/// Merge `incoming` into `existing`, deduplicating by `(line_start, line_end)`.
+///
+/// When a chunk exists in both lists, the one from `existing` is kept (so FTS
+/// scores win over vector scores on the same chunk, which matches the order
+/// `merge_rrf_files` calls this).
+fn merge_chunk_hits(existing: &mut Vec<ChunkHit>, incoming: &[ChunkHit]) {
+    use std::collections::HashSet;
+    let seen: HashSet<(usize, usize)> = existing
+        .iter()
+        .map(|c| (c.line_start, c.line_end))
+        .collect();
+    for c in incoming {
+        if !seen.contains(&(c.line_start, c.line_end)) {
+            existing.push(c.clone());
+        }
+    }
+}
+
+/// Default hybrid search implementation used by [`RetrieveStore::search_hybrid`].
+///
+/// Calls `search_fts` and, when an embedder is provided, `search_similar`;
+/// then merges results via [`merge_rrf_files`].  When `q.embedder` is `None`,
+/// falls back to FTS-only output.
+pub fn default_hybrid<S: RetrieveStore + ?Sized>(
+    store: &S,
+    q: &HybridQuery<'_>,
+) -> Result<Vec<FileSearchResult>> {
+    let over_fetch = q.limit * 3;
+    let fts = store.search_fts(&FtsQuery {
+        query: q.query,
+        limit: over_fetch,
+        path_prefix: q.path_prefix,
+    })?;
+
+    let Some(embedder) = q.embedder else {
+        return Ok(fts.into_iter().take(q.limit).collect());
+    };
+
+    let sem = store.search_similar(&VectorQuery {
+        query: q.query,
+        embedder,
+        limit: over_fetch,
+        path_prefix: q.path_prefix,
+    })?;
+
+    Ok(merge_rrf_files(
+        &fts,
+        &sem,
+        q.rrf_k,
+        q.weight_fts,
+        q.weight_sem,
+        q.limit,
+    ))
 }
 
 // ── backend factory functions ─────────────────────────────────────────────────
 
 /// Open or create an in-memory backend.
-///
-/// Data is not persisted to disk — all state is lost when the process exits.
-/// Use as a fallback when no storage feature is compiled in, or in tests.
 pub fn open_in_memory() -> Arc<dyn RetrieveStore + Send + Sync> {
     Arc::new(InMemoryStore::new())
 }
 
-/// Open or create a SQLite FTS-only backend at `db_path`.
-///
-/// The SQLite file is created lazily on first use.
-/// Call [`open_sqlite_vec`] instead to enable vector search.
 #[cfg(feature = "sqlite-store")]
 pub fn open_sqlite_fts(db_path: &Path) -> Arc<dyn RetrieveStore + Send + Sync> {
     Arc::new(SqliteStore::new_fts_only(db_path.to_owned()))
 }
 
-/// Open or create a SQLite + sqlite-vec backend at `db_path` with `dim`-dimensional embeddings.
 #[cfg(feature = "sqlite-store")]
 pub fn open_sqlite_vec(db_path: &Path, dim: u32) -> Result<Arc<dyn RetrieveStore + Send + Sync>> {
     Ok(Arc::new(SqliteStore::new_with_vec(
@@ -485,7 +440,6 @@ pub fn open_sqlite_vec(db_path: &Path, dim: u32) -> Result<Arc<dyn RetrieveStore
     )?))
 }
 
-/// Open or create a LanceDB backend under `data_dir` with `dim`-dimensional embeddings.
 #[cfg(feature = "lancedb-store")]
 pub fn open_lancedb(data_dir: &Path, dim: u32) -> Result<Arc<dyn RetrieveStore + Send + Sync>> {
     Ok(Arc::new(LanceDbBackend::new(data_dir, dim)?))

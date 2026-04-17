@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -6,7 +5,9 @@ use std::sync::{Arc, Mutex};
 use sapphire_retrieve::db::SCHEMA_VERSION;
 #[cfg(feature = "lancedb-store")]
 use sapphire_retrieve::open_lancedb;
-use sapphire_retrieve::{Document, Embedder, RetrieveStore, SearchResult, dedup_chunk_results};
+use sapphire_retrieve::{
+    Document, Embedder, FileSearchResult, FtsQuery, HybridQuery, RetrieveStore, VectorQuery,
+};
 #[cfg(feature = "sqlite-store")]
 use sapphire_retrieve::{open_sqlite_fts, open_sqlite_vec};
 use tokio::sync::OnceCell;
@@ -519,113 +520,46 @@ impl WorkspaceState {
         &self,
         params: &RetrieveParams<'_>,
         hybrid_config: &HybridConfig,
-    ) -> Result<Vec<SearchResult>> {
-        // Over-fetch to compensate for post-filter losses.
-        let fetch_limit = if params.folder.is_some() {
-            params.limit * 3
-        } else {
-            params.limit
-        };
-
+    ) -> Result<Vec<FileSearchResult>> {
         // Fall back to FTS when the embedder is not available.
         let effective_mode = match params.mode {
-            SearchMode::Semantic | SearchMode::Hybrid if self.embedder().is_none() => {
-                SearchMode::Fts
-            }
+            SearchMode::Semantic if self.embedder().is_none() => SearchMode::Fts,
             other => other,
         };
 
         let results = match effective_mode {
-            SearchMode::Fts => self.search_fts_internal(params.query, fetch_limit)?,
-            SearchMode::Semantic => self.search_semantic_internal(params.query, fetch_limit)?,
+            SearchMode::Fts => {
+                let mut q = FtsQuery::new(params.query).limit(params.limit);
+                if let Some(f) = params.folder {
+                    q = q.path_prefix(f);
+                }
+                self.retrieve_db().search_fts(&q)?
+            }
+            SearchMode::Semantic => {
+                let embedder = self.embedder().expect("caller verified embedder exists");
+                let mut vq = VectorQuery::new(params.query, embedder).limit(params.limit);
+                if let Some(f) = params.folder {
+                    vq = vq.path_prefix(f);
+                }
+                self.retrieve_db().search_similar(&vq)?
+            }
             SearchMode::Hybrid => {
-                self.search_hybrid_internal(params.query, fetch_limit, hybrid_config)?
+                let mut hq = HybridQuery::new(params.query)
+                    .limit(params.limit)
+                    .rrf_k(hybrid_config.rrf_k as f64)
+                    .weight_fts(hybrid_config.fts_weight)
+                    .weight_sem(1.0 - hybrid_config.fts_weight);
+                if let Some(e) = self.embedder() {
+                    hq = hq.embedder(e);
+                }
+                if let Some(f) = params.folder {
+                    hq = hq.path_prefix(f);
+                }
+                self.retrieve_db().search_hybrid(&hq)?
             }
         };
 
-        let results = Self::filter_by_folder(results, params.folder);
-        Ok(results.into_iter().take(params.limit).collect())
-    }
-
-    fn search_fts_internal(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
-        Ok(self.retrieve_db().search_fts(query, limit)?)
-    }
-
-    fn search_semantic_internal(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
-        let embedder = self.embedder().expect("caller verified embedder exists");
-        let query_vecs = embedder.embed_texts(&[query])?;
-        let query_vec = query_vecs.into_iter().next().ok_or_else(|| {
-            sapphire_retrieve::Error::Embed("embedder returned empty result".into())
-        })?;
-        let raw = self.retrieve_db().search_similar(&query_vec, limit * 3)?;
-        Ok(dedup_chunk_results(raw, limit))
-    }
-
-    fn search_hybrid_internal(
-        &self,
-        query: &str,
-        limit: usize,
-        config: &HybridConfig,
-    ) -> Result<Vec<SearchResult>> {
-        let fts_results = self.search_fts_internal(query, limit)?;
-        let sem_results = self.search_semantic_internal(query, limit)?;
-        Ok(Self::merge_rrf(fts_results, sem_results, limit, config))
-    }
-
-    /// Merge two ranked result lists via Reciprocal Rank Fusion.
-    ///
-    /// `score(d) = w_fts / (k + rank_fts) + w_sem / (k + rank_sem)`
-    ///
-    /// Documents appearing in only one list receive a contribution from that
-    /// list alone.  The returned list is sorted by descending RRF score.
-    fn merge_rrf(
-        fts: Vec<SearchResult>,
-        semantic: Vec<SearchResult>,
-        limit: usize,
-        config: &HybridConfig,
-    ) -> Vec<SearchResult> {
-        let k = config.rrf_k as f64;
-        let w_fts = config.fts_weight;
-        let w_sem = 1.0 - w_fts;
-
-        let mut scores: HashMap<String, (SearchResult, f64)> = HashMap::new();
-
-        for (rank, result) in fts.into_iter().enumerate() {
-            let rrf = w_fts / (k + (rank + 1) as f64);
-            scores
-                .entry(result.path.clone())
-                .and_modify(|(_, s)| *s += rrf)
-                .or_insert((result, rrf));
-        }
-
-        for (rank, result) in semantic.into_iter().enumerate() {
-            let rrf = w_sem / (k + (rank + 1) as f64);
-            scores
-                .entry(result.path.clone())
-                .and_modify(|(_, s)| *s += rrf)
-                .or_insert((result, rrf));
-        }
-
-        let mut merged: Vec<_> = scores.into_values().collect();
-        merged.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        merged.truncate(limit);
-
-        merged
-            .into_iter()
-            .map(|(mut result, rrf_score)| {
-                result.score = rrf_score;
-                result
-            })
-            .collect()
-    }
-
-    fn filter_by_folder(results: Vec<SearchResult>, folder: Option<&Path>) -> Vec<SearchResult> {
-        let Some(prefix) = folder else { return results };
-        let prefix_str = prefix.to_string_lossy();
-        results
-            .into_iter()
-            .filter(|r| r.path.starts_with(prefix_str.as_ref()))
-            .collect()
+        Ok(results)
     }
 
     // ── private helpers ───────────────────────────────────────────────────────

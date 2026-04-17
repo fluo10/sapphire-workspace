@@ -5,6 +5,19 @@ All notable changes to `sapphire-workspace` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed (breaking)
+
+- `sapphire-retrieve`: full-text search now indexes **chunks** (via `chunks_fts`) instead of whole documents. `search_fts`, `search_similar`, and `search_hybrid` all return `Vec<FileSearchResult>` — each file carries a `chunks` array with the matched line ranges (`line_start`, `line_end`), so MCP / AI callers can see *where* inside a file a match occurred without re-reading the whole document.
+- `sapphire-retrieve`: `SearchResult` / `ChunkSearchResult` / `dedup_chunk_results` / `merge_rrf` removed; replaced by `FileSearchResult` / `ChunkHit` / `merge_rrf_files`.
+- `sapphire-retrieve`: Query structs introduced (`FtsQuery`, `VectorQuery`, `HybridQuery`) with builder methods. All three take `query: &str` as a common field; `VectorQuery` / `HybridQuery` also accept an `Embedder` (mandatory for vector, optional for hybrid — `None` falls back to FTS-only). Callers no longer pre-compute embeddings.
+- `sapphire-retrieve`: `RetrieveStore::search_hybrid` added to the trait with a default implementation, and exposed on `RetrieveDb`.
+- `sapphire-retrieve`: `search_fts` / `search_similar` / `search_hybrid` accept an optional `path_prefix` that is pushed down to the backend (SQLite `GLOB`, LanceDB `only_if`), replacing the post-filter that previously lived in `WorkspaceState`.
+- `sapphire-retrieve`: chunk schema changed from `(line, column)` to `(line_start, line_end)` — inclusive line range. `TextChunk`, `Chunk`, and all backend schemas updated.
+- `sapphire-retrieve`: `documents.body` column / field dropped from storage (still used as chunker input when `Document::chunks` is `None`). SQLite `documents_fts` virtual table removed; LanceDB FTS now indexes `chunks_meta.text`.
+- `sapphire-retrieve`: **schema migration required.** SQLite databases on version `<4` are automatically wiped and recreated on first open (next sync re-indexes the workspace). LanceDB is bumped to `lancedb_v4/`; the old `lancedb_v3/` directory is no longer used and can be removed manually.
+
 ## [0.8.1] - 2026-04-13
 
 ### Fixed
