@@ -40,6 +40,12 @@ pub enum Error {
     #[error("sqlite-store support is not compiled in (enable the `sqlite-store` feature)")]
     SqliteStoreNotEnabled,
 
+    /// A path resolved to a location outside the workspace root and
+    /// [`AppContext::allows_external_paths`](crate::AppContext::allows_external_paths)
+    /// is `false`.
+    #[error("path '{path}' escapes workspace root '{root}'")]
+    PathEscapesWorkspace { path: PathBuf, root: PathBuf },
+
     #[error(transparent)]
     Io(#[from] std::io::Error),
 
