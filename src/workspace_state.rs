@@ -14,7 +14,7 @@ use tokio::sync::OnceCell;
 
 use crate::{
     config::{HybridConfig, RetrieveConfig, VectorDb},
-    error::Result,
+    error::{Error, Result},
     indexer::{path_to_doc_id, sync_workspace, sync_workspace_incremental},
     workspace::Workspace,
 };
@@ -63,6 +63,55 @@ pub struct DbInfo {
     pub embedding_dim: u32,
     pub vector_count: u64,
     pub pending_count: u64,
+}
+
+// ── path resolution helpers ──────────────────────────────────────────────────
+
+/// Result of resolving a caller-supplied path against the workspace root.
+enum ResolvedPath {
+    /// The path is inside the workspace.
+    Internal(PathBuf),
+    /// The path is outside the workspace.
+    External(PathBuf),
+}
+
+impl ResolvedPath {
+    fn as_path(&self) -> &Path {
+        match self {
+            Self::Internal(p) | Self::External(p) => p,
+        }
+    }
+
+    fn is_internal(&self) -> bool {
+        matches!(self, Self::Internal(_))
+    }
+}
+
+/// Canonicalize `path`, falling back to canonicalizing the nearest existing
+/// ancestor and appending the remaining components.  This is necessary for
+/// paths that do not exist yet (e.g. a new file being created).
+fn canonicalize_or_parent(path: &Path) -> std::io::Result<PathBuf> {
+    if let Ok(p) = path.canonicalize() {
+        return Ok(p);
+    }
+    // Walk up until we find an existing ancestor.
+    let mut suffix = PathBuf::new();
+    let mut current = path;
+    loop {
+        if let Some(parent) = current.parent() {
+            let name = current
+                .file_name()
+                .unwrap_or(current.as_os_str());
+            suffix = Path::new(name).join(&suffix);
+            match parent.canonicalize() {
+                Ok(canon) => return Ok(canon.join(suffix)),
+                Err(_) => current = parent,
+            }
+        } else {
+            // No existing ancestor at all — return the path as-is.
+            return Ok(path.to_owned());
+        }
+    }
 }
 
 impl WorkspaceState {
@@ -191,9 +240,14 @@ impl WorkspaceState {
     /// Reads the file from disk, upserts it into the retrieve DB, and calls
     /// `sync_backend.add_file` when a backend is attached.
     pub fn on_file_updated(&self, path: &Path) -> Result<()> {
-        let path_str = path.to_string_lossy().into_owned();
+        let resolved = self.resolve_path(path)?;
+        if !resolved.is_internal() {
+            return Ok(());
+        }
+        let abs = resolved.as_path();
+        let path_str = abs.to_string_lossy().into_owned();
 
-        let mtime = path
+        let mtime = abs
             .metadata()
             .and_then(|m| m.modified())
             .map(|t| {
@@ -203,12 +257,12 @@ impl WorkspaceState {
             })
             .unwrap_or(0);
 
-        let body = std::fs::read_to_string(path)?;
-        let title = path
+        let body = std::fs::read_to_string(abs)?;
+        let title = abs
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let doc_id = path_to_doc_id(path);
+        let doc_id = path_to_doc_id(abs);
 
         let db = self.retrieve_db();
         db.upsert_file(&path_str, mtime)?;
@@ -222,7 +276,7 @@ impl WorkspaceState {
         db.rebuild_fts()?;
 
         if let Some(sync) = &self.sync_backend {
-            sync.add_file(path)?;
+            sync.add_file(abs)?;
         }
 
         Ok(())
@@ -230,9 +284,18 @@ impl WorkspaceState {
 
     /// Remove a file from the retrieve index and unstage it via the sync
     /// backend (if configured).
+    ///
+    /// External paths are silently ignored when
+    /// [`allow_external_paths`](crate::AppContext::allow_external_paths) is
+    /// enabled; otherwise returns [`Error::PathEscapesWorkspace`].
     pub fn on_file_deleted(&self, path: &Path) -> Result<()> {
-        let path_str = path.to_string_lossy().into_owned();
-        let doc_id = path_to_doc_id(path);
+        let resolved = self.resolve_path(path)?;
+        if !resolved.is_internal() {
+            return Ok(());
+        }
+        let abs = resolved.as_path();
+        let path_str = abs.to_string_lossy().into_owned();
+        let doc_id = path_to_doc_id(abs);
 
         let db = self.retrieve_db();
         db.remove_document(doc_id)?;
@@ -240,37 +303,67 @@ impl WorkspaceState {
         db.rebuild_fts()?;
 
         if let Some(sync) = &self.sync_backend {
-            sync.remove_file(path)?;
+            sync.remove_file(abs)?;
         }
 
         Ok(())
     }
 
-    // ── workspace-relative file operations ───────────────────────────────────
-    //
-    // These methods accept paths relative to the workspace root, perform the
-    // corresponding filesystem operation, and then update the retrieve index
-    // (and sync backend) automatically.
+    // ── path resolution ─────────��──────────────────────��───────────────────────
 
-    /// Read a workspace-relative text file and return its contents as a `String`.
-    pub fn read_file(&self, relative: &Path) -> Result<String> {
-        let abs = self.workspace.root.join(relative);
-        Ok(std::fs::read_to_string(&abs)?)
+    /// Resolve `path` to an absolute path and classify it as internal or
+    /// external to the workspace.
+    ///
+    /// Returns [`Error::PathEscapesWorkspace`] when the resolved path is
+    /// outside the workspace **and**
+    /// [`AppContext::allows_external_paths`](crate::AppContext::allows_external_paths)
+    /// is `false`.
+    fn resolve_path(&self, path: &Path) -> Result<ResolvedPath> {
+        let joined = if path.is_absolute() {
+            path.to_owned()
+        } else {
+            self.workspace.root.join(path)
+        };
+        let abs = canonicalize_or_parent(&joined)?;
+
+        if abs.starts_with(&self.workspace.root) {
+            Ok(ResolvedPath::Internal(abs))
+        } else if self.workspace.ctx.allows_external_paths() {
+            Ok(ResolvedPath::External(abs))
+        } else {
+            Err(Error::PathEscapesWorkspace {
+                path: path.to_owned(),
+                root: self.workspace.root.clone(),
+            })
+        }
     }
 
-    /// Read a line range from a workspace-relative text file.
+    // ── file operations ─────────────────────────────────────────────────────
+    //
+    // These methods accept either relative or absolute paths.  Relative paths
+    // are resolved against the workspace root.  For paths inside the
+    // workspace, the retrieve index and sync backend are updated
+    // automatically.  External paths (when permitted) use plain `std::fs`.
+
+    /// Read a text file and return its contents as a `String`.
+    pub fn read_file(&self, path: &Path) -> Result<String> {
+        let resolved = self.resolve_path(path)?;
+        Ok(std::fs::read_to_string(resolved.as_path())?)
+    }
+
+    /// Read a line range from a text file.
     ///
     /// `start_line` and `end_line` are **1-indexed** and **inclusive**.
     /// `end_line: None` reads to the end of the file.
     /// Lines beyond the end of the file are silently clamped.
     pub fn read_file_range(
         &self,
-        relative: &Path,
+        path: &Path,
         start_line: usize,
         end_line: Option<usize>,
     ) -> Result<String> {
-        let abs = self.workspace.root.join(relative);
-        let content = std::fs::read_to_string(&abs)?;
+        let resolved = self.resolve_path(path)?;
+        let content = std::fs::read_to_string(resolved.as_path())?;
         let start = start_line.saturating_sub(1); // convert to 0-indexed
         let lines: Vec<&str> = content.lines().collect();
         let end = end_line.map(|e| e.min(lines.len())).unwrap_or(lines.len());
@@ -282,61 +375,85 @@ impl WorkspaceState {
         Ok(slice.join("\n"))
     }
 
-    /// List the direct children of a workspace-relative directory.
+    /// List the direct children of a directory.
     ///
-    /// Returns pairs of `(workspace-relative path, is_dir)`, sorted
-    /// alphabetically by path.
-    pub fn list_dir(&self, relative: &Path) -> Result<Vec<(PathBuf, bool)>> {
-        let abs = self.workspace.root.join(relative);
-        let mut entries: Vec<(PathBuf, bool)> = std::fs::read_dir(&abs)?
+    /// For internal (workspace) directories, returns pairs of
+    /// `(workspace-relative path, is_dir)`.  For external directories,
+    /// returns `(absolute path, is_dir)`.  Sorted alphabetically by path.
+    pub fn list_dir(&self, path: &Path) -> Result<Vec<(PathBuf, bool)>> {
+        let resolved = self.resolve_path(path)?;
+        let abs = resolved.as_path();
+        let is_internal = resolved.is_internal();
+        let mut entries: Vec<(PathBuf, bool)> = std::fs::read_dir(abs)?
             .filter_map(|e| e.ok())
             .filter_map(|e| {
                 let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
-                let rel = e.path().strip_prefix(&self.workspace.root).ok()?.to_owned();
-                Some((rel, is_dir))
+                let entry_path = if is_internal {
+                    e.path().strip_prefix(&self.workspace.root).ok()?.to_owned()
+                } else {
+                    e.path()
+                };
+                Some((entry_path, is_dir))
             })
             .collect();
         entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
         Ok(entries)
     }
 
-    /// Write `content` to a workspace-relative file and update the index.
+    /// Write `content` to a file.
     ///
     /// Creates any missing parent directories automatically.
     /// Overwrites the file if it already exists.
-    pub fn write_file(&self, relative: &Path, content: &str) -> Result<()> {
-        let abs = self.workspace.root.join(relative);
+    /// For internal files, updates the retrieve index and sync backend.
+    pub fn write_file(&self, path: &Path, content: &str) -> Result<()> {
+        let resolved = self.resolve_path(path)?;
+        let abs = resolved.as_path();
         if let Some(parent) = abs.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(&abs, content)?;
-        self.on_file_updated(&abs)
+        std::fs::write(abs, content)?;
+        if resolved.is_internal() {
+            self.on_file_updated(abs)?;
+        }
+        Ok(())
     }
 
-    /// Append `content` to a workspace-relative file and update the index.
+    /// Append `content` to a file.
     ///
     /// Creates the file (and any missing parent directories) if it does not
     /// exist yet.
-    pub fn append_file(&self, relative: &Path, content: &str) -> Result<()> {
+    /// For internal files, updates the retrieve index and sync backend.
+    pub fn append_file(&self, path: &Path, content: &str) -> Result<()> {
         use std::io::Write as _;
-        let abs = self.workspace.root.join(relative);
+        let resolved = self.resolve_path(path)?;
+        let abs = resolved.as_path();
         if let Some(parent) = abs.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&abs)?;
+            .open(abs)?;
         file.write_all(content.as_bytes())?;
         drop(file);
-        self.on_file_updated(&abs)
+        if resolved.is_internal() {
+            self.on_file_updated(abs)?;
+        }
+        Ok(())
     }
 
-    /// Delete a workspace-relative file from disk and remove it from the index.
-    pub fn delete_file(&self, relative: &Path) -> Result<()> {
-        let abs = self.workspace.root.join(relative);
-        std::fs::remove_file(&abs)?;
-        self.on_file_deleted(&abs)
+    /// Delete a file from disk.
+    ///
+    /// For internal files, also removes it from the retrieve index and sync
+    /// backend.
+    pub fn delete_file(&self, path: &Path) -> Result<()> {
+        let resolved = self.resolve_path(path)?;
+        let abs = resolved.as_path();
+        std::fs::remove_file(abs)?;
+        if resolved.is_internal() {
+            self.on_file_deleted(abs)?;
+        }
+        Ok(())
     }
 
     // ── vector backend ────────────────────────────────────────────────────────

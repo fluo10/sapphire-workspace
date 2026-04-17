@@ -34,6 +34,15 @@ pub struct AppContext {
     ///
     /// Controls the marker directory: `{root}/.{app_name}/`
     pub app_name: &'static str,
+    /// When `true`, file-operation methods on [`WorkspaceState`](crate::WorkspaceState)
+    /// accept paths outside the workspace root (absolute paths or relative
+    /// paths that traverse above the root).  External files are accessed via
+    /// plain `std::fs` operations without updating the retrieve index or sync
+    /// backend.
+    ///
+    /// Default: `false` — any path that resolves outside the workspace root
+    /// returns [`Error::PathEscapesWorkspace`](crate::Error::PathEscapesWorkspace).
+    allow_external_paths: bool,
     /// App-specific cache directory.
     ///
     /// On desktop this is computed as `{platform_cache_home}/{app_name}`.
@@ -50,8 +59,25 @@ impl AppContext {
     pub const fn new(app_name: &'static str) -> Self {
         Self {
             app_name,
+            allow_external_paths: false,
             cache_dir: OnceLock::new(),
         }
+    }
+
+    /// Allow file operations on paths outside the workspace root.
+    ///
+    /// When enabled, [`WorkspaceState`](crate::WorkspaceState) file methods
+    /// accept absolute or traversing-relative paths that resolve outside the
+    /// workspace.  External files are handled with plain `std::fs` — no
+    /// index or sync updates.
+    pub const fn allow_external_paths(mut self) -> Self {
+        self.allow_external_paths = true;
+        self
+    }
+
+    /// Returns `true` if external (out-of-workspace) file access is permitted.
+    pub fn allows_external_paths(&self) -> bool {
+        self.allow_external_paths
     }
 
     /// Override the app cache directory.
