@@ -5,7 +5,7 @@ All notable changes to `sapphire-workspace` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.9.0] - 2026-04-18
 
 ### Changed (breaking)
 
@@ -17,6 +17,11 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - `sapphire-retrieve`: chunk schema changed from `(line, column)` to `(line_start, line_end)` — inclusive line range. `TextChunk`, `Chunk`, and all backend schemas updated.
 - `sapphire-retrieve`: `documents.body` column / field dropped from storage (still used as chunker input when `Document::chunks` is `None`). SQLite `documents_fts` virtual table removed; LanceDB FTS now indexes `chunks_meta.text`.
 - `sapphire-retrieve`: **schema migration required.** SQLite databases on version `<4` are automatically wiped and recreated on first open (next sync re-indexes the workspace). LanceDB is bumped to `lancedb_v4/`; the old `lancedb_v3/` directory is no longer used and can be removed manually.
+- `sapphire-retrieve`: `title` field removed from `Document` and `FileSearchResult`; `doc_title` dropped from `Chunk` and all backend schemas. Embedding text no longer prepends the title. Display names should be resolved by the application layer from `path`. (#43)
+
+### Added
+
+- `sapphire-workspace`: file operation methods (`read_file`, `read_file_range`, `write_file`, `append_file`, `delete_file`) now validate that paths resolve within the workspace root, preventing path traversal attacks. A new `allow_external_paths` flag on `AppContext` lets applications opt in to external file access — external files use plain `std::fs` without index or sync updates. (#42)
 
 ## [0.8.1] - 2026-04-13
 
@@ -157,6 +162,7 @@ Internal repository restructure; no public API changes.
 - `fastembed-embed`, `lancedb-store`, `sqlite-store`, `git-sync` feature flags.
 - Re-exports of `sapphire-retrieve` and `sapphire-sync` public APIs.
 
+[0.9.0]: https://github.com/fluo10/sapphire-workspace/compare/workspace-v0.8.1...workspace-v0.9.0
 [0.8.1]: https://github.com/fluo10/sapphire-workspace/compare/workspace-v0.8.0...workspace-v0.8.1
 [0.8.0]: https://github.com/fluo10/sapphire-workspace/compare/workspace-v0.7.1...workspace-v0.8.0
 [0.7.1]: https://github.com/fluo10/sapphire-workspace/compare/workspace-v0.7.0...workspace-v0.7.1

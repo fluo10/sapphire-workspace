@@ -29,9 +29,7 @@ use crate::{
     chunker::chunk_document,
     embed::Embedder,
     error::{Error, Result},
-    retrieve_store::{
-        ChunkHit, Document, FileSearchResult, FtsQuery, RetrieveStore, VectorQuery,
-    },
+    retrieve_store::{ChunkHit, Document, FileSearchResult, FtsQuery, RetrieveStore, VectorQuery},
     vector_store::{Chunk, VecInfo, vec_serialize},
 };
 
@@ -547,17 +545,12 @@ fn upsert_chunks(conn: &Connection, doc: &Document, has_vec: bool) -> Result<()>
         &computed
     };
 
-    let live_starts: HashSet<i64> = chunks
-        .iter()
-        .map(|(start, _, _)| *start as i64)
-        .collect();
+    let live_starts: HashSet<i64> = chunks.iter().map(|(start, _, _)| *start as i64).collect();
 
     // Delete stale chunks (FTS5 external-content: need to insert 'delete' rows
     // before dropping the underlying row, or rebuild the index after).
     let old_rows: Vec<(i64, i64, String)> = {
-        let mut stmt = conn.prepare(
-            "SELECT id, line_start, text FROM chunks WHERE doc_id = ?1",
-        )?;
+        let mut stmt = conn.prepare("SELECT id, line_start, text FROM chunks WHERE doc_id = ?1")?;
         stmt.query_map([doc.id], |row| {
             Ok((
                 row.get::<_, i64>(0)?,

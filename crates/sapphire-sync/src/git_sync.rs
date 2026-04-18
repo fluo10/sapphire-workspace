@@ -171,7 +171,10 @@ impl GitSync {
     /// Conflict resolution: when two sides modify the same file, the version
     /// from the commit with the newer (higher) author timestamp is kept.
     fn sync_git(repo: &Repository, remote_name: &str) -> Result<()> {
-        info!(remote = remote_name, "sync_git: starting fetch → merge → push cycle");
+        info!(
+            remote = remote_name,
+            "sync_git: starting fetch → merge → push cycle"
+        );
 
         // ── 1. Fetch ──────────────────────────────────────────────────────────
         let mut remote = repo

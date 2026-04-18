@@ -10,11 +10,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::{
-    embed::Embedder,
-    error::Result,
-    vector_store::VecInfo,
-};
+use crate::{embed::Embedder, error::Result, vector_store::VecInfo};
 
 // ── query structs ────────────────────────────────────────────────────────────
 
