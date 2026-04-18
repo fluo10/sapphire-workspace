@@ -39,9 +39,7 @@ use crate::{
     chunker::chunk_document,
     embed::Embedder,
     error::{Error, Result},
-    retrieve_store::{
-        ChunkHit, Document, FileSearchResult, FtsQuery, RetrieveStore, VectorQuery,
-    },
+    retrieve_store::{ChunkHit, Document, FileSearchResult, FtsQuery, RetrieveStore, VectorQuery},
     vector_store::{Chunk, VecInfo},
 };
 

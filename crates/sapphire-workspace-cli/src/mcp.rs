@@ -137,12 +137,14 @@ impl RecallServer {
         .map_err(|e| e.to_string())
     }
 
-    #[tool(description = "Search indexed documents using hybrid (FTS + vector) search. \
+    #[tool(
+        description = "Search indexed documents using hybrid (FTS + vector) search. \
         When an embedder is configured, merges full-text and semantic search via \
         Reciprocal Rank Fusion; otherwise falls back to FTS-only. \
         Returns a JSON array of files ordered by relevance, each with \
         `id`, `path`, `score`, and a `chunks` array giving the matched \
-        line ranges (`line_start`, `line_end`) and text within each file.")]
+        line ranges (`line_start`, `line_end`) and text within each file."
+    )]
     fn search(&self, Parameters(p): Parameters<SearchParams>) -> Result<String, String> {
         (|| -> anyhow::Result<String> {
             self.with_state(|s| {

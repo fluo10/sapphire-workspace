@@ -99,9 +99,7 @@ fn canonicalize_or_parent(path: &Path) -> std::io::Result<PathBuf> {
     let mut current = path;
     loop {
         if let Some(parent) = current.parent() {
-            let name = current
-                .file_name()
-                .unwrap_or(current.as_os_str());
+            let name = current.file_name().unwrap_or(current.as_os_str());
             suffix = Path::new(name).join(&suffix);
             match parent.canonicalize() {
                 Ok(canon) => return Ok(canon.join(suffix)),
