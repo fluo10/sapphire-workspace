@@ -11,10 +11,8 @@ pub struct Chunk {
     pub line_start: usize,
     /// Last source line of this chunk (inclusive, 0-based).
     pub line_end: usize,
-    /// Embeddable text: title prepended to the extracted chunk body.
+    /// Embeddable text content of the chunk.
     pub text: String,
-    /// Denormalised document title (for display in search results).
-    pub doc_title: String,
     /// Denormalised absolute file path (for display in search results).
     pub doc_path: String,
 }

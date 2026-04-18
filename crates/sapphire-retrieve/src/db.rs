@@ -105,24 +105,22 @@ impl RetrieveStore for InMemoryStore {
                         return false;
                     }
                 }
-                doc.title.to_lowercase().contains(&needle)
-                    || doc.body.to_lowercase().contains(&needle)
+                doc.body.to_lowercase().contains(&needle)
             })
             .take(q.limit)
             .map(|doc| FileSearchResult {
                 id: doc.id,
-                title: doc.title.clone(),
                 path: doc.path.clone(),
                 score: 0.0,
                 chunks: vec![ChunkHit {
                     line_start: 0,
                     line_end: 0,
-                    text: doc.title.clone(),
+                    text: String::new(),
                     score: 0.0,
                 }],
             })
             .collect();
-        results.sort_by(|a, b| a.title.cmp(&b.title));
+        results.sort_by(|a, b| a.path.cmp(&b.path));
         Ok(results)
     }
 

@@ -169,8 +169,6 @@ impl std::fmt::Debug for HybridQuery<'_> {
 pub struct Document {
     /// Stable identifier assigned by the caller.
     pub id: i64,
-    /// Human-readable title (shown in search results).
-    pub title: String,
     /// Full body text; used only as input to the chunker when `chunks` is `None`.
     /// Not persisted to the database.
     pub body: String,
@@ -204,7 +202,6 @@ pub struct ChunkHit {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FileSearchResult {
     pub id: i64,
-    pub title: String,
     pub path: String,
     /// Representative score for the file (best chunk for FTS/vector,
     /// aggregated RRF score for hybrid).

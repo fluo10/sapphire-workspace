@@ -90,46 +90,32 @@ pub fn sync_workspace(
             Err(_) => continue,
         };
 
-        let title = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
         let doc_id = path_to_doc_id(path);
 
         let doc = if is_json {
-            // For JSON/JSONL: extract message chunks with source positions.
-            // The body is the extracted text (no JSON syntax), and each chunk
-            // carries the source line of its origin in the file.
-            let text_chunks = JsonChunker.chunk(&title, &raw);
+            let file_name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let text_chunks = JsonChunker.chunk(&file_name, &raw);
             let body = text_chunks
                 .iter()
                 .map(|c| c.text.as_str())
                 .collect::<Vec<_>>()
                 .join("\n\n");
-            // Build embed text: prepend title to each chunk (same as chunk_document).
             let chunks: Vec<(usize, usize, String)> = text_chunks
                 .into_iter()
-                .map(|c| {
-                    let embed = if title.is_empty() {
-                        c.text.clone()
-                    } else {
-                        format!("{title}\n\n{}", c.text)
-                    };
-                    (c.line_start, c.line_end, embed)
-                })
+                .map(|c| (c.line_start, c.line_end, c.text))
                 .collect();
             Document {
                 id: doc_id,
-                title,
                 body,
                 path: path.to_string_lossy().into_owned(),
                 chunks: Some(chunks),
             }
         } else {
-            // For Markdown/text: use raw content as body, let backends auto-chunk.
             Document {
                 id: doc_id,
-                title,
                 body: raw,
                 path: path.to_string_lossy().into_owned(),
                 chunks: None,
@@ -226,13 +212,12 @@ pub fn sync_workspace_incremental(
             Err(_) => continue,
         };
 
-        let title = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-
         let doc = if is_json {
-            let text_chunks = JsonChunker.chunk(&title, &raw);
+            let file_name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let text_chunks = JsonChunker.chunk(&file_name, &raw);
             let body = text_chunks
                 .iter()
                 .map(|c| c.text.as_str())
@@ -240,18 +225,10 @@ pub fn sync_workspace_incremental(
                 .join("\n\n");
             let chunks: Vec<(usize, usize, String)> = text_chunks
                 .into_iter()
-                .map(|c| {
-                    let embed = if title.is_empty() {
-                        c.text.clone()
-                    } else {
-                        format!("{title}\n\n{}", c.text)
-                    };
-                    (c.line_start, c.line_end, embed)
-                })
+                .map(|c| (c.line_start, c.line_end, c.text))
                 .collect();
             Document {
                 id: doc_id,
-                title,
                 body,
                 path: path_str.into_owned(),
                 chunks: Some(chunks),
@@ -259,7 +236,6 @@ pub fn sync_workspace_incremental(
         } else {
             Document {
                 id: doc_id,
-                title,
                 body: raw,
                 path: path_str.into_owned(),
                 chunks: None,

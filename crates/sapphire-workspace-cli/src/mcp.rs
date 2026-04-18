@@ -141,7 +141,7 @@ impl RecallServer {
         When an embedder is configured, merges full-text and semantic search via \
         Reciprocal Rank Fusion; otherwise falls back to FTS-only. \
         Returns a JSON array of files ordered by relevance, each with \
-        `id`, `title`, `path`, `score`, and a `chunks` array giving the matched \
+        `id`, `path`, `score`, and a `chunks` array giving the matched \
         line ranges (`line_start`, `line_end`) and text within each file.")]
     fn search(&self, Parameters(p): Parameters<SearchParams>) -> Result<String, String> {
         (|| -> anyhow::Result<String> {
