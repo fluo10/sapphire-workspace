@@ -27,6 +27,6 @@ ureq = { version = "3.3", features = ["json"] }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 lancedb = { version = "0.27", optional = true }
 arrow-array = { version = "57", optional = true }
-arrow-schema = { version = "57", optional = true }
+arrow-schema = { version = "58", optional = true }
 futures = { version = "0.3", optional = true }
 fastembed = { version = "5.13", optional = true }
