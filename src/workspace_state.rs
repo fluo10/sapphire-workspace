@@ -258,17 +258,12 @@ impl WorkspaceState {
             .unwrap_or(0);
 
         let body = std::fs::read_to_string(abs)?;
-        let title = abs
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
         let doc_id = path_to_doc_id(abs);
 
         let db = self.retrieve_db();
         db.upsert_file(&path_str, mtime)?;
         db.upsert_document(&Document {
             id: doc_id,
-            title,
             body,
             path: path_str,
             chunks: None,

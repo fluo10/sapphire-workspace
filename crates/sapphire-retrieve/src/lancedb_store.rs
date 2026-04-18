@@ -9,9 +9,9 @@
 //! | table           | columns                                                                                          |
 //! |-----------------|--------------------------------------------------------------------------------------------------|
 //! | `files`         | `path Utf8, mtime Int64`                                                                         |
-//! | `documents`     | `id Int64, title Utf8, path Utf8`                                                                |
-//! | `chunks_meta`   | `doc_id Int64, line_start Int32, line_end Int32, text Utf8, doc_title Utf8, doc_path Utf8`       |
-//! | `chunk_vectors` | `doc_id Int64, line_start Int32, line_end Int32, doc_title Utf8, doc_path Utf8, text Utf8, embedding FixedSizeList<Float32>` |
+//! | `documents`     | `id Int64, path Utf8`                                                                            |
+//! | `chunks_meta`   | `doc_id Int64, line_start Int32, line_end Int32, text Utf8, doc_path Utf8`                       |
+//! | `chunk_vectors` | `doc_id Int64, line_start Int32, line_end Int32, doc_path Utf8, text Utf8, embedding FixedSizeList<Float32>` |
 //!
 //! FTS is built on `chunks_meta.text` (chunk-level).
 
@@ -80,7 +80,6 @@ fn files_schema() -> Arc<Schema> {
 fn documents_schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
         Field::new("id", DataType::Int64, false),
-        Field::new("title", DataType::Utf8, false),
         Field::new("path", DataType::Utf8, false),
     ]))
 }
@@ -91,7 +90,6 @@ fn chunks_meta_schema() -> Arc<Schema> {
         Field::new("line_start", DataType::Int32, false),
         Field::new("line_end", DataType::Int32, false),
         Field::new("text", DataType::Utf8, false),
-        Field::new("doc_title", DataType::Utf8, false),
         Field::new("doc_path", DataType::Utf8, false),
     ]))
 }
@@ -101,7 +99,6 @@ fn chunk_vectors_schema(dim: i32) -> Arc<Schema> {
         Field::new("doc_id", DataType::Int64, false),
         Field::new("line_start", DataType::Int32, false),
         Field::new("line_end", DataType::Int32, false),
-        Field::new("doc_title", DataType::Utf8, false),
         Field::new("doc_path", DataType::Utf8, false),
         Field::new("text", DataType::Utf8, false),
         Field::new(
@@ -238,7 +235,6 @@ impl LanceFullStore {
             schema.clone(),
             vec![
                 Arc::new(Int64Array::from(vec![doc.id])),
-                Arc::new(StringArray::from(vec![doc.title.as_str()])),
                 Arc::new(StringArray::from(vec![doc.path.as_str()])),
             ],
         )
@@ -265,7 +261,7 @@ impl LanceFullStore {
         let chunks: &[(usize, usize, String)] = if let Some(ref c) = doc.chunks {
             c.as_slice()
         } else {
-            computed = chunk_document(&doc.title, &doc.body)
+            computed = chunk_document(&doc.body)
                 .into_iter()
                 .enumerate()
                 .map(|(i, t)| (i, i, t))
@@ -282,7 +278,6 @@ impl LanceFullStore {
         let doc_ids = vec![doc.id; n];
         let line_starts: Vec<i32> = chunks.iter().map(|(s, _, _)| *s as i32).collect();
         let line_ends: Vec<i32> = chunks.iter().map(|(_, e, _)| *e as i32).collect();
-        let titles = vec![doc.title.as_str(); n];
         let paths = vec![doc.path.as_str(); n];
         let texts: Vec<&str> = chunks.iter().map(|(_, _, t)| t.as_str()).collect();
 
@@ -293,7 +288,6 @@ impl LanceFullStore {
                 Arc::new(Int32Array::from(line_starts)),
                 Arc::new(Int32Array::from(line_ends)),
                 Arc::new(StringArray::from(texts)),
-                Arc::new(StringArray::from(titles)),
                 Arc::new(StringArray::from(paths)),
             ],
         )
@@ -338,7 +332,6 @@ impl LanceFullStore {
             .full_text_search(FullTextSearchQuery::new(query.to_owned()))
             .select(Select::Columns(vec![
                 "doc_id".to_string(),
-                "doc_title".to_string(),
                 "doc_path".to_string(),
                 "line_start".to_string(),
                 "line_end".to_string(),
@@ -355,9 +348,6 @@ impl LanceFullStore {
             let doc_ids = batch
                 .column_by_name("doc_id")
                 .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
-            let titles = batch
-                .column_by_name("doc_title")
-                .and_then(|c| c.as_any().downcast_ref::<StringArray>());
             let paths = batch
                 .column_by_name("doc_path")
                 .and_then(|c| c.as_any().downcast_ref::<StringArray>());
@@ -374,13 +364,12 @@ impl LanceFullStore {
                 .column_by_name("_score")
                 .and_then(|c| c.as_any().downcast_ref::<Float32Array>());
 
-            if let (Some(dids), Some(ttls), Some(pths), Some(ls), Some(le), Some(txts)) =
-                (doc_ids, titles, paths, line_starts, line_ends, texts)
+            if let (Some(dids), Some(pths), Some(ls), Some(le), Some(txts)) =
+                (doc_ids, paths, line_starts, line_ends, texts)
             {
                 for i in 0..batch.num_rows() {
                     rows.push(RawHit {
                         doc_id: dids.value(i),
-                        title: ttls.value(i).to_owned(),
                         path: pths.value(i).to_owned(),
                         line_start: ls.value(i) as usize,
                         line_end: le.value(i) as usize,
@@ -426,10 +415,6 @@ impl LanceFullStore {
                 .column_by_name("line_end")
                 .and_then(|c| c.as_any().downcast_ref::<Int32Array>())
                 .ok_or_else(|| Error::Embed("missing `line_end` in search result".into()))?;
-            let titles = batch
-                .column_by_name("doc_title")
-                .and_then(|c| c.as_any().downcast_ref::<StringArray>())
-                .ok_or_else(|| Error::Embed("missing `doc_title` in search result".into()))?;
             let paths = batch
                 .column_by_name("doc_path")
                 .and_then(|c| c.as_any().downcast_ref::<StringArray>())
@@ -446,7 +431,6 @@ impl LanceFullStore {
             for i in 0..batch.num_rows() {
                 rows.push(RawHit {
                     doc_id: doc_ids.value(i),
-                    title: titles.value(i).to_owned(),
                     path: paths.value(i).to_owned(),
                     line_start: line_starts.value(i) as usize,
                     line_end: line_ends.value(i) as usize,
@@ -514,15 +498,12 @@ impl LanceFullStore {
             let texts = batch
                 .column_by_name("text")
                 .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-            let titles = batch
-                .column_by_name("doc_title")
-                .and_then(|c| c.as_any().downcast_ref::<StringArray>());
             let paths = batch
                 .column_by_name("doc_path")
                 .and_then(|c| c.as_any().downcast_ref::<StringArray>());
 
-            if let (Some(dids), Some(ls), Some(le), Some(txts), Some(ttls), Some(pths)) =
-                (doc_ids, line_starts, line_ends, texts, titles, paths)
+            if let (Some(dids), Some(ls), Some(le), Some(txts), Some(pths)) =
+                (doc_ids, line_starts, line_ends, texts, paths)
             {
                 for i in 0..batch.num_rows() {
                     let key = (dids.value(i), ls.value(i) as usize);
@@ -532,7 +513,6 @@ impl LanceFullStore {
                             line_start: key.1,
                             line_end: le.value(i) as usize,
                             text: txts.value(i).to_owned(),
-                            doc_title: ttls.value(i).to_owned(),
                             doc_path: pths.value(i).to_owned(),
                         });
                     }
@@ -550,7 +530,6 @@ impl LanceFullStore {
         let doc_ids: Vec<i64> = chunks.iter().map(|c| c.doc_id).collect();
         let line_starts: Vec<i32> = chunks.iter().map(|c| c.line_start as i32).collect();
         let line_ends: Vec<i32> = chunks.iter().map(|c| c.line_end as i32).collect();
-        let titles: Vec<&str> = chunks.iter().map(|c| c.doc_title.as_str()).collect();
         let paths: Vec<&str> = chunks.iter().map(|c| c.doc_path.as_str()).collect();
         let texts: Vec<&str> = chunks.iter().map(|c| c.text.as_str()).collect();
 
@@ -560,7 +539,6 @@ impl LanceFullStore {
                 Arc::new(Int64Array::from(doc_ids)),
                 Arc::new(Int32Array::from(line_starts)),
                 Arc::new(Int32Array::from(line_ends)),
-                Arc::new(StringArray::from(titles)),
                 Arc::new(StringArray::from(paths)),
                 Arc::new(StringArray::from(texts)),
                 Arc::new(make_embedding_array(embeddings, self.dim)?),
@@ -617,7 +595,6 @@ impl LanceFullStore {
 
 struct RawHit {
     doc_id: i64,
-    title: String,
     path: String,
     line_start: usize,
     line_end: usize,
@@ -634,7 +611,6 @@ where
     for r in rows {
         let entry = by_doc.entry(r.doc_id).or_insert_with(|| FileSearchResult {
             id: r.doc_id,
-            title: r.title.clone(),
             path: r.path.clone(),
             score: r.score,
             chunks: Vec::new(),

@@ -463,7 +463,7 @@ fn extract_message_text(value: &serde_json::Value) -> String {
 /// This function is used internally by the SQLite and LanceDB storage backends
 /// as the default chunking strategy when no pre-computed chunks are provided.
 /// New code should prefer the [`Chunker`] trait.
-pub fn chunk_document(title: &str, body: &str) -> Vec<String> {
+pub fn chunk_document(body: &str) -> Vec<String> {
     let paragraphs: Vec<&str> = body
         .split("\n\n")
         .map(str::trim)
@@ -471,19 +471,10 @@ pub fn chunk_document(title: &str, body: &str) -> Vec<String> {
         .collect();
 
     if paragraphs.is_empty() {
-        return vec![title.to_owned()];
+        return Vec::new();
     }
 
-    paragraphs
-        .iter()
-        .map(|p| {
-            if title.is_empty() {
-                p.to_string()
-            } else {
-                format!("{title}\n\n{p}")
-            }
-        })
-        .collect()
+    paragraphs.iter().map(|p| p.to_string()).collect()
 }
 
 #[cfg(test)]
@@ -492,27 +483,27 @@ mod tests {
 
     #[test]
     fn two_paragraphs() {
-        let chunks = chunk_document("Title", "First.\n\nSecond.");
+        let chunks = chunk_document("First.\n\nSecond.");
         assert_eq!(chunks.len(), 2);
-        assert_eq!(chunks[0], "Title\n\nFirst.");
-        assert_eq!(chunks[1], "Title\n\nSecond.");
+        assert_eq!(chunks[0], "First.");
+        assert_eq!(chunks[1], "Second.");
     }
 
     #[test]
-    fn empty_body_returns_title() {
-        let chunks = chunk_document("Title", "");
-        assert_eq!(chunks, vec!["Title"]);
+    fn empty_body_returns_empty() {
+        let chunks = chunk_document("");
+        assert!(chunks.is_empty());
     }
 
     #[test]
-    fn blank_only_body_returns_title() {
-        let chunks = chunk_document("Title", "   \n\n   ");
-        assert_eq!(chunks, vec!["Title"]);
+    fn blank_only_body_returns_empty() {
+        let chunks = chunk_document("   \n\n   ");
+        assert!(chunks.is_empty());
     }
 
     #[test]
-    fn empty_title() {
-        let chunks = chunk_document("", "Only body.");
+    fn single_paragraph() {
+        let chunks = chunk_document("Only body.");
         assert_eq!(chunks, vec!["Only body."]);
     }
 

@@ -10,7 +10,7 @@
 //! | table | purpose |
 //! |-------|---------|
 //! | `files` | path + mtime tracking |
-//! | `documents` | id / title / path |
+//! | `documents` | id / path |
 //! | `chunks` | per-chunk text + source line range |
 //! | `chunks_fts` | FTS5 trigram index over `chunks.text` |
 //! | `chunk_vectors` | sqlite-vec virtual table (optional) |
@@ -55,10 +55,8 @@ CREATE TABLE IF NOT EXISTS files (
 
 CREATE TABLE IF NOT EXISTS documents (
     id    INTEGER PRIMARY KEY,
-    title TEXT    NOT NULL DEFAULT '',
     path  TEXT    NOT NULL DEFAULT ''
 );
-CREATE INDEX IF NOT EXISTS idx_documents_title ON documents(title);
 CREATE INDEX IF NOT EXISTS idx_documents_path  ON documents(path);
 
 CREATE TABLE IF NOT EXISTS chunks (
@@ -167,8 +165,8 @@ impl RetrieveStore for SqliteStore {
     fn upsert_document(&self, doc: &Document) -> Result<()> {
         let conn = self.open_conn()?;
         conn.execute(
-            "INSERT OR REPLACE INTO documents (id, title, path) VALUES (?1, ?2, ?3)",
-            params![doc.id, doc.title, doc.path],
+            "INSERT OR REPLACE INTO documents (id, path) VALUES (?1, ?2)",
+            params![doc.id, doc.path],
         )?;
         upsert_chunks(&conn, doc, self.dim.is_some())?;
         Ok(())
@@ -217,7 +215,7 @@ impl RetrieveStore for SqliteStore {
         let over_fetch = (q.limit * 5) as i64;
         let prefix_glob = q.path_prefix.map(|p| format!("{}*", p.to_string_lossy()));
         let sql = if prefix_glob.is_some() {
-            "SELECT c.doc_id, d.title, d.path, c.line_start, c.line_end, c.text, fts.rank
+            "SELECT c.doc_id, d.path, c.line_start, c.line_end, c.text, fts.rank
              FROM chunks_fts fts
              JOIN chunks c    ON c.id = fts.rowid
              JOIN documents d ON d.id = c.doc_id
@@ -225,7 +223,7 @@ impl RetrieveStore for SqliteStore {
              ORDER BY fts.rank
              LIMIT ?2"
         } else {
-            "SELECT c.doc_id, d.title, d.path, c.line_start, c.line_end, c.text, fts.rank
+            "SELECT c.doc_id, d.path, c.line_start, c.line_end, c.text, fts.rank
              FROM chunks_fts fts
              JOIN chunks c    ON c.id = fts.rowid
              JOIN documents d ON d.id = c.doc_id
@@ -333,7 +331,7 @@ impl RetrieveStore for SqliteStore {
         let over_fetch = (q.limit * 5) as i64;
 
         let mut stmt = conn.prepare(
-            "SELECT d.id, d.title, d.path, c.line_start, c.line_end, c.text, cv.distance
+            "SELECT d.id, d.path, c.line_start, c.line_end, c.text, cv.distance
              FROM chunk_vectors cv
              JOIN chunks c    ON c.id = cv.chunk_id
              JOIN documents d ON d.id = c.doc_id
@@ -461,7 +459,6 @@ fn ensure_vec_tables(conn: &Connection, dim: u32) -> Result<()> {
 
 struct ChunkRow {
     doc_id: i64,
-    title: String,
     path: String,
     line_start: usize,
     line_end: usize,
@@ -472,12 +469,11 @@ struct ChunkRow {
 fn map_chunk_row(row: &rusqlite::Row) -> rusqlite::Result<ChunkRow> {
     Ok(ChunkRow {
         doc_id: row.get::<_, i64>(0)?,
-        title: row.get::<_, String>(1)?,
-        path: row.get::<_, String>(2)?,
-        line_start: row.get::<_, i64>(3)? as usize,
-        line_end: row.get::<_, i64>(4)? as usize,
-        text: row.get::<_, String>(5)?,
-        score: row.get::<_, f64>(6).unwrap_or(0.0),
+        path: row.get::<_, String>(1)?,
+        line_start: row.get::<_, i64>(2)? as usize,
+        line_end: row.get::<_, i64>(3)? as usize,
+        text: row.get::<_, String>(4)?,
+        score: row.get::<_, f64>(5).unwrap_or(0.0),
     })
 }
 
@@ -495,7 +491,6 @@ where
     for r in rows {
         let entry = by_doc.entry(r.doc_id).or_insert_with(|| FileSearchResult {
             id: r.doc_id,
-            title: r.title.clone(),
             path: r.path.clone(),
             score: r.score,
             chunks: Vec::new(),
@@ -544,7 +539,7 @@ fn upsert_chunks(conn: &Connection, doc: &Document, has_vec: bool) -> Result<()>
     let chunks: &[(usize, usize, String)] = if let Some(ref c) = doc.chunks {
         c.as_slice()
     } else {
-        computed = chunk_document(&doc.title, &doc.body)
+        computed = chunk_document(&doc.body)
             .into_iter()
             .enumerate()
             .map(|(i, t)| (i, i, t))
@@ -668,7 +663,7 @@ fn collect_pending_chunks(
     embedded_keys: &HashSet<(i64, usize)>,
 ) -> Result<Vec<Chunk>> {
     let mut stmt = conn.prepare(
-        "SELECT c.doc_id, c.line_start, c.line_end, c.text, d.title, d.path
+        "SELECT c.doc_id, c.line_start, c.line_end, c.text, d.path
          FROM chunks c
          JOIN documents d ON d.id = c.doc_id",
     )?;
@@ -679,8 +674,7 @@ fn collect_pending_chunks(
                 line_start: row.get::<_, i64>(1)? as usize,
                 line_end: row.get::<_, i64>(2)? as usize,
                 text: row.get::<_, String>(3)?,
-                doc_title: row.get::<_, String>(4)?,
-                doc_path: row.get::<_, String>(5)?,
+                doc_path: row.get::<_, String>(4)?,
             })
         })?
         .filter_map(|r| r.ok())
