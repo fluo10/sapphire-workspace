@@ -10,12 +10,14 @@ categories = ["filesystem"]
 
 [features]
 default = ["git"]
-git = ["dep:git2", "dep:dirs", "dep:uuid"]
+git = ["dep:git2", "dep:dirs"]
 
 [dependencies]
 tracing.workspace = true
 thiserror.workspace = true
 serde.workspace = true
-uuid = { workspace = true, optional = true }
+serde_json.workspace = true
+chrono = { workspace = true }
+uuid = { workspace = true }
 dirs = { workspace = true, optional = true }
 git2 = { version = "0.20", optional = true }

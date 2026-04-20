@@ -8,8 +8,7 @@ use crate::commands::sync::open_workspace;
 pub fn run(workspace_dir: Option<&Path>, path: &Path) -> Result<()> {
     let (workspace, config) = open_workspace(workspace_dir)?;
 
-    // Staging-only command: no commits are produced, so no device id needed.
-    let state = WorkspaceState::open_configured(workspace, &config.sync, None)?;
+    let state = WorkspaceState::open_configured(workspace, &config.sync)?;
 
     let abs_path = if path.is_absolute() {
         path.to_owned()

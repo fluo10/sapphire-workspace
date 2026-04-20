@@ -3,21 +3,12 @@ use std::path::Path;
 use anyhow::{Result, bail};
 use sapphire_workspace::{WorkspaceState, workspace::Workspace};
 
+use crate::WORKSPACE_CTX;
 use crate::config::UserConfig;
 
-use crate::WORKSPACE_CTX;
-
 pub fn run(workspace_dir: Option<&Path>) -> Result<()> {
-    let device_id = match WORKSPACE_CTX.device_id() {
-        Ok(id) => Some(id),
-        Err(e) => {
-            tracing::error!("could not persist device_id: {e}");
-            None
-        }
-    };
-
     let (workspace, config) = open_workspace(workspace_dir)?;
-    let state = WorkspaceState::open_configured(workspace, &config.sync, device_id)?;
+    let state = WorkspaceState::open_configured(workspace, &config.sync)?;
 
     let Some(backend) = state.sync_backend() else {
         bail!(

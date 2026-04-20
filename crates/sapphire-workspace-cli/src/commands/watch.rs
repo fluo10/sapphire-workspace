@@ -6,28 +6,15 @@ use anyhow::Result;
 use notify_debouncer_mini::{DebounceEventResult, Debouncer, new_debouncer, notify};
 use sapphire_workspace::WorkspaceState;
 
-use crate::WORKSPACE_CTX;
 use crate::commands::sync::open_workspace;
 
 pub fn run(workspace_dir: Option<&Path>, debounce_ms: u64) -> Result<()> {
-    let device_id = match WORKSPACE_CTX.device_id() {
-        Ok(id) => Some(id),
-        Err(e) => {
-            tracing::error!("could not persist device_id: {e}");
-            None
-        }
-    };
-
     let (workspace, config) = open_workspace(workspace_dir)?;
 
     let watch_root = workspace.root.clone();
     let sync_interval = config.sync_interval();
 
-    let state = Arc::new(WorkspaceState::open_configured(
-        workspace,
-        &config.sync,
-        device_id,
-    )?);
+    let state = Arc::new(WorkspaceState::open_configured(workspace, &config.sync)?);
 
     println!("watching: {}", watch_root.display());
     if let Some(interval) = sync_interval {
