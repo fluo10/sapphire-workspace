@@ -158,15 +158,22 @@ impl WorkspaceState {
     /// - `SyncBackendKind::Git` — attach git with the configured remote;
     ///   returns an error if no repository is found.
     /// - `SyncBackendKind::None` — disable sync even inside a git repository.
+    ///
+    /// When `device_id` is `Some`, the git backend tags every auto-sync commit
+    /// with it so each device's syncs are traceable across the shared history.
     #[cfg(feature = "git-sync")]
-    pub fn open_configured(workspace: Workspace, sync: &crate::config::SyncConfig) -> Result<Self> {
+    pub fn open_configured(
+        workspace: Workspace,
+        sync: &crate::config::SyncConfig,
+        device_id: Option<uuid::Uuid>,
+    ) -> Result<Self> {
         use crate::config::SyncBackendKind;
         let mut state = Self::open(workspace)?;
-        match sync.workspace.backend {
+        match sync.backend {
             SyncBackendKind::Auto => {
                 // Re-create the backend so we can apply the device_id commit message.
                 if let Ok(git) = sapphire_sync::GitSync::open(&state.workspace.root) {
-                    state.set_sync_backend(Box::new(Self::apply_device_id(git, sync)));
+                    state.set_sync_backend(Box::new(Self::apply_device_id(git, device_id)));
                 }
             }
             SyncBackendKind::Git => {
@@ -174,7 +181,7 @@ impl WorkspaceState {
                 // no repository is found.
                 let git =
                     sapphire_sync::GitSync::with_remote(&state.workspace.root, sync.remote())?;
-                state.set_sync_backend(Box::new(Self::apply_device_id(git, sync)));
+                state.set_sync_backend(Box::new(Self::apply_device_id(git, device_id)));
             }
             SyncBackendKind::None => {
                 // Explicitly disabled: remove whatever `open` may have set.
@@ -184,14 +191,16 @@ impl WorkspaceState {
         Ok(state)
     }
 
-    /// Apply `device_id` from the sync config as the git commit message.
+    /// Tag the git backend's auto-sync commit message with `device_id`.
+    /// Commit formatting (subject + `Device-Id` trailer) is encapsulated
+    /// inside [`sapphire_sync::GitSync`].
     #[cfg(feature = "git-sync")]
     fn apply_device_id(
         git: sapphire_sync::GitSync,
-        sync: &crate::config::SyncConfig,
+        device_id: Option<uuid::Uuid>,
     ) -> sapphire_sync::GitSync {
-        match sync.user.device_id {
-            Some(id) => git.with_commit_message(format!("auto: sync [{id}]")),
+        match device_id {
+            Some(id) => git.with_device_id(id),
             None => git,
         }
     }
@@ -202,6 +211,7 @@ impl WorkspaceState {
     pub fn open_configured(
         workspace: Workspace,
         _sync: &crate::config::SyncConfig,
+        _device_id: Option<uuid::Uuid>,
     ) -> Result<Self> {
         Self::open(workspace)
     }

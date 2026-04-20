@@ -18,24 +18,6 @@ pub struct RetrieveConfig {
     /// Hybrid search tuning (FTS + semantic merged via Reciprocal Rank Fusion).
     #[serde(default)]
     pub hybrid: HybridConfig,
-    /// How often to automatically refresh the embedding cache, in minutes.
-    ///
-    /// When set, the `watch` command runs a mtime-based incremental cache
-    /// update at this interval.
-    /// When unset or `0`, automatic periodic cache refresh is disabled.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sync_interval_minutes: Option<u32>,
-}
-
-impl RetrieveConfig {
-    /// Returns the cache refresh interval as a [`std::time::Duration`], or
-    /// `None` if periodic refresh is disabled (`sync_interval_minutes` is
-    /// unset or `0`).
-    pub fn sync_interval(&self) -> Option<std::time::Duration> {
-        self.sync_interval_minutes
-            .filter(|&m| m > 0)
-            .map(|m| std::time::Duration::from_secs(m as u64 * 60))
-    }
 }
 
 /// Settings for hybrid (FTS + semantic) search merging via Reciprocal Rank

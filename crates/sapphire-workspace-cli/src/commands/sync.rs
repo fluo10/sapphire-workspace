@@ -8,13 +8,16 @@ use crate::config::UserConfig;
 use crate::WORKSPACE_CTX;
 
 pub fn run(workspace_dir: Option<&Path>) -> Result<()> {
-    // Ensure a device_id is set before loading the final config.
-    if let Err(e) = crate::config::ensure_device_id() {
-        eprintln!("warning: could not persist device_id: {e}");
-    }
+    let device_id = match WORKSPACE_CTX.device_id() {
+        Ok(id) => Some(id),
+        Err(e) => {
+            tracing::error!("could not persist device_id: {e}");
+            None
+        }
+    };
 
     let (workspace, config) = open_workspace(workspace_dir)?;
-    let state = WorkspaceState::open_configured(workspace, &config.sync)?;
+    let state = WorkspaceState::open_configured(workspace, &config.sync, device_id)?;
 
     let Some(backend) = state.sync_backend() else {
         bail!(
