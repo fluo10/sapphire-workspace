@@ -157,12 +157,12 @@ impl GitSync {
             let username = username_from_url.unwrap_or("git");
 
             // Attempt 0: ssh-agent.
-            if i == 0 {
-                if let Ok(cred) = Cred::ssh_key_from_agent(username) {
-                    return Ok(cred);
-                }
-                // ssh-agent unavailable — fall through to key files immediately.
+            if i == 0
+                && let Ok(cred) = Cred::ssh_key_from_agent(username)
+            {
+                return Ok(cred);
             }
+            // ssh-agent unavailable — fall through to key files immediately.
 
             // Attempts 1..=KEY_NAMES.len(): key files.
             let key_idx = if i == 0 { 0 } else { i - 1 };

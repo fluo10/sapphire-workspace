@@ -41,8 +41,8 @@ fn run_list(workspace_dir: Option<&Path>) -> Result<()> {
         return Ok(());
     }
     println!(
-        " {:>2}  {:36}  {:20}  {:24}  {:8}  {}",
-        "#", "id", "name", "app", "platform", "updated_at"
+        " {:>2}  {:36}  {:20}  {:24}  {:8}  updated_at",
+        "#", "id", "name", "app", "platform"
     );
     for (i, r) in registry.records().iter().enumerate() {
         let marker = if Some(r.id) == self_id { "*" } else { " " };

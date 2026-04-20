@@ -49,17 +49,17 @@ pub fn run(workspace_dir: Option<&Path>, debounce_ms: u64) -> Result<()> {
         // Run the periodic sync cycle (git sync + retrieve cache refresh) when
         // its interval has elapsed.
         let run_periodic_sync = |last: &mut Instant| {
-            if let Some(interval) = sync_interval {
-                if last.elapsed() >= interval {
-                    print!("periodic sync... ");
-                    match state_clone.periodic_sync() {
-                        Ok((upserted, removed)) => {
-                            println!("done (upserted: {upserted}, removed: {removed})")
-                        }
-                        Err(e) => eprintln!("periodic sync error: {e}"),
+            if let Some(interval) = sync_interval
+                && last.elapsed() >= interval
+            {
+                print!("periodic sync... ");
+                match state_clone.periodic_sync() {
+                    Ok((upserted, removed)) => {
+                        println!("done (upserted: {upserted}, removed: {removed})")
                     }
-                    *last = Instant::now();
+                    Err(e) => eprintln!("periodic sync error: {e}"),
                 }
+                *last = Instant::now();
             }
         };
 

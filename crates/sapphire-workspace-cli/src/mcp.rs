@@ -90,18 +90,16 @@ impl RecallServer {
         description = "Show workspace location, index path, schema version, and document count."
     )]
     fn workspace_info(&self, _: Parameters<serde_json::Value>) -> Result<String, String> {
-        (|| -> anyhow::Result<String> {
-            self.with_state(|s| {
-                let info = s.db_info()?;
-                Ok(format!(
-                    "workspace:      {}\ndb path:        {}\nschema version: v{}\ndocuments:      {}",
-                    s.workspace.root.display(),
-                    info.db_path.display(),
-                    info.schema_version,
-                    info.document_count,
-                ))
-            })
-        })()
+        self.with_state(|s| {
+            let info = s.db_info()?;
+            Ok(format!(
+                "workspace:      {}\ndb path:        {}\nschema version: v{}\ndocuments:      {}",
+                s.workspace.root.display(),
+                info.db_path.display(),
+                info.schema_version,
+                info.document_count,
+            ))
+        })
         .map_err(|e| e.to_string())
     }
 
@@ -109,12 +107,10 @@ impl RecallServer {
         Walks the workspace directory, upserts new/changed documents, and removes \
         documents for deleted files. Returns the number of files synced.")]
     fn workspace_sync(&self, _: Parameters<serde_json::Value>) -> Result<String, String> {
-        (|| -> anyhow::Result<String> {
-            self.with_state(|s| {
-                let (upserted, _removed) = s.sync()?;
-                Ok(format!("synced: {upserted} files"))
-            })
-        })()
+        self.with_state(|s| {
+            let (upserted, _removed) = s.sync()?;
+            Ok(format!("synced: {upserted} files"))
+        })
         .map_err(|e| e.to_string())
     }
 
@@ -146,35 +142,33 @@ impl RecallServer {
         line ranges (`line_start`, `line_end`) and text within each file."
     )]
     fn search(&self, Parameters(p): Parameters<SearchParams>) -> Result<String, String> {
-        (|| -> anyhow::Result<String> {
-            self.with_state(|s| {
-                s.sync()?;
-                let limit = p.limit.unwrap_or(10);
+        self.with_state(|s| {
+            s.sync()?;
+            let limit = p.limit.unwrap_or(10);
 
-                // Opportunistically embed a small backlog before searching.
-                if let Some(embedder) = s.embedder() {
-                    let pending = s
-                        .retrieve_db()
-                        .vec_info()
-                        .map(|vi| vi.pending_count)
-                        .unwrap_or(0);
-                    if pending > 0 && pending <= 50 {
-                        let _ = s.retrieve_db().embed_pending(embedder, &|_, _| {});
-                    }
-                }
-
-                let mut hq = HybridQuery::new(p.query.as_str()).limit(limit);
-                if let Some(e) = s.embedder() {
-                    hq = hq.embedder(e);
-                }
-
-                let results = s
+            // Opportunistically embed a small backlog before searching.
+            if let Some(embedder) = s.embedder() {
+                let pending = s
                     .retrieve_db()
-                    .search_hybrid(&hq)
-                    .map_err(anyhow::Error::msg)?;
-                Ok(serde_json::to_string_pretty(&results)?)
-            })
-        })()
+                    .vec_info()
+                    .map(|vi| vi.pending_count)
+                    .unwrap_or(0);
+                if pending > 0 && pending <= 50 {
+                    let _ = s.retrieve_db().embed_pending(embedder, &|_, _| {});
+                }
+            }
+
+            let mut hq = HybridQuery::new(p.query.as_str()).limit(limit);
+            if let Some(e) = s.embedder() {
+                hq = hq.embedder(e);
+            }
+
+            let results = s
+                .retrieve_db()
+                .search_hybrid(&hq)
+                .map_err(anyhow::Error::msg)?;
+            Ok(serde_json::to_string_pretty(&results)?)
+        })
         .map_err(|e| e.to_string())
     }
 }

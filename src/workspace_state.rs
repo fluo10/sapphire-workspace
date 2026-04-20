@@ -214,10 +214,10 @@ impl WorkspaceState {
         let outcome = registry.merge_device_context(ctx);
         if outcome.changed {
             registry.save()?;
-            if let Some(backend) = self.sync_backend() {
-                if let Err(e) = backend.add_file(&path) {
-                    tracing::warn!("could not stage devices.jsonl: {e}");
-                }
+            if let Some(backend) = self.sync_backend()
+                && let Err(e) = backend.add_file(&path)
+            {
+                tracing::warn!("could not stage devices.jsonl: {e}");
             }
         }
         self.workspace
@@ -254,10 +254,10 @@ impl WorkspaceState {
         self.workspace
             .ctx
             .update_device_name_if_newer(&record.name, record.updated_at);
-        if let Some(backend) = self.sync_backend() {
-            if let Err(e) = backend.add_file(&path) {
-                tracing::warn!("could not stage devices.jsonl: {e}");
-            }
+        if let Some(backend) = self.sync_backend()
+            && let Err(e) = backend.add_file(&path)
+        {
+            tracing::warn!("could not stage devices.jsonl: {e}");
         }
         Ok(())
     }
