@@ -161,11 +161,20 @@ impl WorkspaceState {
     ///
     /// When `device_id` is `Some`, the git backend tags every auto-sync commit
     /// with it so each device's syncs are traceable across the shared history.
+    ///
+    /// When both `device_id` and `device_defaults` are provided, the device
+    /// registry at `<marker>/devices.jsonl` is loaded and this device's entry
+    /// is [idempotently registered or reconciled][ensure].  Any actual change
+    /// is saved to disk and staged with the sync backend so the next
+    /// [`sync`](sapphire_sync::SyncBackend::sync) picks it up.
+    ///
+    /// [ensure]: sapphire_sync::DeviceRegistry::ensure_registered
     #[cfg(feature = "git-sync")]
     pub fn open_configured(
         workspace: Workspace,
         sync: &crate::config::SyncConfig,
         device_id: Option<uuid::Uuid>,
+        device_defaults: Option<sapphire_sync::DeviceDefaults>,
     ) -> Result<Self> {
         use crate::config::SyncBackendKind;
         let mut state = Self::open(workspace)?;
@@ -188,7 +197,34 @@ impl WorkspaceState {
                 state.sync_backend = None;
             }
         }
+        if let (Some(id), Some(defaults)) = (device_id, device_defaults) {
+            state.ensure_device_registered(id, defaults)?;
+        }
         Ok(state)
+    }
+
+    /// Ensure the current device is registered in `devices.jsonl`, saving
+    /// and staging the file only if anything changed.  Errors from the
+    /// sync backend's `add_file` are demoted to warnings — the registry
+    /// itself is still consistent on disk.
+    #[cfg(feature = "git-sync")]
+    fn ensure_device_registered(
+        &self,
+        id: uuid::Uuid,
+        defaults: sapphire_sync::DeviceDefaults,
+    ) -> Result<()> {
+        let path = self.workspace.marker_dir().join("devices.jsonl");
+        let mut registry = sapphire_sync::DeviceRegistry::load(&path)?;
+        if !registry.ensure_registered(id, defaults)? {
+            return Ok(());
+        }
+        registry.save()?;
+        if let Some(backend) = self.sync_backend() {
+            if let Err(e) = backend.add_file(&path) {
+                tracing::warn!("could not stage devices.jsonl: {e}");
+            }
+        }
+        Ok(())
     }
 
     /// Tag the git backend's auto-sync commit message with `device_id`.
@@ -212,6 +248,7 @@ impl WorkspaceState {
         workspace: Workspace,
         _sync: &crate::config::SyncConfig,
         _device_id: Option<uuid::Uuid>,
+        _device_defaults: Option<sapphire_sync::DeviceDefaults>,
     ) -> Result<Self> {
         Self::open(workspace)
     }

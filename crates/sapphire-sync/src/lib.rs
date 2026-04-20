@@ -1,8 +1,10 @@
 use std::path::Path;
 
 pub mod config;
+pub mod devices;
 mod error;
 pub use config::{SyncBackendKind, SyncConfig};
+pub use devices::{DeviceDefaults, DeviceRecord, DeviceRegistry};
 pub use error::{Error, Result};
 
 #[cfg(feature = "git")]

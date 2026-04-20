@@ -6,17 +6,11 @@ use anyhow::Result;
 use notify_debouncer_mini::{DebounceEventResult, Debouncer, new_debouncer, notify};
 use sapphire_workspace::WorkspaceState;
 
-use crate::WORKSPACE_CTX;
-use crate::commands::sync::open_workspace;
+use crate::commands::sync::{collect_device_defaults, open_workspace, resolve_device_id};
 
 pub fn run(workspace_dir: Option<&Path>, debounce_ms: u64) -> Result<()> {
-    let device_id = match WORKSPACE_CTX.device_id() {
-        Ok(id) => Some(id),
-        Err(e) => {
-            tracing::error!("could not persist device_id: {e}");
-            None
-        }
-    };
+    let device_id = resolve_device_id();
+    let defaults = collect_device_defaults();
 
     let (workspace, config) = open_workspace(workspace_dir)?;
 
@@ -27,6 +21,7 @@ pub fn run(workspace_dir: Option<&Path>, debounce_ms: u64) -> Result<()> {
         workspace,
         &config.sync,
         device_id,
+        Some(defaults),
     )?);
 
     println!("watching: {}", watch_root.display());

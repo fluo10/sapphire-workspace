@@ -94,6 +94,12 @@ enum Command {
         action: CacheCommand,
     },
 
+    /// Inspect and rename devices tracked in this workspace
+    Device {
+        #[command(subcommand)]
+        action: commands::device::DeviceCommand,
+    },
+
     /// Start the MCP server (stdio transport)
     Mcp,
 }
@@ -132,6 +138,7 @@ fn main() -> anyhow::Result<()> {
             CacheCommand::Embed => commands::cache::embed::run(workspace_dir)?,
             CacheCommand::Clean => commands::cache::clean::run(workspace_dir)?,
         },
+        Command::Device { action } => commands::device::run(workspace_dir, &action)?,
         Command::Mcp => mcp::run(workspace_dir)?,
     }
     Ok(())

@@ -16,6 +16,24 @@ pub enum Error {
     #[error("remote '{name}' not found")]
     RemoteNotFound { name: String },
 
+    #[error("device record for id '{id}' not found in registry")]
+    DeviceNotFound { id: uuid::Uuid },
+
+    #[error("I/O error at '{path}': {source}")]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("malformed device record at '{path}' line {line}: {source}")]
+    DeviceRecordParse {
+        path: PathBuf,
+        line: usize,
+        #[source]
+        source: serde_json::Error,
+    },
+
     #[cfg(feature = "git")]
     #[error(transparent)]
     Git(#[from] git2::Error),
