@@ -30,4 +30,6 @@ pub use sapphire_retrieve::{
 // Re-export sapphire-sync public API.
 #[cfg(feature = "git-sync")]
 pub use sapphire_sync::GitSync;
-pub use sapphire_sync::{DeviceDefaults, DeviceRecord, DeviceRegistry, SyncBackend};
+pub use sapphire_sync::{
+    DeviceContext, DeviceDefaults, DeviceRecord, DeviceRegistry, MergeOutcome, SyncBackend,
+};

@@ -6,7 +6,7 @@ use sapphire_workspace::{DeviceRecord, DeviceRegistry, WorkspaceState};
 use uuid::Uuid;
 
 use crate::WORKSPACE_CTX;
-use crate::commands::sync::{collect_device_defaults, open_workspace, resolve_device_id};
+use crate::commands::sync::open_workspace;
 
 #[derive(Subcommand)]
 pub enum DeviceCommand {
@@ -35,25 +35,25 @@ pub fn run(workspace_dir: Option<&Path>, cmd: &DeviceCommand) -> Result<()> {
 
 fn run_list(workspace_dir: Option<&Path>) -> Result<()> {
     let registry = open_registry(workspace_dir)?;
-    let self_id = WORKSPACE_CTX.device_id().ok();
+    let self_id = WORKSPACE_CTX.device_id();
     if registry.records().is_empty() {
         println!("(no devices registered)");
         return Ok(());
     }
     println!(
         " {:>2}  {:36}  {:20}  {:24}  {:8}  {}",
-        "#", "id", "name", "client", "platform", "updated_at"
+        "#", "id", "name", "app", "platform", "updated_at"
     );
     for (i, r) in registry.records().iter().enumerate() {
         let marker = if Some(r.id) == self_id { "*" } else { " " };
-        let client = format!("{} {}", r.client, r.client_version);
+        let app = format!("{} {}", r.app_id, r.app_version);
         println!(
             "{}{:>2}  {:36}  {:20}  {:24}  {:8}  {}",
             marker,
             i + 1,
             r.id,
             truncate(&r.name, 20),
-            truncate(&client, 24),
+            truncate(&app, 24),
             truncate(&r.platform, 8),
             r.updated_at.format("%Y-%m-%d %H:%M:%SZ"),
         );
@@ -62,36 +62,22 @@ fn run_list(workspace_dir: Option<&Path>) -> Result<()> {
 }
 
 fn run_set_name(workspace_dir: Option<&Path>, name: &str) -> Result<()> {
-    let self_id = match resolve_device_id() {
-        Some(id) => id,
-        None => bail!("cannot determine this device's id"),
-    };
-
-    // Open via open_configured so the sync backend is wired up — we use it
-    // to stage the modified file after saving.  open_configured also runs
-    // idempotent self-registration, which seeds the entry we are about to
-    // rename if this is the first run.
-    let defaults = collect_device_defaults();
     let (workspace, config) = open_workspace(workspace_dir)?;
-    let marker_dir = workspace.marker_dir();
-    let state =
-        WorkspaceState::open_configured(workspace, &config.sync, Some(self_id), Some(defaults))?;
-
-    let path = marker_dir.join("devices.jsonl");
-    let mut registry = DeviceRegistry::load(&path)?;
-    registry.set_name(self_id, name)?;
-    registry.save()?;
-    if let Some(backend) = state.sync_backend() {
-        backend.add_file(&path)?;
+    let state = WorkspaceState::open_configured(workspace, &config.sync)?;
+    state.rename_device(name)?;
+    let id = WORKSPACE_CTX.device_id();
+    if let Some(id) = id {
+        println!("device name updated to '{name}' (id: {id})");
+    } else {
+        println!("device name updated to '{name}'");
     }
-    println!("device name updated to '{name}' (id: {self_id})");
     println!("next `sync` will commit and push this change");
     Ok(())
 }
 
 fn run_show(workspace_dir: Option<&Path>, target: Option<&str>) -> Result<()> {
     let registry = open_registry(workspace_dir)?;
-    let self_id = WORKSPACE_CTX.device_id().ok();
+    let self_id = WORKSPACE_CTX.device_id();
 
     let (record, number) = match target {
         None => {
@@ -109,10 +95,7 @@ fn run_show(workspace_dir: Option<&Path>, target: Option<&str>) -> Result<()> {
     println!("id:             {}", record.id);
     println!("name:           {}", record.name);
     println!("hostname:       {}", record.hostname);
-    println!(
-        "client:         {} {}",
-        record.client, record.client_version
-    );
+    println!("app:            {} {}", record.app_id, record.app_version);
     println!("platform:       {} / {}", record.platform, record.arch);
     println!("registered_at:  {}", record.registered_at.to_rfc3339());
     println!("updated_at:     {}", record.updated_at.to_rfc3339());
@@ -148,17 +131,14 @@ fn resolve_target<'a>(
     Ok((record, number))
 }
 
-/// Open the registry via `open_configured` so that idempotent
-/// self-registration and the `client` / `client_version`
-/// auto-reconciliation run before the caller reads any records — even
-/// for read-only inspection commands like `device list` / `device show`.
+/// Open the registry via `open_configured` so that the merge-on-open
+/// flow (idempotent self-registration + host-field reconciliation)
+/// runs before the caller reads any records — even for read-only
+/// inspection commands.
 fn open_registry(workspace_dir: Option<&Path>) -> Result<DeviceRegistry> {
-    let device_id = resolve_device_id();
-    let defaults = collect_device_defaults();
     let (workspace, config) = open_workspace(workspace_dir)?;
     let marker_dir = workspace.marker_dir();
-    let _state =
-        WorkspaceState::open_configured(workspace, &config.sync, device_id, Some(defaults))?;
+    let _state = WorkspaceState::open_configured(workspace, &config.sync)?;
     let path = marker_dir.join("devices.jsonl");
     Ok(DeviceRegistry::load(path)?)
 }

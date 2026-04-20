@@ -62,4 +62,5 @@ tracing.workspace = true
 indexmap.workspace = true
 walkdir = "2"
 uuid.workspace = true
+chrono = { workspace = true }
 md-5 = "0.10"

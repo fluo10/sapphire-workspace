@@ -159,24 +159,22 @@ impl WorkspaceState {
     ///   returns an error if no repository is found.
     /// - `SyncBackendKind::None` — disable sync even inside a git repository.
     ///
-    /// When `device_id` is `Some`, the git backend tags every auto-sync commit
-    /// with it so each device's syncs are traceable across the shared history.
-    ///
-    /// When both `device_id` and `device_defaults` are provided, the device
-    /// registry at `<marker>/devices.jsonl` is loaded and this device's entry
-    /// is [idempotently registered or reconciled][ensure].  Any actual change
-    /// is saved to disk and staged with the sync backend so the next
-    /// [`sync`](sapphire_sync::SyncBackend::sync) picks it up.
-    ///
-    /// [ensure]: sapphire_sync::DeviceRegistry::ensure_registered
+    /// The device context is pulled from the workspace's
+    /// [`AppContext`](crate::AppContext) automatically.  When it is
+    /// available, the git backend tags every auto-sync commit with the
+    /// device id and the `<marker>/devices.jsonl` registry is merged
+    /// with the context (see
+    /// [`DeviceRegistry::merge_device_context`](sapphire_sync::DeviceRegistry::merge_device_context)).
+    /// Any resulting change is saved and staged so the next
+    /// [`sync`](sapphire_sync::SyncBackend::sync) picks it up, and the
+    /// merged record's `(name, updated_at)` is propagated back to the
+    /// context via
+    /// [`update_device_name_if_newer`](crate::AppContext::update_device_name_if_newer).
     #[cfg(feature = "git-sync")]
-    pub fn open_configured(
-        workspace: Workspace,
-        sync: &crate::config::SyncConfig,
-        device_id: Option<uuid::Uuid>,
-        device_defaults: Option<sapphire_sync::DeviceDefaults>,
-    ) -> Result<Self> {
+    pub fn open_configured(workspace: Workspace, sync: &crate::config::SyncConfig) -> Result<Self> {
         use crate::config::SyncBackendKind;
+        let device_ctx = workspace.ctx.device();
+        let device_id = device_ctx.as_ref().map(|c| c.id);
         let mut state = Self::open(workspace)?;
         match sync.backend {
             SyncBackendKind::Auto => {
@@ -197,28 +195,65 @@ impl WorkspaceState {
                 state.sync_backend = None;
             }
         }
-        if let (Some(id), Some(defaults)) = (device_id, device_defaults) {
-            state.ensure_device_registered(id, defaults)?;
+        if let Some(ctx) = device_ctx {
+            state.merge_device_registry(&ctx)?;
         }
         Ok(state)
     }
 
-    /// Ensure the current device is registered in `devices.jsonl`, saving
-    /// and staging the file only if anything changed.  Errors from the
-    /// sync backend's `add_file` are demoted to warnings — the registry
-    /// itself is still consistent on disk.
+    /// Merge the per-process device context into this workspace's
+    /// `devices.jsonl`: save+stage the file if anything changed, then
+    /// propagate the merged record's `(name, updated_at)` back to the
+    /// app context so that sibling workspaces opened later observe it.
+    /// Errors from the sync backend's `add_file` are demoted to
+    /// warnings — the registry itself is still consistent on disk.
     #[cfg(feature = "git-sync")]
-    fn ensure_device_registered(
-        &self,
-        id: uuid::Uuid,
-        defaults: sapphire_sync::DeviceDefaults,
-    ) -> Result<()> {
+    fn merge_device_registry(&self, ctx: &sapphire_sync::DeviceContext) -> Result<()> {
         let path = self.workspace.marker_dir().join("devices.jsonl");
         let mut registry = sapphire_sync::DeviceRegistry::load(&path)?;
-        if !registry.ensure_registered(id, defaults)? {
-            return Ok(());
+        let outcome = registry.merge_device_context(ctx);
+        if outcome.changed {
+            registry.save()?;
+            if let Some(backend) = self.sync_backend() {
+                if let Err(e) = backend.add_file(&path) {
+                    tracing::warn!("could not stage devices.jsonl: {e}");
+                }
+            }
         }
+        self.workspace
+            .ctx
+            .update_device_name_if_newer(&outcome.record.name, outcome.record.updated_at);
+        Ok(())
+    }
+
+    /// Rename this device in the workspace's registry, bump
+    /// `updated_at`, save + stage the file via the sync backend, and
+    /// propagate the new `(name, updated_at)` back to the app context.
+    ///
+    /// Fails if the device context hasn't been initialised (e.g. the
+    /// UUID could not be persisted) or if the current device isn't
+    /// already in the registry — the usual caller
+    /// ([`open_configured`](Self::open_configured)) ensures both.
+    #[cfg(feature = "git-sync")]
+    pub fn rename_device(&self, name: &str) -> Result<()> {
+        let id = self
+            .workspace
+            .ctx
+            .device()
+            .ok_or_else(|| {
+                Error::Sync(sapphire_sync::Error::DeviceNotFound {
+                    id: uuid::Uuid::nil(),
+                })
+            })?
+            .id;
+        let path = self.workspace.marker_dir().join("devices.jsonl");
+        let mut registry = sapphire_sync::DeviceRegistry::load(&path)?;
+        registry.set_name(id, name)?;
         registry.save()?;
+        let record = registry.lookup(id).expect("just wrote this record").clone();
+        self.workspace
+            .ctx
+            .update_device_name_if_newer(&record.name, record.updated_at);
         if let Some(backend) = self.sync_backend() {
             if let Err(e) = backend.add_file(&path) {
                 tracing::warn!("could not stage devices.jsonl: {e}");
@@ -247,8 +282,6 @@ impl WorkspaceState {
     pub fn open_configured(
         workspace: Workspace,
         _sync: &crate::config::SyncConfig,
-        _device_id: Option<uuid::Uuid>,
-        _device_defaults: Option<sapphire_sync::DeviceDefaults>,
     ) -> Result<Self> {
         Self::open(workspace)
     }

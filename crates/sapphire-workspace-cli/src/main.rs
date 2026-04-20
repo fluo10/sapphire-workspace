@@ -4,13 +4,14 @@ mod mcp;
 
 use std::path::PathBuf;
 
-use sapphire_workspace::AppContext;
+use sapphire_workspace::{AppContext, DeviceDefaults};
 
 pub static WORKSPACE_CTX: AppContext = AppContext::new("sapphire-workspace");
 
-/// Resolve and inject the host platform's cache and data directories into
-/// [`WORKSPACE_CTX`].  The library deliberately does not depend on `dirs`,
-/// so the CLI must do this once at startup.
+/// Resolve and inject the host platform's cache and data directories,
+/// plus host-detected device facts, into [`WORKSPACE_CTX`].  The
+/// library deliberately does not depend on `dirs` or `hostname`, so the
+/// CLI must do this once at startup.
 fn init_workspace_ctx() {
     let cache_dir = dirs::cache_dir()
         .unwrap_or_else(std::env::temp_dir)
@@ -20,6 +21,21 @@ fn init_workspace_ctx() {
         .join(WORKSPACE_CTX.app_name);
     WORKSPACE_CTX.set_cache_dir(cache_dir);
     WORKSPACE_CTX.set_data_dir(data_dir);
+    WORKSPACE_CTX.set_device_defaults(collect_device_defaults());
+}
+
+fn collect_device_defaults() -> DeviceDefaults {
+    let hostname = hostname::get()
+        .ok()
+        .and_then(|s| s.into_string().ok())
+        .unwrap_or_default();
+    DeviceDefaults {
+        hostname,
+        app_id: env!("CARGO_PKG_NAME").to_owned(),
+        app_version: env!("CARGO_PKG_VERSION").to_owned(),
+        platform: std::env::consts::OS.to_owned(),
+        arch: std::env::consts::ARCH.to_owned(),
+    }
 }
 
 /// Install a stderr tracing subscriber for the whole CLI, so
