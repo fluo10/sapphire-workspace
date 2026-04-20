@@ -5,6 +5,30 @@ All notable changes to `sapphire-workspace` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2026-04-20
+
+### Changed (breaking)
+
+- `sapphire-sync`: `SyncConfig` collapsed back into a single flat struct (`backend`, `remote`, `branch`); `WorkspaceSyncConfig` and `UserSyncConfig` are gone. The workspace/user split no longer carries meaningful distinction once `device_id` moves out of config. (#45)
+- `sapphire-sync`: `sync_interval_minutes` dropped from `SyncConfig`; periodic cadence is the host app's concern (the CLI exposes it as `UserConfig::sync_interval_minutes`).
+- `sapphire-retrieve`: `RetrieveConfig::sync_interval_minutes` and `sync_interval()` removed.
+- `sapphire-workspace`: `WorkspaceState::sync_git` / `sync_retrieve` / `periodic_sync` helpers removed. `watch` in the CLI collapses its two independent timers into a single `periodic_sync()` tick backed by `sync()`.
+- `sapphire-workspace`: `WorkspaceState::open_configured` no longer takes a device id / defaults pair — it reads them from the workspace's `AppContext`.
+- `sapphire-workspace`: `device_id` is no longer stored in `config.toml`. `AppContext::device_id()` is now a get-or-create accessor backed by `<data_dir>/device_id`; first call generates a UUIDv7 and persists it.
+- `sapphire-workspace`: `AppContext` gains `data_dir` / `set_data_dir`, and the library's `dirs` dependency is dropped. Host apps are expected to resolve and inject both `cache_dir` and `data_dir` at startup so the library stays portable to mobile sandboxes.
+- `sapphire-sync`: git auto-sync commits now use an RFC 822 / `git interpret-trailers` compatible `Device-Id:` trailer (message becomes `auto: sync by [<uuid>]\n\nDevice-Id: <uuid>`). `GitSync` exposes only `with_device_id(Uuid)`; commit formatting is fully encapsulated.
+
+### Added
+
+- `sapphire-sync`: `DeviceRegistry` backed by a JSONL file (`{marker}/devices.jsonl`) recording each device's hostname, app id/version, platform, arch, and `registered_at` / `updated_at` timestamps. Enables reverse lookup from commit UUIDs and a stable 1-based Device Number derived from UUIDv7 order. (#46)
+- `sapphire-workspace`: `DeviceContext` (process-wide device state) on `AppContext` via `set_device_defaults`, `device()`, and `update_device_name_if_newer`. Host-detected fields (hostname, app_id, app_version, platform, arch) are always refreshed from the running binary on open; only user-editable fields (`name`, `updated_at`) follow the "newer `updated_at` wins" rule, so an app-version bump no longer touches `updated_at`.
+- `sapphire-workspace-cli`: `device {list, set-name, show}` subcommands exposing the registry; renames are staged via the git backend so the next `sync` propagates them.
+- `sapphire-workspace-cli`: top-level `tracing_subscriber` initialised once in `main()`; device-id persistence failures now surface via `tracing::error!` instead of ad-hoc `eprintln!`.
+
+### Renamed
+
+- `sapphire-sync`: `client` / `client_version` renamed to `app_id` / `app_version` across the device registry — this is a local-first app, not client-server, and the new names match `env!("CARGO_PKG_NAME")` / `env!("CARGO_PKG_VERSION")`.
+
 ## [0.9.0] - 2026-04-18
 
 ### Changed (breaking)
@@ -162,6 +186,7 @@ Internal repository restructure; no public API changes.
 - `fastembed-embed`, `lancedb-store`, `sqlite-store`, `git-sync` feature flags.
 - Re-exports of `sapphire-retrieve` and `sapphire-sync` public APIs.
 
+[0.10.0]: https://github.com/fluo10/sapphire-workspace/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/fluo10/sapphire-workspace/compare/workspace-v0.8.1...workspace-v0.9.0
 [0.8.1]: https://github.com/fluo10/sapphire-workspace/compare/workspace-v0.8.0...workspace-v0.8.1
 [0.8.0]: https://github.com/fluo10/sapphire-workspace/compare/workspace-v0.7.1...workspace-v0.8.0
