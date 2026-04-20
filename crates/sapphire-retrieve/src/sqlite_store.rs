@@ -343,7 +343,7 @@ impl RetrieveStore for SqliteStore {
             .filter(|r| {
                 prefix
                     .as_ref()
-                    .map_or(true, |pfx| r.path.starts_with(pfx.as_str()))
+                    .is_none_or(|pfx| r.path.starts_with(pfx.as_str()))
             })
             .collect();
 

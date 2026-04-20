@@ -100,10 +100,10 @@ impl RetrieveStore for InMemoryStore {
             .documents
             .values()
             .filter(|doc| {
-                if let Some(ref pfx) = prefix {
-                    if !doc.path.starts_with(pfx.as_str()) {
-                        return false;
-                    }
+                if let Some(ref pfx) = prefix
+                    && !doc.path.starts_with(pfx.as_str())
+                {
+                    return false;
                 }
                 doc.body.to_lowercase().contains(&needle)
             })

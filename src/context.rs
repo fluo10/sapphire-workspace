@@ -239,12 +239,12 @@ impl AppContext {
 
     fn load_or_create_device_id(&self) -> Result<Uuid> {
         let path = self.data_dir().join("device_id");
-        if let Ok(contents) = std::fs::read_to_string(&path) {
-            if let Ok(id) = contents.trim().parse::<Uuid>() {
-                return Ok(id);
-            }
-            // Existing file is corrupt — fall through and regenerate.
+        if let Ok(contents) = std::fs::read_to_string(&path)
+            && let Ok(id) = contents.trim().parse::<Uuid>()
+        {
+            return Ok(id);
         }
+        // Existing file is corrupt — fall through and regenerate.
         let id = Uuid::now_v7();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;

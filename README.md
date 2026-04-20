@@ -18,7 +18,7 @@ Workspace management library for indexing, search, and sync of Markdown document
 
 ```toml
 [dependencies]
-sapphire-workspace = "0.7"
+sapphire-workspace = "0.10"
 ```
 
 ### Initialise a workspace
