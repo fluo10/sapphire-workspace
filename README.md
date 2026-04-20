@@ -120,7 +120,6 @@ Place `config.toml` inside the marker directory
 backend  = "git"   # "auto" | "git" | "none"
 remote   = "origin"
 branch   = "main"
-# sync_interval_minutes = 30  # optional: run a full sync cycle every N minutes
 
 [retrieve]
 db = "lancedb"   # "none" | "sqlite_vec" | "lancedb"

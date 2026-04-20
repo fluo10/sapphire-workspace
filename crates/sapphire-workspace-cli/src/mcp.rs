@@ -196,10 +196,6 @@ impl ServerHandler for RecallServer {
 
 #[tokio::main]
 pub async fn run(workspace_dir: Option<&Path>) -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .init();
-
     let server = RecallServer::new(workspace_dir.map(|p| p.to_path_buf()));
     let service = server.serve(stdio()).await?;
     service.waiting().await?;

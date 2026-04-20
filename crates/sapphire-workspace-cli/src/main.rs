@@ -8,6 +8,30 @@ use sapphire_workspace::AppContext;
 
 pub static WORKSPACE_CTX: AppContext = AppContext::new("sapphire-workspace");
 
+/// Resolve and inject the host platform's cache and data directories into
+/// [`WORKSPACE_CTX`].  The library deliberately does not depend on `dirs`,
+/// so the CLI must do this once at startup.
+fn init_workspace_ctx() {
+    let cache_dir = dirs::cache_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join(WORKSPACE_CTX.app_name);
+    let data_dir = dirs::data_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join(WORKSPACE_CTX.app_name);
+    WORKSPACE_CTX.set_cache_dir(cache_dir);
+    WORKSPACE_CTX.set_data_dir(data_dir);
+}
+
+/// Install a stderr tracing subscriber for the whole CLI, so
+/// `tracing::error!` / `warn!` from any command surface to the user.
+/// `try_init` makes this safe to call even if a subcommand (e.g. the MCP
+/// server) re-enters this function.
+fn init_tracing() {
+    let _ = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .try_init();
+}
+
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -89,6 +113,9 @@ enum CacheCommand {
 }
 
 fn main() -> anyhow::Result<()> {
+    init_tracing();
+    init_workspace_ctx();
+
     let cli = Cli::parse();
     let workspace_dir = cli.workspace_dir.as_deref();
 

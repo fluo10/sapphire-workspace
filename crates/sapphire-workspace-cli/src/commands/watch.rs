@@ -6,31 +6,32 @@ use anyhow::Result;
 use notify_debouncer_mini::{DebounceEventResult, Debouncer, new_debouncer, notify};
 use sapphire_workspace::WorkspaceState;
 
+use crate::WORKSPACE_CTX;
 use crate::commands::sync::open_workspace;
 
 pub fn run(workspace_dir: Option<&Path>, debounce_ms: u64) -> Result<()> {
-    // Ensure a device_id is set before loading the final config.
-    if let Err(e) = crate::config::ensure_device_id() {
-        eprintln!("warning: could not persist device_id: {e}");
-    }
+    let device_id = match WORKSPACE_CTX.device_id() {
+        Ok(id) => Some(id),
+        Err(e) => {
+            tracing::error!("could not persist device_id: {e}");
+            None
+        }
+    };
 
     let (workspace, config) = open_workspace(workspace_dir)?;
 
     let watch_root = workspace.root.clone();
-    let git_sync_interval = config.sync.sync_interval();
-    let retrieve_interval = config.retrieve.sync_interval();
+    let sync_interval = config.sync_interval();
 
-    let state = Arc::new(WorkspaceState::open_configured(workspace, &config.sync)?);
+    let state = Arc::new(WorkspaceState::open_configured(
+        workspace,
+        &config.sync,
+        device_id,
+    )?);
 
     println!("watching: {}", watch_root.display());
-    if let Some(interval) = git_sync_interval {
-        println!("git sync interval: every {} min", interval.as_secs() / 60);
-    }
-    if let Some(interval) = retrieve_interval {
-        println!(
-            "retrieve refresh interval: every {} min",
-            interval.as_secs() / 60
-        );
+    if let Some(interval) = sync_interval {
+        println!("sync interval: every {} min", interval.as_secs() / 60);
     }
     println!("press Ctrl+C to stop");
 
@@ -46,19 +47,10 @@ pub fn run(workspace_dir: Option<&Path>, debounce_ms: u64) -> Result<()> {
         .watcher()
         .watch(&watch_root, notify::RecursiveMode::Recursive)?;
 
-    let mut last_git_sync = Instant::now();
-    let mut last_retrieve_sync = Instant::now();
+    let mut last_periodic_sync = Instant::now();
 
     loop {
-        // Compute the next wake-up as the minimum of the two timers' remaining
-        // durations (or None if neither timer is active).
-        let timeout = [
-            git_sync_interval.map(|i| i.saturating_sub(last_git_sync.elapsed())),
-            retrieve_interval.map(|i| i.saturating_sub(last_retrieve_sync.elapsed())),
-        ]
-        .into_iter()
-        .flatten()
-        .min();
+        let timeout = sync_interval.map(|i| i.saturating_sub(last_periodic_sync.elapsed()));
 
         let result = match timeout {
             Some(t) => rx.recv_timeout(t),
@@ -67,30 +59,17 @@ pub fn run(workspace_dir: Option<&Path>, debounce_ms: u64) -> Result<()> {
                 .map_err(|_| std::sync::mpsc::RecvTimeoutError::Disconnected),
         };
 
-        // Check and run git sync if its interval has elapsed.
-        let run_git_sync = |last: &mut Instant| {
-            if let Some(interval) = git_sync_interval {
+        // Run the periodic sync cycle (git sync + retrieve cache refresh) when
+        // its interval has elapsed.
+        let run_periodic_sync = |last: &mut Instant| {
+            if let Some(interval) = sync_interval {
                 if last.elapsed() >= interval {
-                    print!("git sync... ");
-                    match state_clone.sync_git() {
-                        Ok(()) => println!("done"),
-                        Err(e) => eprintln!("git sync error: {e}"),
-                    }
-                    *last = Instant::now();
-                }
-            }
-        };
-
-        // Check and run retrieve cache refresh if its interval has elapsed.
-        let run_retrieve_sync = |last: &mut Instant| {
-            if let Some(interval) = retrieve_interval {
-                if last.elapsed() >= interval {
-                    print!("retrieve refresh... ");
-                    match state_clone.sync_retrieve() {
+                    print!("periodic sync... ");
+                    match state_clone.periodic_sync() {
                         Ok((upserted, removed)) => {
                             println!("done (upserted: {upserted}, removed: {removed})")
                         }
-                        Err(e) => eprintln!("retrieve refresh error: {e}"),
+                        Err(e) => eprintln!("periodic sync error: {e}"),
                     }
                     *last = Instant::now();
                 }
@@ -124,13 +103,11 @@ pub fn run(workspace_dir: Option<&Path>, debounce_ms: u64) -> Result<()> {
                         }
                     }
                 }
-                run_git_sync(&mut last_git_sync);
-                run_retrieve_sync(&mut last_retrieve_sync);
+                run_periodic_sync(&mut last_periodic_sync);
             }
             Ok(Err(e)) => eprintln!("watch error: {e}"),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                run_git_sync(&mut last_git_sync);
-                run_retrieve_sync(&mut last_retrieve_sync);
+                run_periodic_sync(&mut last_periodic_sync);
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         }

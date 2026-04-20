@@ -2,19 +2,37 @@ use std::path::{Path, PathBuf};
 
 use git2::{Cred, FetchOptions, MergeOptions, PushOptions, RemoteCallbacks, Repository, Signature};
 use tracing::{info, warn};
+use uuid::Uuid;
 
 use crate::{Error, Result, SyncBackend};
 
 /// Git-based sync backend: stages file changes via `libgit2`.
 ///
 /// Each operation re-opens the repository to avoid holding a non-`Sync` handle.
+///
+/// Auto-sync commits use a fixed message format that callers cannot override:
+///
+/// - Without a configured device id: `"auto: sync"`.
+/// - With a device id (via [`with_device_id`](Self::with_device_id)):
+///
+///   ```text
+///   auto: sync by [<display>]
+///
+///   Device-Id: <uuid>
+///   ```
+///
+///   The `Device-Id` trailer follows `git interpret-trailers` conventions
+///   so the origin of each sync can be recovered even if the first-line
+///   display name changes later.
 pub struct GitSync {
     /// Starting path for repository discovery (repo root or any subdirectory).
     search_path: PathBuf,
     /// Remote name (default: "origin").
     remote: String,
-    /// Commit message used when staging changes (default: `"auto: sync"`).
-    commit_message: String,
+    /// Per-device identifier embedded in the commit subject and as a
+    /// `Device-Id` trailer.  `None` falls back to the plain `"auto: sync"`
+    /// subject with no trailer.
+    device_id: Option<Uuid>,
 }
 
 impl GitSync {
@@ -28,7 +46,7 @@ impl GitSync {
         Ok(Self {
             search_path: path.to_owned(),
             remote: "origin".to_owned(),
-            commit_message: "auto: sync".to_owned(),
+            device_id: None,
         })
     }
 
@@ -40,14 +58,30 @@ impl GitSync {
         Ok(Self {
             search_path: path.to_owned(),
             remote: remote.to_owned(),
-            commit_message: "auto: sync".to_owned(),
+            device_id: None,
         })
     }
 
-    /// Override the commit message used when staging changes.
-    pub fn with_commit_message(mut self, message: impl Into<String>) -> Self {
-        self.commit_message = message.into();
+    /// Attach a device id.  Auto-sync commits will embed it in the subject
+    /// line and as a `Device-Id` trailer (see the [`GitSync`] docs for the
+    /// exact format).
+    pub fn with_device_id(mut self, id: Uuid) -> Self {
+        self.device_id = Some(id);
         self
+    }
+
+    fn commit_message(&self) -> String {
+        match self.device_id {
+            None => "auto: sync".to_owned(),
+            Some(id) => {
+                // For now the display name on the subject line is just the
+                // UUID.  When a device-name resolver lands, swap the
+                // `display` binding for the resolved name and keep the
+                // trailer untouched so rename-safe tracing still works.
+                let display = id.to_string();
+                format!("auto: sync by [{display}]\n\nDevice-Id: {id}\n")
+            }
+        }
     }
 
     fn with_repo<F, T>(&self, f: F) -> Result<T>
@@ -344,7 +378,7 @@ impl SyncBackend for GitSync {
     /// Full git sync cycle: commit staged changes → fetch+merge remote → push.
     fn sync(&self) -> Result<()> {
         let remote = self.remote.clone();
-        let message = self.commit_message.clone();
+        let message = self.commit_message();
         self.with_repo(|repo, _workdir| {
             Self::commit_staged(repo, &message)?;
             Self::sync_git(repo, &remote)?;

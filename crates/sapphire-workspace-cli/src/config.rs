@@ -1,10 +1,14 @@
 //! User config for `sapphire-workspace-cli`.
 //!
-//! All settings are read from a single user-level file
+//! Settings are read from a single user-level file
 //! (`$XDG_CONFIG_HOME/sapphire-workspace-cli/config.toml`).
 //! There is no workspace-level config layer — every setting is per-host.
+//!
+//! The auto-generated device id lives in [`AppContext::device_id`], stored
+//! at `<data_dir>/device_id`, so the CLI never has to rewrite the
+//! user-edited `config.toml`.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use sapphire_workspace::{EmbeddingConfig, RetrieveConfig, SyncConfig, VectorDb};
@@ -17,21 +21,20 @@ use crate::WORKSPACE_CTX;
 /// Per-user (per-host) configuration.
 ///
 /// Stored at `$XDG_CONFIG_HOME/sapphire-workspace-cli/config.toml`.
-/// All settings here are host-specific: the embedding model depends on
-/// local hardware, and `sync.device_id` must be unique per device.
+/// All settings here are host-specific (e.g. the embedding model depends on
+/// local hardware).
 ///
 /// TOML structure:
 ///
 /// ```toml
+/// sync_interval_minutes = 15
+///
 /// [sync]
 /// backend = "git"
 /// remote = "origin"
-/// sync_interval_minutes = 15
-/// device_id = "..."
 ///
 /// [retrieve]
 /// db = "sqlite_vec"
-/// sync_interval_minutes = 30
 ///
 /// [retrieve.embedding]
 /// enabled = true
@@ -40,6 +43,12 @@ use crate::WORKSPACE_CTX;
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct UserConfig {
+    /// How often the `watch` command runs the periodic sync cycle
+    /// (git sync + retrieve cache refresh), in minutes.
+    ///
+    /// Unset or `0` disables periodic sync entirely.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_interval_minutes: Option<u32>,
     #[serde(default)]
     pub sync: SyncConfig,
     #[serde(default)]
@@ -72,21 +81,13 @@ impl UserConfig {
         Ok(config)
     }
 
-    /// Serialize and write to `path` (creates parent directories).
-    pub fn save_to(&self, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create dir {}", parent.display()))?;
-        }
-        let contents = toml::to_string_pretty(self).context("failed to serialize config")?;
-        std::fs::write(path, contents)
-            .with_context(|| format!("failed to write config to {}", path.display()))?;
-        Ok(())
-    }
-
-    /// Serialize and write to the canonical [`UserConfig::path`].
-    pub fn save(&self) -> Result<()> {
-        self.save_to(&Self::path())
+    /// Returns the periodic sync interval as a [`std::time::Duration`], or
+    /// `None` if periodic sync is disabled (`sync_interval_minutes` is unset
+    /// or `0`).
+    pub fn sync_interval(&self) -> Option<std::time::Duration> {
+        self.sync_interval_minutes
+            .filter(|&m| m > 0)
+            .map(|m| std::time::Duration::from_secs(m as u64 * 60))
     }
 
     fn apply_env_overrides(&mut self) {
@@ -154,19 +155,4 @@ impl UserConfig {
 /// Returns the default `UserConfig` if the file does not exist.
 pub fn load_user_config() -> Result<UserConfig> {
     UserConfig::load()
-}
-
-/// Ensure `sync.device_id` is present in the user config.
-///
-/// If absent, a random UUID v4 is generated and written back to the user
-/// config file. Errors are propagated so the caller can decide whether to
-/// abort or continue without a device ID.
-pub fn ensure_device_id() -> Result<()> {
-    let mut config = UserConfig::load().context("failed to load user config for device_id")?;
-    if config.sync.ensure_device_id() {
-        config
-            .save()
-            .context("failed to write device_id to user config")?;
-    }
-    Ok(())
 }

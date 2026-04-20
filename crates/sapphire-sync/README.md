@@ -21,7 +21,6 @@ Git-based workspace synchronisation library for [sapphire-journal](https://githu
 backend  = "auto"   # "auto" | "git" | "none"
 remote   = "origin"
 branch   = "main"
-# sync_interval_minutes = 30  # optional periodic sync
 ```
 
 `backend = "auto"` (default) enables git sync when the workspace is inside a git repository and falls back to no-op otherwise.

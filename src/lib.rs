@@ -8,8 +8,7 @@ mod error;
 pub use error::{Error, Result};
 
 pub use config::{
-    EmbeddingConfig, HybridConfig, RetrieveConfig, SyncBackendKind, SyncConfig, UserSyncConfig,
-    VectorDb, WorkspaceSyncConfig,
+    EmbeddingConfig, HybridConfig, RetrieveConfig, SyncBackendKind, SyncConfig, VectorDb,
 };
 pub use context::AppContext;
 pub use indexer::path_to_doc_id;
