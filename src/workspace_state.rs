@@ -100,7 +100,13 @@ fn canonicalize_or_parent(path: &Path) -> std::io::Result<PathBuf> {
     loop {
         if let Some(parent) = current.parent() {
             let name = current.file_name().unwrap_or(current.as_os_str());
-            suffix = Path::new(name).join(&suffix);
+            // `Path::join` with an empty path appends a trailing separator, so
+            // seed `suffix` with `name` on the first iteration instead.
+            suffix = if suffix.as_os_str().is_empty() {
+                PathBuf::from(name)
+            } else {
+                Path::new(name).join(&suffix)
+            };
             match parent.canonicalize() {
                 Ok(canon) => return Ok(canon.join(suffix)),
                 Err(_) => current = parent,
@@ -803,5 +809,68 @@ impl WorkspaceState {
             #[cfg(not(feature = "lancedb-store"))]
             VectorDb::LanceDb => Err(crate::error::Error::LanceDbNotEnabled),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression for #48: `canonicalize_or_parent` previously returned a path
+    /// with a trailing separator for not-yet-existing files, which caused
+    /// `std::fs::write` to fail with `EISDIR` when creating a new file.
+    #[test]
+    fn canonicalize_or_parent_no_trailing_separator_for_new_file() {
+        let tmp = std::env::temp_dir()
+            .canonicalize()
+            .expect("temp dir canonicalizes");
+        let unique = format!(
+            "sapphire-workspace-test-{}-{}.md",
+            std::process::id(),
+            uuid::Uuid::now_v7()
+        );
+        let new_file = tmp.join(&unique);
+        assert!(!new_file.exists(), "fixture path should not exist");
+
+        let resolved = canonicalize_or_parent(&new_file).expect("resolves");
+
+        assert_eq!(
+            resolved.file_name().and_then(|s| s.to_str()),
+            Some(unique.as_str()),
+            "file_name must survive the walk-up: got {resolved:?}",
+        );
+        assert_eq!(resolved.parent(), Some(tmp.as_path()));
+
+        // The canonical bug signature: a trailing separator made `std::fs::write`
+        // fail with `IsADirectory`. Writing to the resolved path must succeed.
+        std::fs::write(&resolved, b"hello").expect("write must succeed");
+        std::fs::remove_file(&resolved).ok();
+    }
+
+    #[test]
+    fn canonicalize_or_parent_handles_multiple_missing_components() {
+        let tmp = std::env::temp_dir()
+            .canonicalize()
+            .expect("temp dir canonicalizes");
+        let unique = format!(
+            "sapphire-workspace-test-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7()
+        );
+        let nested = tmp.join(&unique).join("sub").join("leaf.md");
+
+        let resolved = canonicalize_or_parent(&nested).expect("resolves");
+
+        assert!(resolved.starts_with(&tmp));
+        assert_eq!(
+            resolved.file_name().and_then(|s| s.to_str()),
+            Some("leaf.md"),
+            "innermost component must be preserved: got {resolved:?}",
+        );
+        let bytes = resolved.as_os_str().as_encoded_bytes();
+        assert!(
+            !bytes.ends_with(b"/") && !bytes.ends_with(b"\\"),
+            "resolved path must not have a trailing separator: got {resolved:?}",
+        );
     }
 }
