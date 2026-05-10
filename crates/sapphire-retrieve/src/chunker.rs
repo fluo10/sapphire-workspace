@@ -4,8 +4,8 @@
 //! indexable text chunks, and built-in implementations for common file formats:
 //!
 //! - [`MarkdownChunker`] — paragraph-based chunker for Markdown/plain-text files.
-//! - [`JsonChunker`] — message-level chunker for JSON and JSONL files (AI
-//!   conversation logs from apps such as SillyTavern, Zerolaw, etc.).
+//! - [`JsonlChunker`] — line-based chunker for JSONL files (one JSON object
+//!   per line; AI conversation logs from apps such as SillyTavern, etc.).
 //!
 //! # Source positions
 //!
@@ -21,21 +21,20 @@
 //! |--------|--------------|-----------|
 //! | Markdown paragraph | line of the first non-blank char | line of the last non-blank char |
 //! | JSONL line | line index of the JSON line | same |
-//! | JSON array element | line of the opening `{` | line of the closing `}` |
 //!
 //! # Example
 //!
 //! ```no_run
-//! use sapphire_retrieve::chunker::{Chunker, JsonChunker, MarkdownChunker};
+//! use sapphire_retrieve::chunker::{Chunker, JsonlChunker, MarkdownChunker};
 //!
 //! let md = MarkdownChunker;
 //! let chunks = md.chunk("My note", "First paragraph.\n\nSecond paragraph.");
 //! assert_eq!(chunks[0].line_start, 0);
 //! assert_eq!(chunks[1].line_start, 2);
 //!
-//! let json = JsonChunker;
-//! let jsonl = "{\"role\":\"user\",\"content\":\"Hello\"}\n{\"role\":\"assistant\",\"content\":\"Hi\"}";
-//! let chunks = json.chunk("chat.jsonl", jsonl);
+//! let jsonl = JsonlChunker;
+//! let log = "{\"role\":\"user\",\"content\":\"Hello\"}\n{\"role\":\"assistant\",\"content\":\"Hi\"}";
+//! let chunks = jsonl.chunk("chat.jsonl", log);
 //! assert_eq!(chunks[0].line_start, 0);
 //! assert_eq!(chunks[1].line_start, 1);
 //! ```
@@ -159,22 +158,17 @@ fn push_para_chunk(chunks: &mut Vec<TextChunk>, part: &str, abs_line: usize) {
     });
 }
 
-// ── JsonChunker ───────────────────────────────────────────────────────────────
+// ── JsonlChunker ──────────────────────────────────────────────────────────────
 
-/// Message-level chunker for JSON and JSONL files.
+/// Line-based chunker for JSONL files (one JSON object per line).
 ///
-/// Handles three layouts automatically:
+/// Each non-empty line becomes one chunk with
+/// `line_start == line_end == <line index>`.  This makes JSONL log appends
+/// maximally cache-friendly: existing lines retain their identity (keyed by
+/// `line_start`), so only newly-appended lines need to be re-embedded.
 ///
-/// 1. **JSONL** (one JSON object per line) — each line becomes one chunk.
-///    `line_start == line_end == <line index>`.
-/// 2. **JSON top-level array** — each element becomes one chunk.  The source
-///    line range of each element is tracked by scanning the raw text.
-/// 3. **JSON object with a messages/chat field** — extracts the nested array
-///    (`"messages"`, `"chat"`, `"history"`, or `"log"` key) and treats each
-///    element as a chunk.  Falls back to a single chunk for other objects.
-///
-/// Within each JSON element the chunker extracts human-readable text by
-/// probing common field names:
+/// Within each line the chunker extracts human-readable text by probing common
+/// field names (matches typical chat-log shapes from SillyTavern, OpenAI, etc.):
 ///
 /// | Priority | Content field | Speaker/role field |
 /// |----------|---------------|--------------------|
@@ -184,237 +178,42 @@ fn push_para_chunk(chunks: &mut Vec<TextChunk>, part: &str, abs_line: usize) {
 /// | 4th | `"text"` | `"author"` |
 /// | fallback | string-valued fields joined | — |
 ///
-/// The resulting `text` for each chunk has the form `"{speaker}: {content}"`
-/// when a speaker field is present, otherwise just `"{content}"`.
-pub struct JsonChunker;
+/// The resulting `text` has the form `"{speaker}: {content}"` when a speaker
+/// field is present, otherwise just `"{content}"`.  Lines that fail to parse
+/// as JSON are kept as raw text so partial writes don't break indexing.
+pub struct JsonlChunker;
 
-impl Chunker for JsonChunker {
-    fn chunk(&self, _title: &str, content: &str) -> Vec<TextChunk> {
-        if let Some(chunks) = try_parse_jsonl(content) {
-            return chunks;
-        }
-
-        match serde_json::from_str::<serde_json::Value>(content) {
-            Ok(value) => chunks_from_json_value(content, &value),
-            Err(_) => {
-                vec![TextChunk {
-                    line_start: 0,
-                    line_end: count_newlines(content),
-                    text: normalise(content),
-                }]
+impl Chunker for JsonlChunker {
+    fn chunk(&self, title: &str, content: &str) -> Vec<TextChunk> {
+        let mut chunks: Vec<TextChunk> = Vec::new();
+        for (line_idx, line_text) in content.lines().enumerate() {
+            if line_text.trim().is_empty() {
+                continue;
             }
-        }
-    }
-}
-
-// ── JSONL parsing ─────────────────────────────────────────────────────────────
-
-fn try_parse_jsonl(content: &str) -> Option<Vec<TextChunk>> {
-    let non_empty_lines: Vec<(usize, &str)> = content
-        .lines()
-        .enumerate()
-        .filter(|(_, l)| !l.trim().is_empty())
-        .collect();
-
-    if non_empty_lines.len() < 2 {
-        return None;
-    }
-
-    let mut chunks = Vec::with_capacity(non_empty_lines.len());
-    for (line_idx, line_text) in &non_empty_lines {
-        match serde_json::from_str::<serde_json::Value>(line_text) {
-            Ok(v) => chunks.push(TextChunk {
-                line_start: *line_idx,
-                line_end: *line_idx,
-                text: extract_message_text(&v),
-            }),
-            Err(_) => return None,
-        }
-    }
-    Some(chunks)
-}
-
-// ── JSON value → chunks ───────────────────────────────────────────────────────
-
-fn chunks_from_json_value(raw: &str, value: &serde_json::Value) -> Vec<TextChunk> {
-    match value {
-        serde_json::Value::Array(arr) => {
-            let positions = find_array_element_lines(raw);
-            arr.iter()
-                .enumerate()
-                .map(|(i, v)| {
-                    let (line_start, line_end) = positions.get(i).copied().unwrap_or((i, i));
-                    TextChunk {
-                        line_start,
-                        line_end,
-                        text: extract_message_text(v),
-                    }
-                })
-                .collect()
-        }
-        serde_json::Value::Object(map) => {
-            const ARRAY_KEYS: &[&str] = &["messages", "chat", "history", "log"];
-            for key in ARRAY_KEYS {
-                if let Some(serde_json::Value::Array(arr)) = map.get(*key)
-                    && !arr.is_empty()
-                {
-                    let nested_positions = find_nested_array_lines(raw, key);
-                    return arr
-                        .iter()
-                        .enumerate()
-                        .map(|(i, v)| {
-                            let (line_start, line_end) =
-                                nested_positions.get(i).copied().unwrap_or((i, i));
-                            TextChunk {
-                                line_start,
-                                line_end,
-                                text: extract_message_text(v),
-                            }
-                        })
-                        .collect();
-                }
+            let text = match serde_json::from_str::<serde_json::Value>(line_text) {
+                Ok(v) => extract_message_text(&v),
+                Err(_) => normalise(line_text),
+            };
+            if text.is_empty() {
+                continue;
             }
+            chunks.push(TextChunk {
+                line_start: line_idx,
+                line_end: line_idx,
+                text,
+            });
+        }
+
+        if chunks.is_empty() {
             vec![TextChunk {
                 line_start: 0,
-                line_end: count_newlines(raw),
-                text: extract_message_text(value),
+                line_end: 0,
+                text: title.to_owned(),
             }]
+        } else {
+            chunks
         }
-        other => vec![TextChunk {
-            line_start: 0,
-            line_end: count_newlines(raw),
-            text: normalise(&other.to_string()),
-        }],
     }
-}
-
-// ── source-position scanning ──────────────────────────────────────────────────
-
-/// Scan `raw` JSON text for the line range of each top-level array element.
-///
-/// Returns `(line_start, line_end)` tuples (inclusive, 0-based).
-fn find_array_element_lines(raw: &str) -> Vec<(usize, usize)> {
-    let start = match raw.find('[') {
-        Some(i) => i + 1,
-        None => return vec![],
-    };
-    scan_array_element_lines(raw, start)
-}
-
-fn find_nested_array_lines(raw: &str, key: &str) -> Vec<(usize, usize)> {
-    let needle = format!("\"{key}\"");
-    let key_pos = match raw.find(&needle) {
-        Some(p) => p + needle.len(),
-        None => return vec![],
-    };
-    let after_key = &raw[key_pos..];
-    let bracket_offset = match after_key.find('[') {
-        Some(i) => i + 1,
-        None => return vec![],
-    };
-    let abs_start = key_pos + bracket_offset;
-    scan_array_element_lines(raw, abs_start)
-}
-
-/// Scan `raw[start..]` for the `(line_start, line_end)` of each direct child
-/// element of a JSON array.  `start` is the byte offset just after the opening
-/// `[`.  Both values are inclusive 0-based line numbers.
-fn scan_array_element_lines(raw: &str, start: usize) -> Vec<(usize, usize)> {
-    let mut ranges: Vec<(usize, usize)> = Vec::new();
-    let bytes = raw.as_bytes();
-    let len = bytes.len();
-
-    let prefix = &raw[..start.min(len)];
-    let mut line = count_newlines(prefix);
-
-    let mut depth: i32 = 0;
-    let mut in_string = false;
-    let mut escaped = false;
-    let mut i = start.min(len);
-
-    // Track the currently-open element's start line so we can pair it with
-    // its end when depth returns to 0.
-    let mut current_start: Option<usize> = None;
-
-    while i < len {
-        let b = bytes[i];
-
-        if escaped {
-            escaped = false;
-            if b == b'\n' {
-                line += 1;
-            }
-            i += 1;
-            continue;
-        }
-
-        if in_string {
-            if b == b'\\' {
-                escaped = true;
-            } else if b == b'"' {
-                in_string = false;
-                if depth == 0 && current_start.is_some() {
-                    // Top-level string element ends at this closing quote.
-                    let s = current_start.take().unwrap();
-                    ranges.push((s, line));
-                }
-            }
-            if b == b'\n' {
-                line += 1;
-            }
-            i += 1;
-            continue;
-        }
-
-        match b {
-            b'"' => {
-                in_string = true;
-                if depth == 0 && current_start.is_none() {
-                    current_start = Some(line);
-                }
-            }
-            b'{' | b'[' => {
-                if depth == 0 && current_start.is_none() {
-                    current_start = Some(line);
-                }
-                depth += 1;
-            }
-            b'}' | b']' => {
-                depth -= 1;
-                if depth < 0 {
-                    break;
-                }
-                if depth == 0 && current_start.is_some() {
-                    let s = current_start.take().unwrap();
-                    ranges.push((s, line));
-                }
-            }
-            b',' if depth == 0 => {
-                // Close any pending scalar element at this comma.
-                if let Some(s) = current_start.take() {
-                    ranges.push((s, line));
-                }
-            }
-            b'0'..=b'9' | b'-' | b't' | b'f' | b'n' if depth == 0 => {
-                if current_start.is_none() {
-                    current_start = Some(line);
-                }
-            }
-            b'\n' => {
-                line += 1;
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-
-    // If a scalar is still open when we break (trailing element before `]`),
-    // close it at the current line.
-    if let Some(s) = current_start.take() {
-        ranges.push((s, line));
-    }
-
-    ranges
 }
 
 // ── message text extraction ───────────────────────────────────────────────────
@@ -554,11 +353,11 @@ mod tests {
         assert_eq!(chunks[0].text, "Title");
     }
 
-    // ── JsonChunker ──────────────────────────────────────────────────────────
+    // ── JsonlChunker ─────────────────────────────────────────────────────────
 
     #[test]
     fn jsonl_line_ranges() {
-        let c = JsonChunker;
+        let c = JsonlChunker;
         let jsonl = concat!(
             "{\"name\":\"User\",\"is_user\":true,\"mes\":\"Hello there\"}\n",
             "{\"name\":\"Aria\",\"is_user\":false,\"mes\":\"Hi! How can I help?\"}"
@@ -574,51 +373,10 @@ mod tests {
     }
 
     #[test]
-    fn json_openai_messages() {
-        let c = JsonChunker;
-        let json = "{\n  \"messages\": [\n    {\"role\":\"user\",\"content\":\"What is 2+2?\"},\n    {\"role\":\"assistant\",\"content\":\"4\"}\n  ]\n}";
-        let chunks = c.chunk("session.json", json);
-        assert_eq!(chunks.len(), 2);
-        // Both message objects are single-line in this layout.
-        assert_eq!(chunks[0].line_start, chunks[0].line_end);
-        assert_eq!(chunks[1].line_start, chunks[1].line_end);
-        assert!(chunks[0].line_start >= 2);
-        assert!(chunks[1].line_start > chunks[0].line_start);
-    }
-
-    #[test]
-    fn json_array() {
-        let c = JsonChunker;
-        let json = "[\n  {\"role\":\"user\",\"content\":\"Ping\"},\n  {\"role\":\"assistant\",\"content\":\"Pong\"}\n]";
-        let chunks = c.chunk("msgs.json", json);
-        assert_eq!(chunks.len(), 2);
-        assert!(chunks[0].text.contains("Ping"));
-        assert!(chunks[1].text.contains("Pong"));
-        assert!(chunks[0].line_start >= 1);
-        assert_eq!(chunks[0].line_start, chunks[0].line_end);
-    }
-
-    #[test]
-    fn json_array_multiline_element() {
-        let c = JsonChunker;
-        // A single pretty-printed element spanning multiple lines.
-        let json = "[\n  {\n    \"role\": \"user\",\n    \"content\": \"Hello\"\n  }\n]";
-        let chunks = c.chunk("msgs.json", json);
-        assert_eq!(chunks.len(), 1);
-        assert!(chunks[0].line_start >= 1);
-        assert!(
-            chunks[0].line_end > chunks[0].line_start,
-            "expected multi-line range, got {}..={}",
-            chunks[0].line_start,
-            chunks[0].line_end
-        );
-    }
-
-    #[test]
-    fn json_single_object() {
-        let c = JsonChunker;
-        let json = "{\"role\":\"user\",\"content\":\"Just one message\"}";
-        let chunks = c.chunk("single.json", json);
+    fn jsonl_single_line() {
+        let c = JsonlChunker;
+        let jsonl = "{\"role\":\"user\",\"content\":\"Just one message\"}";
+        let chunks = c.chunk("single.jsonl", jsonl);
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].line_start, 0);
         assert_eq!(chunks[0].line_end, 0);
@@ -626,8 +384,61 @@ mod tests {
     }
 
     #[test]
-    fn text_has_no_double_newline() {
-        let c = JsonChunker;
+    fn jsonl_skips_blank_lines_preserves_indices() {
+        // Blank lines must not produce chunks, but surviving chunks retain
+        // their absolute line index so cache identity is preserved across
+        // unrelated edits.
+        let c = JsonlChunker;
+        let jsonl = "{\"content\":\"first\"}\n\n{\"content\":\"third\"}";
+        let chunks = c.chunk("log.jsonl", jsonl);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].line_start, 0);
+        assert_eq!(chunks[1].line_start, 2);
+    }
+
+    #[test]
+    fn jsonl_unparseable_line_falls_back_to_raw() {
+        let c = JsonlChunker;
+        // Second line is mid-write garbage — keep it as raw text instead of
+        // dropping it entirely.
+        let jsonl = "{\"content\":\"ok\"}\n{not json";
+        let chunks = c.chunk("log.jsonl", jsonl);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].line_start, 0);
+        assert_eq!(chunks[1].line_start, 1);
+        assert!(chunks[1].text.contains("not json"));
+    }
+
+    #[test]
+    fn jsonl_append_preserves_existing_line_starts() {
+        // Append-stability is the whole reason this chunker exists: appending
+        // a new line must not change the (line_start, text) tuple of any
+        // existing chunk, so the storage layer's chunk-level diff treats the
+        // old chunks as unchanged and skips re-embedding.
+        let c = JsonlChunker;
+        let before = "{\"content\":\"a\"}\n{\"content\":\"b\"}";
+        let after = "{\"content\":\"a\"}\n{\"content\":\"b\"}\n{\"content\":\"c\"}";
+        let before_chunks = c.chunk("log.jsonl", before);
+        let after_chunks = c.chunk("log.jsonl", after);
+        assert_eq!(before_chunks.len(), 2);
+        assert_eq!(after_chunks.len(), 3);
+        for (b, a) in before_chunks.iter().zip(after_chunks.iter()) {
+            assert_eq!(b.line_start, a.line_start);
+            assert_eq!(b.text, a.text);
+        }
+    }
+
+    #[test]
+    fn jsonl_empty_body_returns_title() {
+        let c = JsonlChunker;
+        let chunks = c.chunk("empty.jsonl", "");
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].text, "empty.jsonl");
+    }
+
+    #[test]
+    fn jsonl_text_has_no_double_newline() {
+        let c = JsonlChunker;
         let jsonl = concat!(
             "{\"role\":\"user\",\"content\":\"Line one\\n\\nLine two\"}\n",
             "{\"role\":\"assistant\",\"content\":\"OK\"}"

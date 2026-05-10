@@ -10,7 +10,7 @@ pub mod retrieve_store;
 pub mod sqlite_store;
 pub mod vector_store;
 
-pub use chunker::{Chunker, JsonChunker, MarkdownChunker, TextChunk};
+pub use chunker::{Chunker, JsonlChunker, MarkdownChunker, TextChunk};
 pub use config::{EmbeddingConfig, HybridConfig, RetrieveConfig, VectorDb};
 pub use db::open_in_memory;
 #[cfg(feature = "lancedb-store")]
