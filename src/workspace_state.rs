@@ -6,7 +6,8 @@ use sapphire_retrieve::db::SCHEMA_VERSION;
 #[cfg(feature = "lancedb-store")]
 use sapphire_retrieve::open_lancedb;
 use sapphire_retrieve::{
-    Document, Embedder, FileSearchResult, FtsQuery, HybridQuery, RetrieveStore, VectorQuery,
+    Chunker, Document, Embedder, FileSearchResult, FtsQuery, HybridQuery, JsonlChunker,
+    RetrieveStore, VectorQuery,
 };
 #[cfg(feature = "sqlite-store")]
 use sapphire_retrieve::{open_sqlite_fts, open_sqlite_vec};
@@ -323,6 +324,12 @@ impl WorkspaceState {
     ///
     /// Reads the file from disk, upserts it into the retrieve DB, and calls
     /// `sync_backend.add_file` when a backend is attached.
+    ///
+    /// JSONL files are pre-chunked line-by-line so that an append only
+    /// produces new chunks at the tail; existing lines retain their
+    /// `(doc_id, line_start)` identity in the chunk store and are not
+    /// re-embedded.  Other file types fall through to the storage layer's
+    /// default paragraph chunker.
     pub fn on_file_updated(&self, path: &Path) -> Result<()> {
         let resolved = self.resolve_path(path)?;
         if !resolved.is_internal() {
@@ -344,14 +351,45 @@ impl WorkspaceState {
         let body = std::fs::read_to_string(abs)?;
         let doc_id = path_to_doc_id(abs);
 
+        let is_jsonl = abs
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case("jsonl"))
+            .unwrap_or(false);
+
+        let doc = if is_jsonl {
+            let file_name = abs
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let text_chunks = JsonlChunker.chunk(&file_name, &body);
+            let stored_body = text_chunks
+                .iter()
+                .map(|c| c.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            let chunks: Vec<(usize, usize, String)> = text_chunks
+                .into_iter()
+                .map(|c| (c.line_start, c.line_end, c.text))
+                .collect();
+            Document {
+                id: doc_id,
+                body: stored_body,
+                path: path_str.clone(),
+                chunks: Some(chunks),
+            }
+        } else {
+            Document {
+                id: doc_id,
+                body,
+                path: path_str.clone(),
+                chunks: None,
+            }
+        };
+
         let db = self.retrieve_db();
         db.upsert_file(&path_str, mtime)?;
-        db.upsert_document(&Document {
-            id: doc_id,
-            body,
-            path: path_str,
-            chunks: None,
-        })?;
+        db.upsert_document(&doc)?;
         db.rebuild_fts()?;
 
         if let Some(sync) = &self.sync_backend {

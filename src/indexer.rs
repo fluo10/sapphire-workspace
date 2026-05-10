@@ -1,6 +1,6 @@
 use std::{collections::HashSet, path::Path, sync::Arc};
 
-use sapphire_retrieve::{Chunker, Document, JsonChunker, RetrieveStore};
+use sapphire_retrieve::{Chunker, Document, JsonlChunker, RetrieveStore};
 
 use crate::{error::Result, workspace::Workspace};
 
@@ -17,7 +17,7 @@ fn file_mtime_secs(path: &Path) -> i64 {
 }
 
 const MARKDOWN_EXTENSIONS: &[&str] = &["md", "markdown", "txt", "rst", "org"];
-const JSON_EXTENSIONS: &[&str] = &["json", "jsonl"];
+const JSONL_EXTENSIONS: &[&str] = &["jsonl"];
 
 /// Generate a stable `i64` document ID from a file path (FNV-1a).
 pub fn path_to_doc_id(path: &Path) -> i64 {
@@ -40,7 +40,6 @@ pub fn path_to_doc_id(path: &Path) -> i64 {
 /// | Extension | Chunking | line range in results |
 /// |-----------|----------|-----------------------|
 /// | `md`, `markdown`, `txt`, `rst`, `org` | paragraph split | start/end line of paragraph |
-/// | `json` | message/element extraction | source line range of element |
 /// | `jsonl` | one message per line | `line_start == line_end` |
 pub fn sync_workspace(
     workspace: &Workspace,
@@ -79,9 +78,9 @@ pub fn sync_workspace(
             .to_lowercase();
 
         let is_markdown = MARKDOWN_EXTENSIONS.contains(&ext.as_str());
-        let is_json = JSON_EXTENSIONS.contains(&ext.as_str());
+        let is_jsonl = JSONL_EXTENSIONS.contains(&ext.as_str());
 
-        if !is_markdown && !is_json {
+        if !is_markdown && !is_jsonl {
             continue;
         }
 
@@ -92,12 +91,12 @@ pub fn sync_workspace(
 
         let doc_id = path_to_doc_id(path);
 
-        let doc = if is_json {
+        let doc = if is_jsonl {
             let file_name = path
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            let text_chunks = JsonChunker.chunk(&file_name, &raw);
+            let text_chunks = JsonlChunker.chunk(&file_name, &raw);
             let body = text_chunks
                 .iter()
                 .map(|c| c.text.as_str())
@@ -189,9 +188,9 @@ pub fn sync_workspace_incremental(
             .to_lowercase();
 
         let is_markdown = MARKDOWN_EXTENSIONS.contains(&ext.as_str());
-        let is_json = JSON_EXTENSIONS.contains(&ext.as_str());
+        let is_jsonl = JSONL_EXTENSIONS.contains(&ext.as_str());
 
-        if !is_markdown && !is_json {
+        if !is_markdown && !is_jsonl {
             continue;
         }
 
@@ -212,12 +211,12 @@ pub fn sync_workspace_incremental(
             Err(_) => continue,
         };
 
-        let doc = if is_json {
+        let doc = if is_jsonl {
             let file_name = path
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            let text_chunks = JsonChunker.chunk(&file_name, &raw);
+            let text_chunks = JsonlChunker.chunk(&file_name, &raw);
             let body = text_chunks
                 .iter()
                 .map(|c| c.text.as_str())
