@@ -5,6 +5,23 @@ All notable changes to `sapphire-workspace` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-05-16
+
+### Changed (breaking)
+
+- `sapphire-retrieve`: `JsonChunker` is renamed to `JsonlChunker` and reduced to per-line JSON parsing with a raw-text fallback for partial writes. The previous array / nested-messages support was unused outside the JSONL path. (#53)
+- `sapphire-workspace`: plain `.json` files are no longer indexed. The bulk indexer and `on_file_updated` now skip them; only `.jsonl` is processed through the JSONL chunker. (#53)
+- `sapphire-workspace`: existing retrieve indexes built on a previous version will have stale chunk boundaries for `.jsonl` files. A re-index is recommended after upgrading so that subsequent appends are picked up incrementally rather than re-embedding the file.
+
+### Performance
+
+- `sapphire-workspace`: `on_file_updated` pre-chunks `.jsonl` files line-by-line instead of falling back to the storage-layer paragraph chunker. Previously every append shifted chunk boundaries and re-embedded most of the file; now existing lines retain their `(doc_id, line_start)` identity and only the appended lines are embedded. (#53)
+
+### Changed
+
+- `sapphire-retrieve`: bump `lancedb` from 0.27 to 0.29 and `arrow-array` / `arrow-schema` from 57 to 58 in lockstep. (#55)
+- `sapphire-workspace`: bump `md-5` from 0.10 to 0.11. (#52)
+
 ## [0.10.1] - 2026-04-22
 
 ### Fixed
@@ -192,6 +209,7 @@ Internal repository restructure; no public API changes.
 - `fastembed-embed`, `lancedb-store`, `sqlite-store`, `git-sync` feature flags.
 - Re-exports of `sapphire-retrieve` and `sapphire-sync` public APIs.
 
+[0.11.0]: https://github.com/fluo10/sapphire-workspace/compare/v0.10.1...v0.11.0
 [0.10.1]: https://github.com/fluo10/sapphire-workspace/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/fluo10/sapphire-workspace/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/fluo10/sapphire-workspace/compare/workspace-v0.8.1...workspace-v0.9.0
