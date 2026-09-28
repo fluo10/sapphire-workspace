@@ -92,13 +92,13 @@ Cargo workspace（モノレポ）。削除済みの crate も削除線で残す 
 | `sapphire-framework-sync` | 転送非依存のレプリケーションコア（wire 型・`ReplicaStore`(redb)・merge・HLC・コンフリクトコピー・フィルタ・外部編集検知） |
 | `sapphire-framework-session` | 2 つのレプリカ間のセッション（フレーミング・vv 交換・差分と内容の転送） |
 | `sapphire-framework-ipc` | ローカル IPC（UDS / 名前付きパイプ / プロセス内チャネル上の NDJSON JSON-RPC、ルータ、`connect` / `probe`） |
-| `sapphire-framework-server` | アプリサーバ骨格（`workspace.*` 名前空間・多重管理・`FrameworkCommand` — `serve` / `status` / `service` / `workspace` / `workgroup` / `device` フラット語彙・同期ランタイム・**特権分離**） |
+| `sapphire-framework-server` | アプリサーバ骨格（`workspace.*` 名前空間・多重管理・`FrameworkCommand` — `serve` / `status` / `service` / `workspace` / `workgroup` / `device` フラット語彙・同期ランタイム） |
 | `sapphire-framework-bridge-api` | bridge 制御プレーンのプロトコルとクライアント（serde のみ・iroh 非依存） |
 | `sapphire-framework-bridge` | ホスト常駐デーモン本体（デバイス同一性・workgroup 認可・ペアリング・交換台・iroh） |
 | `apps/sapphire-bridge` | 上記のバイナリと CLI（`serve` / `status` / `log` / `service` / `workspace` / `workgroup` / `device`） |
 | `sapphire-framework-registry` | デバイス台帳（`<dir>/<grain-id>.toml` を 1 デバイス 1 ファイル。`node_id` を保持。users は撤去） |
 | `sapphire-framework-keys` | `KeyStore` / `AuthConfig` / `protect`。**非同期 HTTP エンドポイント**の認証用 |
-| `sapphire-framework-service` | OS のサービスマネージャへの登録（`ServiceSpec` + `run_as` / `helper_as`・systemd user/system・LaunchAgent・タスクスケジューラ） |
+| `sapphire-framework-service` | OS のサービスマネージャへの登録（`ServiceSpec`・systemd user unit・LaunchAgent・タスクスケジューラ） |
 | `sapphire-framework-backend` | GUI 向け**非同期** `WorkspaceBackend` + `IpcBackend` / `LocalBackend`、`BackendEvent` |
 | `sapphire-framework-gui` | app 非依存の egui `WorkspaceManager` / `WorkspaceRegistry` |
 | ~~`sapphire-framework-rpc`~~ / ~~`-remote-client`~~ / ~~`-remote-server`~~ / ~~`-blob`~~ | **削除**（HTTP 同期スタック。表面テスト `tests/surface.rs` で存在を封じる。内容はファイル原本から直接供給される — sync 仕様 §2.3） |
@@ -225,14 +225,12 @@ CLI は `sapphire-bridge`（`serve` / `status` / `service` / `workspace` / `work
 `journal sync map <name|id> <dir>`）。同期の同一性はパス導出の uuid ではなく、マーカー内
 `.<app>/sync-id` の grain-id（同期されるので全デバイスで一致）。
 
-### 特権分離（Unix のみ）
+### 特権分離（撤去済み — issue #145）
 
-root で起動したサーバは、ワークスペース・キャッシュ・ソケットを人間ユーザーに渡し、shell /
-汎用 fs ツール用のヘルパーだけを別ユーザーで fork してから、恒久的に降格する。降格は検証付きで
-root は残らない。**bridge 接続より前に降格する**ので、bridge からは何も変わらず見えない。
-起動順序は仕様 §3.1 が強制（helper は降格前に、ソケット束縛は降格後に）。`ServiceSpec` が
-`run_as` / `helper_as` を持つので `service install` が正しい unit を吐き出す。framework の作る
-ファイルとディレクトリはすべて `0700` / `0600`。動機は `sapphire-agent` #257。
+特権分離は **撤去済み**（issue #145）。全ノード同一の権限管理は Windows 等で困難で、1ノードの
+漏れが穴を再び開くため、機構ではなく運用（shell / fs ツールは管理者デバイス・管理者ルームのみ許可）で
+対応する。`service install` は常にユーザーレベルの unit をインストールし、アプリはインストールした
+ユーザーとして走る。framework の作るファイルとディレクトリはすべて `0700` / `0600`（これは維持）。
 詳細はプロセス構成仕様 §3。
 
 ## アプリディレクトリ構成と CLI 規約（#128 / #129）
@@ -284,10 +282,9 @@ clap alias として受け付ける。解決順序は `Workspace::resolve` が�
 - **完了**: sync core（型・redb ストア・merge・HLC・コンフリクトコピー・フィルタ・外部編集検知 —
   sync 仕様 §2 / §6.1 が今も権威）、registry（users 撤去・1 デバイス 1 ファイル・`node_id`）、
   `-ipc`、アプリサーバ骨格（`workspace.*`・多重管理・`FrameworkCommand` — **元の問題 = CLI と
-  stdio MCP のキャッシュ衝突がここで解決**）、特権分離（**Unix のみ** — CI は root の
-  コンテナジョブ）、bridge 基本部（ディレクトリ・単一インスタンス・制御面・データ面・iroh）、
+  stdio MCP のキャッシュ衝突がここで解決**）、bridge 基本部（ディレクトリ・単一インスタンス・制御面・データ面・iroh）、
   サーバの同期ランタイム（watcher・`Replica`・`sync.enable`）、ペアリングと workgroup、
-  サーバ機能（組込み relay・`wake_on_sync`）、`-service`（`run_as` / `helper_as`）。
+  サーバ機能（組込み relay・`wake_on_sync`）、`-service`（特権分離は撤去済み — issue #145）。
 - **進行中**: 後片付け — `-keys` の抽出、`-rpc` / `-remote-client` / `-remote-server` / `-blob`
   の削除、per-kind ディレクトリ分割の撤去、ファサード feature の組替え、**この文書の書き直し**。
 - **後続**（§9 の外の計画レベルの項目）: 各アプリの移行（journal / ledger / timer / agent —
@@ -301,8 +298,8 @@ clap alias として受け付ける。解決順序は `Workspace::resolve` が�
 1. 同期→非同期の波及は Backend trait のみ async 化で封じる（`ops::update_entry(&Connection,...)` の `&Connection` を trait から外す破壊的変更）。
 2. egui native の async: `?Send` により `dyn` は跨スレッド不可 → 具象型保持 + `runtime.spawn`。
 3. 非互換 crate（git2・fastembed・sqlx-postgres・tantivy/redb・iroh）は native 専用バイナリで隔離。
-   プラットフォーム差（UDS / named pipe / チャネル、systemd / LaunchAgent / タスクスケジューラ、
-   特権分離は Unix のみ）は各層が吸収する。
+   プラットフォーム差（UDS / named pipe / チャネル、systemd / LaunchAgent / タスクスケジューラ）
+   は各層が吸収する。
 4. tantivy trigram FTS の挙動同等性（BM25・prefix フィルタ・短いクエリ<3文字は無マッチ＝FTS5同等）。
 5. サーバを格上げした代償（プロセス構成仕様 §12）: サーバが無いときの 1 回きりの CLI コマンドは
    「サーバが走っていない」報告で終わり、起動待ちは発生しない（start-on-demand 廃止に伴う

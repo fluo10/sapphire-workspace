@@ -10,7 +10,8 @@
 - Also revises: [`2026-09-15-sapphire-sync-design.md`](./2026-09-15-sapphire-sync-design.md)
 - Follow-ups (separate specs, in their own repositories): `sapphire-journal`,
   `sapphire-ledger`, `sapphire-timer`, `sapphire-agent` migrations
-- Related: `sapphire-agent` issue #257 (privilege separation for shell / fs tools)
+- Related: `sapphire-agent` issue #257 (the shell / fs tool policy whose facility here was
+  removed, issue #145)
 
 ## Background
 
@@ -70,9 +71,11 @@ Agreed during brainstorming on 2026-09-16:
    app's build is running the bridge" a question to answer at every version mismatch. A
    separate binary lets the bridge version move with the framework while apps move
    independently.
-9. **Privilege separation is a framework facility** (`sapphire-agent` #257). A server started
-   as root drops permanently to the human user for workspace, cache and socket, having first
-   spawned one helper as a second, lower-privileged user.
+9. **Privilege separation was removed** (`sapphire-agent` #257 withdrawn). Per-node permission
+   separation had to be enforced on every syncing node — hardest on Windows — and one node
+   missing it re-opened the injection hole, so the mechanism paid per-OS maintenance for
+   partial protection. Shell / generic fs tools are restricted by policy instead: admin
+   devices and admin rooms only (a `sapphire-agent` concern).
 
 ## 1. Process layering and ownership
 
@@ -166,8 +169,7 @@ the current user.
 
 This boundary does **not** separate a human from an agent. An agent running as the same user
 can do what the user can do. That is the premise of the whole design — the two are the same
-user — so "restrict it because it came through MCP" cannot be enforced here. What can enforce
-it is a second OS user, which is §3.
+user — so "restrict it because it came through MCP" cannot be enforced here.
 
 ### 2.4 Handshake
 
@@ -185,11 +187,10 @@ The first exchange on every connection:
 
 `<platform data root>/sapphire/run/`, mode `0700`, overridden by `SAPPHIRE_RUNTIME_DIR`.
 
-`$XDG_RUNTIME_DIR` and `/run/user/<uid>` are deliberately **not** used. A server started as a
-system service and dropped to a user (§3) has neither, while a CLI in a login session has
-both — the two would resolve different paths and never meet. A persistent directory is the
-same for both. The cost is a socket file surviving a reboot, which §2.6 already handles as a
-stale socket.
+`$XDG_RUNTIME_DIR` and `/run/user/<uid>` are deliberately **not** used. A server running as
+a service has neither, while a CLI in a login session has both — the two would resolve
+different paths and never meet. A persistent directory is the same for both. The cost is a
+socket file surviving a reboot, which §2.6 already handles as a stale socket.
 
 Unix sockets do not work on an NFS home directory. This is the same constraint the sync spec
 records for its node directory.
@@ -219,70 +220,21 @@ service. Idle exit does not strand sync: the bridge can start a stopped owner wh
 asks for its workspace (§5, `wake_on_sync`), so one start-on-demand mechanism covers all
 three tiers.
 
-**Start-on-demand is disabled for apps configured with privilege separation** (§3): a CLI
-running as the human user cannot spawn a root process. Finding `run_as` in the app's
-configuration, the CLI reports that the app runs as a privileged service instead of trying.
+## 3. Privilege separation (removed — issue #145)
 
-## 3. Privilege separation (`sapphire-framework-server` startup)
+Privilege separation was removed (`sapphire-agent` #257 withdrawn). Per-node permission
+separation had to be enforced on every syncing node — hardest on Windows — and one node
+missing it re-opened the injection hole, so the mechanism paid per-OS maintenance for
+partial protection. Shell / generic fs tools are restricted by policy instead: admin
+devices and admin rooms only (a `sapphire-agent` concern).
 
-`sapphire-agent` #257 wants shell and generic fs tools to keep their freedom while losing
-access to workspace files — memory-namespace isolation and the heartbeat / autonomous
-configuration are otherwise reachable by the agent they constrain. The precedent it cites is
-nginx: take root only to be able to become someone else.
-
-Two identities are needed. Root is only the position from which both can be entered.
-
-| Identity | Runs | Can reach |
-|---|---|---|
-| `run_as` (the human user) | the app server itself | workspace, cache, IPC socket, **the bridge socket** |
-| `helper_as` (an agent-only user) | shell / generic fs tools | nothing under the workspace: it is `0700`, owned by `run_as` |
-
-Sharing the user's bridge needs no bridge-side support at all, as long as **the drop happens
-before the bridge connection**. After dropping, the server is an ordinary process of the
-human user and connects to that user's socket like anything else.
-
-### 3.1 Startup sequence (Unix, `euid == 0`)
-
-```
-1. resolve run_as and helper_as to uid / gid / supplementary groups
-   (refuse to start if either resolves to root)
-2. create the cache, data and runtime directories owned by run_as, mode 0700
-3. create a socketpair
-4. fork/exec the helper: in the pre-exec hook setgroups -> setgid -> setuid(helper_as),
-   minimise the environment, close every fd but the child end of the socketpair
-5. drop permanently: setgroups(run_as's groups) -> setgid -> setresuid
-   verify: getuid == geteuid == run_as, and setuid(0) fails
-6. only now bind the IPC socket (so it is created owned by run_as)
-7. connect to the bridge and start normally
-```
-
-The order is forced. Step 4 cannot happen after step 5 (becoming another user needs root),
-and step 6 cannot happen before it (the socket would be owned by root). `setgroups` before
-`setgid` is the usual rule; reversed, the supplementary groups survive the drop.
-
-The framework provides `PrivilegeConfig { run_as, helper: Option<HelperSpec> }` and a
-function that runs this sequence and returns the parent end of the socketpair. What is spoken
-over that socket ("run this command") is the application's design; the framework does not
-define it.
-
-**No root process survives.** Only one extra identity is ever needed, so one fork before the
-drop is enough and nginx's long-lived root master is not.
-
-**Started as a non-root user**: if `run_as` is the current user, start normally; otherwise
-fail. A `helper` is refused, because the identity cannot be changed. The same binary
-therefore runs with and without privilege separation, and without it an agent's shell tools
-run as the agent server's own user, as they do today.
-
-**Windows is unsupported.** A configuration that asks for it fails explicitly.
-
-### 3.2 Two consequences for the whole framework
+Two of the removed design's consequences for the whole framework survive:
 
 1. **Every file and directory the framework creates is `0700` / `0600`.** The rule that
-   exists today for `keys.toml` is generalised. These modes are what actually keeps
-   `helper_as` out of the workspace, the cache and the keys, so the rule admits no
-   exceptions.
-2. **`ServiceSpec` carries `run_as` and `helper_as`**, so `service install` emits a unit that
-   starts the server as root with the right configuration.
+   exists today for `keys.toml` is generalised. It stands because it protects the workspace,
+   the cache and the keys whatever runs the server, so the rule admits no exceptions.
+2. **`ServiceSpec` carries no `run_as` / `helper_as` anymore.** Every install is a per-user
+   unit and the app runs as the user who installed it.
 
 ## 4. App server (`sapphire-framework-server`)
 
@@ -291,7 +243,6 @@ The skeleton an app builds on. The app writes namespace handlers; everything els
 ```rust
 AppServer::new(ctx)                          // AppContext: app name, directory resolution
     .namespace("journal", journal_handlers)  // app-specific methods
-    .privileges(privilege_config)            // §3; None for a normal start
     .http(router)                            // optional: /mcp, /acp, /a2a, protected by -keys
     .run()
 ```
@@ -378,12 +329,8 @@ Its jobs:
    the bridge can decide this; an app server holds nothing to decide it with.
 3. **Switchboard** — resolve `workspace_id` to its owner and splice the iroh stream to that
    owner's data connection, starting the owner from `routes.toml`'s `exe_path` if it is not
-   running (`wake_on_sync`, on by default).
-   **`wake_on_sync` cannot start a privilege-separated server** (§3): the bridge runs as the
-   human user and cannot spawn a root process, exactly as a CLI cannot (§2.6). Such a server
-   records `managed_by: service` at registration, and the bridge then reports the workspace as
-   offline instead of trying. An app that wants its workspaces always reachable installs its
-   server as a service — which privilege separation requires anyway.
+   running (`wake_on_sync`, on by default). An app that wants its workspaces always reachable
+   without depending on an incoming sync request installs its server as a service.
 4. **iroh** — endpoint, discovery, relay configuration, the `embedded-relay` feature.
 5. **App server of the workgroup workspace** — per §1, using `-sync` unchanged.
 
@@ -402,11 +349,11 @@ enabling sync for it is the owning app's CLI (`journal sync map <name> <dir>`,
 | Crate | Status | Role |
 |---|---|---|
 | `sapphire-framework-ipc` | new | transports, NDJSON framing, JSON-RPC router, handshake, start-on-demand |
-| `sapphire-framework-server` | new | app server skeleton, `workspace.*`, many workspaces, `SyncNode` and watcher, privilege separation, `ServerCommand` |
+| `sapphire-framework-server` | new | app server skeleton, `workspace.*`, many workspaces, `SyncNode` and watcher, `ServerCommand` |
 | `sapphire-framework-bridge` | new | iroh endpoint, workgroup authorization, pairing, switchboard, `routes.toml` |
 | `apps/sapphire-bridge/` | new | the binary |
 | `sapphire-framework-keys` | as the sync spec | for non-sync HTTP endpoints |
-| `sapphire-framework-service` | as the sync spec, plus `run_as` / `helper_as` | `service install` |
+| `sapphire-framework-service` | as the sync spec | `service install` — one per-user unit per platform |
 | `sapphire-framework-net` | **never created** | iroh side goes to `-bridge`; `SyncNode` and watcher to `-server` |
 | `-backend` | changed | `IpcBackend` added; `RemoteBackend` and the planned `SyncedBackend` removed; `LocalBackend` becomes internal to `-server` |
 | `-workspace` | changed | per-kind directories removed (§7); `AppKind` no longer resolves paths |
@@ -458,7 +405,7 @@ what superseded them:
 | Sync-spec decision | Superseded by |
 |---|---|
 | 8 — one node per host, run by whichever process holds the lock; files-only IPC | §1, §5: one bridge process; real IPC |
-| 11 — `service install` per app | still true, extended with §3's `run_as` / `helper_as` |
+| 11 — `service install` per app | still true; the §3 extension (`run_as` / `helper_as`) was itself removed (issue #145) |
 | 13 — `sapphire-sync` as the always-on peer and dedicated sync service | decision 4 above: the bridge takes both roles |
 | 14 — guardrails for embedding the node in an app | §10: the bridge is a separate process, so isolation is structural |
 
@@ -484,12 +431,12 @@ repositories, per `CLAUDE.md`.
  3. IPC layer (-ipc)            verified on its own, without an app
  4. App server skeleton         workspace.*, many workspaces, IpcBackend, ServerCommand
                                 *** the original problem is solved here ***
- 5. Privilege separation        §3, Unix only
+ 5. Privilege separation        removed (issue #145)
  6. Bridge basics               directory, single instance, control plane, data plane, iroh
  7. Sync runtime in the server  watcher, Replica, sync.enable
  8. Pairing and workgroups
  9. Server features             embedded relay, wake_on_sync
-10. Service                     run_as / helper_as
+10. Service                     per-user unit per platform
 11. Cleanup                     extract keys; remove rpc / remote-* / blob; §7 migration;
                                 facade features; rewrite ARCHITECTURE.md
 ```
@@ -505,10 +452,9 @@ from. Everything after it rebuilds sync on the new layering.
 | Situation | Result |
 |---|---|
 | Bridge not running or crashed | **The app server works completely**; only sync stops. It reconnects with backoff and `sync.status` reports the bridge as unavailable |
-| App server not running | The CLI starts it (or, under §3, reports that the service must be started). An incoming sync request makes the bridge start it, except for a privilege-separated server, whose workspaces are reported offline until its service runs |
+| App server not running | The CLI reports that the service must be started. An incoming sync request makes the bridge start it |
 | Version mismatch | §2.6: replace a spawned server, report an installed service |
 | Crash during a write | `-sync`'s staging and interrupted-write recovery already cover it; unchanged |
-| Helper exits unexpectedly (§3) | EOF on the socketpair, reported to the app. The framework does not restart it |
 | Stale socket after a reboot | Unlinked on `ECONNREFUSED` (§2.6) |
 
 The sync spec's decision 14 — a node failure must never take the app down — holds
@@ -525,10 +471,6 @@ of a connection from another uid.
 test for the problem this spec exists to fix; many workspaces in one server; idle eviction;
 `workspace.subscribe` delivering events to several connections.
 
-**Privilege separation**: needs root, so it runs as a separate containerised CI job. After
-the drop, `setuid(0)` fails; the socket is owned by `run_as`; the helper runs as `helper_as`;
-the workspace is unreadable from `helper_as`.
-
 **`-bridge`**: the single-instance lock; routing a workspace to its owner; `wake_on_sync`
 starting a stopped owner; an unknown `NodeId` rejected before reaching any app server.
 
@@ -541,6 +483,5 @@ two hosts, with `sapphire-sync` as the app.
    start and to open redb and tantivy. Later calls are faster than today because the server is
    warm, but a one-shot invocation is a straight regression. This is accepted, not mitigated.
 2. **A second one-shot directory migration**, arriving shortly after #129's.
-3. **Privilege separation is Unix-only**, so the agent's isolation does not exist on Windows.
-4. **Unix sockets do not work on an NFS home directory** (§2.5).
-5. **More processes on a busy host**: a bridge plus one server per app.
+3. **Unix sockets do not work on an NFS home directory** (§2.5).
+4. **More processes on a busy host**: a bridge plus one server per app.
