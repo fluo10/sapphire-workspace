@@ -5,6 +5,8 @@
 //! `/run/user/<uid>`, while a CLI in a login session has both — the two would resolve
 //! different paths and never meet.
 
+use std::fs;
+
 use std::path::{Path, PathBuf};
 
 use crate::error::Result;
@@ -92,11 +94,48 @@ impl Endpoint {
         self.dir.join(format!("{}.sock", self.name))
     }
 
-    /// The Windows named pipe name, scoped to the current user so that two users on one
-    /// machine get separate pipes.
+    /// The Windows named pipe name.
+    ///
+    /// Scoped to the current user so two users on one machine get separate pipes, and
+    /// salted with a hash of the endpoint directory so two same-named endpoints in
+    /// different directories get separate pipes too. The directory is part of an
+    /// endpoint's identity on both platforms: on Unix it *is* the socket path, and here
+    /// it shapes the pipe name (see `dir_salt`).
     pub fn pipe_name(&self) -> String {
-        format!(r"\\.\pipe\sapphire.{}.{}", user_scope(), self.name)
+        format!(
+            "\\\\.\\pipe\\sapphire.{}.{}.{}",
+            user_scope(),
+            dir_salt(&self.dir),
+            self.name
+        )
     }
+}
+
+/// The directory component of the Windows pipe name: a hash of the directory
+/// canonical path's bytes, so that same-name endpoints in different directories get
+/// distinct pipes.
+///
+/// Canonicalized first: two processes naming the same directory through different
+/// path spellings (case, separators, a `.` prefix) must still derive the same pipe
+/// name. Falls back to the path as given when canonicalization fails (the directory
+/// may not exist yet); two endpoints that agree on their spelling still agree on
+/// their salt, which is what matters.
+///
+/// The salt is an identifier any other user on the machine can observe in the pipe
+/// namespace; it is not a secret and not access control. The security descriptor set
+/// on the pipe (see `windows.rs`) is what actually restricts who may connect.
+fn dir_salt(dir: &Path) -> String {
+    use sha2::{Digest as _, Sha256};
+    let canonical = fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    // Same shape as `ContentHash::of_bytes` in the sync crate: digest, then slice.
+    let digest: [u8; 32] = Sha256::digest(canonical.as_os_str().as_encoded_bytes()).into();
+    // 16 hex characters: collisions are not worth worrying about at this scale.
+    let mut salt = String::with_capacity(16);
+    for byte in &digest[..8] {
+        salt.push(char::from_digit(u32::from(byte >> 4), 16).expect("a hex digit"));
+        salt.push(char::from_digit(u32::from(byte & 0xF), 16).expect("a hex digit"));
+    }
+    salt
 }
 
 /// A stable, per-user string used to scope the Windows pipe name.
@@ -191,12 +230,21 @@ mod tests {
     }
 
     #[test]
-    fn a_pipe_name_is_scoped_to_the_user() {
+    fn a_pipe_name_is_scoped_to_the_user_and_the_directory() {
         let _env = lock_env();
         let ep = Endpoint::in_dir("sapphire-journal", std::env::temp_dir());
         let name = ep.pipe_name();
-        assert!(name.starts_with(r"\\.\pipe\sapphire."), "{name}");
-        assert!(name.ends_with(".sapphire-journal"), "{name}");
+        let body = name.trim_start_matches(r"\\.\pipe\sapphire.");
+        // Shape: <user scope>.<16 hex chars>.<endpoint name>.
+        let segments: Vec<&str> = body.split(".").collect();
+        assert_eq!(segments.len(), 3, "{name}");
+        assert_eq!(segments[2], "sapphire-journal", "{name}");
+        let salt = segments[1];
+        assert_eq!(salt.len(), 16, "{name}");
+        assert!(
+            salt.chars().all(|c| c.is_ascii_hexdigit()),
+            "salt {salt} should be 16 hex characters",
+        );
     }
 
     #[test]
@@ -235,5 +283,51 @@ mod tests {
         assert_eq!(resolved, dir);
         let mode = std::fs::metadata(&resolved).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o700, "mode was {:o}", mode & 0o777);
+    }
+
+    /// Two endpoints with the same name in different directories must get different
+    /// pipes (issue #151), and the same name in the same directory must keep getting
+    /// the same one — the salt is a function of the directory, not of the instance.
+    #[cfg(windows)]
+    #[test]
+    fn same_name_in_different_directories_gets_a_different_pipe() {
+        let _env = lock_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let a = Endpoint::in_dir("sapphire-journal", tmp.path().join("host-a"));
+        let b = Endpoint::in_dir("sapphire-journal", tmp.path().join("host-b"));
+        assert_ne!(a.pipe_name(), b.pipe_name(), "{:?} vs {:?}", a.dir, b.dir);
+        // Deterministic in the directory, not in the instance: same dir, same name.
+        assert_eq!(
+            a.pipe_name(),
+            Endpoint::in_dir("sapphire-journal", tmp.path().join("host-a")).pipe_name(),
+        );
+    }
+
+    /// The salt is a function of the *canonical* directory, so the same directory spelled
+    /// differently (a `.` component, mixed separators, case) must still hash to one pipe
+    /// name — otherwise two processes that merely disagree about spelling would silently
+    /// talk past each other. This pins the canonicalization the `dir_salt` docs promise.
+    #[cfg(windows)]
+    #[test]
+    fn the_same_directory_spelled_differently_gets_the_same_pipe() {
+        let _env = lock_env();
+        let tmp = tempfile::tempdir().unwrap();
+        // The directory must exist: `dir_salt` canonicalizes only what it can resolve.
+        let plain_dir = tmp.path().join("host-a");
+        std::fs::create_dir_all(&plain_dir).unwrap();
+        // Same directory, four spellings a caller might plausibly hand us: a `.`
+        // component, a `..` round-trip, an upper-cased name, and the plain form.
+        let spellings = [
+            plain_dir.clone(),
+            tmp.path().join(".").join("host-a"),
+            tmp.path().join("host-a").join("..").join("host-a"),
+            tmp.path().join("HOST-A"),
+        ];
+        let plain = Endpoint::in_dir("sapphire-journal", plain_dir);
+        let expected = plain.pipe_name();
+        for spelling in spellings {
+            let other = Endpoint::in_dir("sapphire-journal", spelling);
+            assert_eq!(expected, other.pipe_name(), "{:?}", other.dir);
+        }
     }
 }

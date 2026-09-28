@@ -21,6 +21,7 @@ required-features = ["test-util"]
 dirs.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "net", "io-util", "macros", "sync", "process", "time"] }
 tracing.workspace = true
