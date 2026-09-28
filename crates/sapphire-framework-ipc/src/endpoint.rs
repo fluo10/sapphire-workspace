@@ -120,6 +120,10 @@ impl Endpoint {
 /// name. Falls back to the path as given when canonicalization fails (the directory
 /// may not exist yet); two endpoints that agree on their spelling still agree on
 /// their salt, which is what matters.
+///
+/// The salt is an identifier any other user on the machine can observe in the pipe
+/// namespace; it is not a secret and not access control. The security descriptor set
+/// on the pipe (see `windows.rs`) is what actually restricts who may connect.
 fn dir_salt(dir: &Path) -> String {
     use sha2::{Digest as _, Sha256};
     let canonical = fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
@@ -297,5 +301,33 @@ mod tests {
             a.pipe_name(),
             Endpoint::in_dir("sapphire-journal", tmp.path().join("host-a")).pipe_name(),
         );
+    }
+
+    /// The salt is a function of the *canonical* directory, so the same directory spelled
+    /// differently (a `.` component, mixed separators, case) must still hash to one pipe
+    /// name — otherwise two processes that merely disagree about spelling would silently
+    /// talk past each other. This pins the canonicalization the `dir_salt` docs promise.
+    #[cfg(windows)]
+    #[test]
+    fn the_same_directory_spelled_differently_gets_the_same_pipe() {
+        let _env = lock_env();
+        let tmp = tempfile::tempdir().unwrap();
+        // The directory must exist: `dir_salt` canonicalizes only what it can resolve.
+        let plain_dir = tmp.path().join("host-a");
+        std::fs::create_dir_all(&plain_dir).unwrap();
+        // Same directory, four spellings a caller might plausibly hand us: a `.`
+        // component, a `..` round-trip, an upper-cased name, and the plain form.
+        let spellings = [
+            plain_dir.clone(),
+            tmp.path().join(".").join("host-a"),
+            tmp.path().join("host-a").join("..").join("host-a"),
+            tmp.path().join("HOST-A"),
+        ];
+        let plain = Endpoint::in_dir("sapphire-journal", plain_dir);
+        let expected = plain.pipe_name();
+        for spelling in spellings {
+            let other = Endpoint::in_dir("sapphire-journal", spelling);
+            assert_eq!(expected, other.pipe_name(), "{:?}", other.dir);
+        }
     }
 }
