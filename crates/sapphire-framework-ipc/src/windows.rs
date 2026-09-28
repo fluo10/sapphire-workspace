@@ -360,4 +360,20 @@ mod tests {
         let _listener = bind(&ep).unwrap();
         assert!(probe(&ep).await.unwrap());
     }
+
+    /// The regression behind issue #151: two endpoints with the same name in different
+    /// directories must bind at the same time. Before the directory salt, the second
+    /// `bind` lost the name to the first (`first_pipe_instance`) and this failed.
+    #[tokio::test]
+    async fn same_name_in_two_directories_binds_two_pipes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let a = Endpoint::in_dir("bridge", tmp.path().join("host-a"));
+        let b = Endpoint::in_dir("bridge", tmp.path().join("host-b"));
+        let _listener_a = bind(&a).unwrap();
+        // Held only to prove the two names differ: if the salts collided this bind
+        // would fail with "the pipe name is already in use".
+        let _listener_b = bind(&b).unwrap();
+        assert!(probe(&a).await.unwrap());
+        assert!(probe(&b).await.unwrap());
+    }
 }
