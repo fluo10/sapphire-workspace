@@ -45,7 +45,7 @@ pub enum Error {
     /// Installing, removing or reporting the bridge's service failed.
     ///
     /// Carries the service crate's own message, which already says what to do about the
-    /// case at hand (`--run-as`, `--user`, or which platform offers what).
+    /// case at hand, or which platform offers what.
     #[error(transparent)]
     Service(#[from] sapphire_framework_service::Error),
 

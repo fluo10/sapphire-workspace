@@ -44,7 +44,6 @@ mod error;
 mod events;
 mod handlers;
 mod host;
-pub mod privilege;
 pub mod sync;
 #[cfg(test)]
 mod test_support;
@@ -56,7 +55,6 @@ pub use error::{Error, Result};
 pub use events::subscribe_method;
 pub use handlers::{workspace_router, workspace_router_with_sync};
 pub use host::{DEFAULT_IDLE, DEFAULT_MAX_OPEN, WorkspaceHost};
-pub use privilege::{HelperSpec, PrivilegeConfig, UserSpec};
 pub use sync::{SyncRuntime, SyncStatus, sync_router};
 
 /// An application's server.
@@ -69,11 +67,10 @@ pub struct AppServer {
     host: Arc<WorkspaceHost>,
     sync: Option<Arc<SyncRuntime>>,
     extend: Option<Box<dyn FnOnce(Router) -> Router + Send>>,
-    /// What the service this application installs carries, when it separates privileges.
-    ///
-    /// Stored, never applied: [`privilege::apply`] is `main`'s job, because the drop has to
-    /// happen before the socket is bound and this builder is merely describing the server.
-    privileges: Option<PrivilegeConfig>,
+    // TODO(issue #145, Task 2): delete with `service_spec()`'s `privileges:` line —
+    // Task 1 withdraws the privilege machinery; this always-None placeholder keeps the
+    // literal below compiling one task longer.
+    privileges: Option<sapphire_framework_service::PrivilegeConfig>,
     /// The application's own status rows, shown after the framework's in `status` and in
     /// the `server.info` report.
     status_rows: Option<Arc<dyn Fn() -> Vec<StatusRow> + Send + Sync>>,
@@ -179,17 +176,6 @@ impl AppServer {
         self
     }
 
-    /// The privilege separation this application runs under, when it has any.
-    ///
-    /// Stored for [`service_spec`](AppServer::service_spec) to describe the service with: an
-    /// installed unit carries the configuration in its environment, so the server it starts
-    /// knows whom to become. It is not applied here — that stays `privilege::apply`'s job in
-    /// `main`, which must run before the socket is bound (spec §3.1).
-    pub fn privileges(mut self, config: PrivilegeConfig) -> AppServer {
-        self.privileges = Some(config);
-        self
-    }
-
     /// The application's own rows for the status report: shown after the framework's
     /// `running` / `version` / `pid` / `managed_by` lines.
     ///
@@ -201,8 +187,7 @@ impl AppServer {
         self
     }
 
-    /// What this application's service is: the arguments a service manager starts it with,
-    /// and the privilege separation, if any, that the server it starts needs.
+    /// What this application's service is: the arguments a service manager starts it with.
     ///
     /// `["serve"]`: a service manager starts the executable directly, and the executable's
     /// bare invocation is `serve` — the subcommand-less default of
