@@ -2,9 +2,7 @@
 //!
 //! A LaunchAgent starts with the user's session and lives in their own
 //! `~/Library/LaunchAgents`, so it is theirs to remove — the macOS counterpart of a systemd
-//! user unit. LaunchDaemons (system-wide, before login) and system units elsewhere are
-//! Linux only: see [`crate::scope::resolve_scope`], which refuses a system scope off Linux
-//! before any of this code runs.
+//! user unit.
 
 use std::path::{Path, PathBuf};
 

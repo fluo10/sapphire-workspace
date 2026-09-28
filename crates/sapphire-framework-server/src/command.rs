@@ -608,7 +608,6 @@ mod tests {
     fn the_service_subcommands_parse() {
         for args in [
             vec!["app", "service", "install"],
-            vec!["app", "service", "install", "--system"],
             vec!["app", "service", "uninstall"],
             vec!["app", "service", "status"],
         ] {

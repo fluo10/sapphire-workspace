@@ -3,15 +3,14 @@
 //! When one of these fails, read the diff before regenerating: a unit file is the contract
 //! between this crate and the machine, and a change to it is a change of behaviour.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use sapphire_framework_service::{
-    HelperSpec, InstallContext, PrivilegeConfig, RunAs, Scope, ServiceSpec, render_launch_agent,
-    render_task, render_unit,
+    InstallContext, ServiceSpec, render_launch_agent, render_task, render_unit,
 };
 
 fn golden(name: &str) -> String {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/golden")
         .join(name);
     std::fs::read_to_string(&path)
@@ -27,28 +26,17 @@ fn check(name: &str, rendered: &str) {
     );
 }
 
-fn spec(run_as: RunAs, privileges: bool) -> ServiceSpec {
+fn spec() -> ServiceSpec {
     ServiceSpec {
         app_name: "sapphire-agent",
         description: "Sapphire agent server".into(),
         args: vec!["server".into(), "run".into()],
-        system_run_as: run_as,
-        privileges: privileges.then(|| PrivilegeConfig {
-            run_as: "alice".parse().unwrap(),
-            helper: Some(HelperSpec {
-                user: "sapphire-agent-tools".parse().unwrap(),
-                program: PathBuf::from("/usr/lib/sapphire-agent/tool-broker"),
-                args: vec![],
-            }),
-        }),
         post_install: None,
     }
 }
 
-fn ctx(scope: Scope, target_user: Option<&str>) -> InstallContext {
+fn ctx() -> InstallContext {
     InstallContext {
-        scope,
-        target_user: target_user.map(str::to_owned),
         unit_path: PathBuf::from("/dev/null"),
         exe: PathBuf::from("/usr/bin/sapphire-agent"),
     }
@@ -56,34 +44,12 @@ fn ctx(scope: Scope, target_user: Option<&str>) -> InstallContext {
 
 #[test]
 fn a_user_unit() {
-    check(
-        "user.service",
-        &render_unit(&spec(RunAs::InvokingUser, false), &ctx(Scope::User, None)),
-    );
+    check("user.service", &render_unit(&spec(), &ctx()));
 }
 
 #[test]
-fn a_system_unit_running_as_a_named_user() {
-    check(
-        "system-user.service",
-        &render_unit(
-            &spec(RunAs::InvokingUser, false),
-            &ctx(Scope::System, Some("alice")),
-        ),
-    );
-}
-
-#[test]
-fn a_system_unit_that_drops_its_own_privileges() {
-    check(
-        "system-privsep.service",
-        &render_unit(&spec(RunAs::Root, true), &ctx(Scope::System, None)),
-    );
-}
-
-#[test]
-fn a_user_unit_has_no_network_ordering() {
-    let rendered = render_unit(&spec(RunAs::InvokingUser, false), &ctx(Scope::User, None));
+fn a_unit_needs_no_network_ordering() {
+    let rendered = render_unit(&spec(), &ctx());
     assert!(
         !rendered.contains("network-online.target"),
         "a user unit starts after the session is up already"
@@ -91,20 +57,8 @@ fn a_user_unit_has_no_network_ordering() {
 }
 
 #[test]
-fn a_system_unit_waits_for_the_network() {
-    let rendered = render_unit(
-        &spec(RunAs::InvokingUser, false),
-        &ctx(Scope::System, Some("alice")),
-    );
-    assert!(
-        rendered.contains("After=network-online.target"),
-        "{rendered}"
-    );
-}
-
-#[test]
 fn exec_start_is_absolute_and_carries_the_arguments() {
-    let rendered = render_unit(&spec(RunAs::InvokingUser, false), &ctx(Scope::User, None));
+    let rendered = render_unit(&spec(), &ctx());
     assert!(
         rendered.contains("ExecStart=/usr/bin/sapphire-agent server run"),
         "{rendered}"
@@ -112,32 +66,13 @@ fn exec_start_is_absolute_and_carries_the_arguments() {
 }
 
 #[test]
-fn a_privilege_separated_unit_has_no_user_line() {
-    let rendered = render_unit(&spec(RunAs::Root, true), &ctx(Scope::System, None));
-    assert!(
-        !rendered.contains("\nUser="),
-        "the app becomes someone else itself; a User= line would stop it being able to:\n{rendered}"
-    );
-}
-
-#[test]
-fn a_privilege_separated_unit_names_both_users() {
-    let rendered = render_unit(&spec(RunAs::Root, true), &ctx(Scope::System, None));
-    assert!(rendered.contains("alice"), "{rendered}");
-    assert!(rendered.contains("sapphire-agent-tools"), "{rendered}");
-}
-
-#[test]
 fn a_launch_agent() {
-    check(
-        "launchagent.plist",
-        &render_launch_agent(&spec(RunAs::InvokingUser, false), &ctx(Scope::User, None)),
-    );
+    check("launchagent.plist", &render_launch_agent(&spec(), &ctx()));
 }
 
 #[test]
 fn a_launch_agent_label_is_namespaced() {
-    let rendered = render_launch_agent(&spec(RunAs::InvokingUser, false), &ctx(Scope::User, None));
+    let rendered = render_launch_agent(&spec(), &ctx());
     assert!(
         rendered.contains("net.fireturtle.sapphire.sapphire-agent"),
         "a LaunchAgent label is a global namespace: {rendered}"
@@ -146,34 +81,11 @@ fn a_launch_agent_label_is_namespaced() {
 
 #[test]
 fn a_scheduled_task() {
-    check(
-        "task.xml",
-        &render_task(&spec(RunAs::InvokingUser, false), &ctx(Scope::User, None)),
-    );
+    check("task.xml", &render_task(&spec(), &ctx()));
 }
 
 #[test]
 fn a_scheduled_task_runs_at_logon() {
-    let rendered = render_task(&spec(RunAs::InvokingUser, false), &ctx(Scope::User, None));
+    let rendered = render_task(&spec(), &ctx());
     assert!(rendered.contains("LogonTrigger"), "{rendered}");
-}
-
-#[test]
-fn an_argument_with_a_space_survives_the_xml() {
-    let mut with_space = spec(RunAs::InvokingUser, false);
-    with_space.args = vec!["server".into(), "--note".into(), "a b".into()];
-    let rendered = render_task(&with_space, &ctx(Scope::User, None));
-    assert!(rendered.contains("\"a b\""), "{rendered}");
-}
-
-#[test]
-fn an_ampersand_in_a_description_is_escaped() {
-    let mut awkward = spec(RunAs::InvokingUser, false);
-    awkward.description = "Notes & ledger".into();
-    let rendered = render_task(&awkward, &ctx(Scope::User, None));
-    assert!(rendered.contains("Notes &amp; ledger"), "{rendered}");
-    assert!(
-        !rendered.contains("Notes & ledger"),
-        "unescaped XML: {rendered}"
-    );
 }

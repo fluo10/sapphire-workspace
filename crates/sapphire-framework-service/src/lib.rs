@@ -5,29 +5,18 @@
 //! a recording one for tests, so no test ever touches the host's service manager. See the
 //! process-architecture spec, §3.2 and §9 step 10.
 //!
-//! The decision table this crate implements:
+//! The one unit kind each platform offers, and how this crate installs it:
 //!
-//! | Invoked as | Unit | Activation |
+//! | Platform | Unit | Activation |
 //! |---|---|---|
-//! | a regular user | `~/.config/systemd/user/<app>.service` | `systemctl --user enable --now` |
-//! | root, including `sudo` | `/etc/systemd/system/<app>.service`, `After=network-online.target` | `systemctl enable --now` |
+//! | Linux | `~/.config/systemd/user/<app>.service` | `systemctl --user enable --now` |
+//! | macOS | `~/Library/LaunchAgents/<label>.plist` | `launchctl bootstrap gui/<uid>` |
+//! | Windows | a scheduled task, handed over from a temporary XML | `schtasks /create` |
 //!
-//! Off Linux the crate is user level only: a LaunchAgent on macOS ([`launchd`]) and a
-//! scheduled task on Windows ([`windows`]). LaunchDaemons and real Windows services can be
-//! added when someone needs them — [`Scope::System`] is refused off Linux, so an install
-//! with administrator rights fails with the Linux-only message rather than quietly making
-//! a user-level thing.
-//!
-//! And for the user a system unit runs as: [`RunAs::Root`] carries no `User=` (the app drops
-//! privileges itself); [`RunAs::InvokingUser`] takes `$SUDO_USER`, and refuses to run with an
-//! explanation when neither it nor `--run-as` is available — a root `sapphire-bridge` would
-//! put the bridge directory under `/root` and create synced files owned by root.
-//!
-//! This crate also owns the privilege-separation configuration types ([`UserSpec`],
-//! [`HelperSpec`], [`PrivilegeConfig`]), which `-server` re-exports: the server's CLI embeds
-//! this crate's service commands, so the dependency runs `-server` → `-service`, never the
-//! other way. The scope decision lands first; unit rendering and the install flow build on
-//! it.
+//! Every install is user level: the service runs as the user who installed it, with their
+//! own home directory and their own directories. LaunchDaemons and real Windows services
+//! are per-machine services this crate does not install — a service the machine runs
+//! without a user is outside what it offers.
 //!
 //! The install flow itself lives in [`manager`]: [`install`], [`uninstall`] and [`status`]
 //! drive everything through the [`ServiceManager`] trait, whose real implementation is the
@@ -38,7 +27,6 @@
 pub mod error;
 pub mod launchd;
 pub mod manager;
-pub mod privilege;
 pub mod scope;
 pub mod systemd;
 pub mod windows;
@@ -46,13 +34,9 @@ pub mod windows;
 pub use error::{Error, Result};
 pub use launchd::{agent_path, label, render_launch_agent};
 pub use manager::{
-    Calls, InstallArgs, RecordingManager, ServiceCommand, ServiceManager, SystemManager, install,
-    status, uninstall,
+    Calls, RecordingManager, ServiceCommand, ServiceManager, SystemManager, install, status,
+    uninstall,
 };
-pub use privilege::{HelperSpec, PrivilegeConfig, UserSpec};
-pub use scope::{
-    Environment, InstallContext, Os, PostInstall, RunAs, Scope, ServiceSpec, resolve_scope,
-    resolve_target_user,
-};
+pub use scope::{Environment, InstallContext, Os, PostInstall, ServiceSpec};
 pub use systemd::{activation, linger_hint, render_unit, unit_path};
 pub use windows::render_task;

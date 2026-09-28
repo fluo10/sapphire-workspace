@@ -2,8 +2,8 @@
 //!
 //! The task starts when the user logs on (a `LogonTrigger`) and runs their own copy of the
 //! app from their own profile — the Windows counterpart of a LaunchAgent. Real Windows
-//! services (and `LaunchDaemons`) are Linux only: see [`crate::scope::resolve_scope`],
-//! which refuses a system scope off Linux before any of this code runs.
+//! services (and LaunchDaemons) are per-machine services this crate does not install; it
+//! installs the per-user kind everywhere — the counterpart of a systemd user unit.
 
 use crate::scope::{InstallContext, ServiceSpec};
 

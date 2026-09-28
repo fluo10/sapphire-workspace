@@ -27,7 +27,7 @@ use std::path::Path;
 
 use sapphire_backend::protocol as proto;
 use sapphire_backend::{WorkspaceEntry, WorkspaceRegistry};
-use sapphire_framework_service::{RunAs, ServiceSpec};
+use sapphire_framework_service::ServiceSpec;
 use sapphire_ipc::{Endpoint, ManagedBy, Router, RpcError, ServerInfo, serve};
 use sapphire_workspace::{AppContext, Workspace};
 
@@ -67,10 +67,6 @@ pub struct AppServer {
     host: Arc<WorkspaceHost>,
     sync: Option<Arc<SyncRuntime>>,
     extend: Option<Box<dyn FnOnce(Router) -> Router + Send>>,
-    // TODO(issue #145, Task 2): delete with `service_spec()`'s `privileges:` line —
-    // Task 1 withdraws the privilege machinery; this always-None placeholder keeps the
-    // literal below compiling one task longer.
-    privileges: Option<sapphire_framework_service::PrivilegeConfig>,
     /// The application's own status rows, shown after the framework's in `status` and in
     /// the `server.info` report.
     status_rows: Option<Arc<dyn Fn() -> Vec<StatusRow> + Send + Sync>>,
@@ -135,7 +131,6 @@ impl AppServer {
             host: Arc::new(WorkspaceHost::new(ctx)),
             sync: None,
             extend: None,
-            privileges: None,
             status_rows: None,
         }
     }
@@ -199,10 +194,6 @@ impl AppServer {
             app_name: self.ctx.app_name,
             description: format!("{} server {}", self.ctx.app_name, self.version),
             args: vec!["serve".to_owned()],
-            // An app server's files belong to the human who uses it; one started as root
-            // would put the cache, the data and the sockets under `/root`.
-            system_run_as: RunAs::InvokingUser,
-            privileges: self.privileges.clone(),
             post_install: None,
         }
     }

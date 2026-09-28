@@ -18,7 +18,7 @@ use std::io::Write as _;
 use sapphire_bridge_api::{
     BRIDGE_NAME, BridgeClient, InviteParams, JoinParams, PeerInfo, StatusResult,
 };
-use sapphire_framework_service::{Environment, RunAs, ServiceCommand, ServiceSpec, SystemManager};
+use sapphire_framework_service::{Environment, ServiceCommand, ServiceSpec, SystemManager};
 use sapphire_ipc::Endpoint;
 
 #[cfg(feature = "node")]
@@ -80,8 +80,6 @@ pub fn bridge_service_spec(version: &str) -> ServiceSpec {
         app_name: "sapphire-bridge",
         description: format!("Sapphire bridge daemon {version}"),
         args: vec!["serve".to_owned()],
-        system_run_as: RunAs::InvokingUser,
-        privileges: None,
         post_install: None,
     }
 }
@@ -856,7 +854,6 @@ mod pairing_cli_tests {
     fn the_bridge_service_subcommands_parse() {
         for args in [
             vec!["b", "service", "install"],
-            vec!["b", "service", "install", "--user"],
             vec!["b", "service", "uninstall"],
             vec!["b", "service", "status"],
         ] {
