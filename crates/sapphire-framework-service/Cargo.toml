@@ -14,9 +14,9 @@ serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
-# `effective_uid()` reads `libc::geteuid` (Linux/unix effective uid); that symbol is Linux
-# only, so the dependency is Linux only too.
-[target.'cfg(target_os = "linux")'.dependencies]
+# `effective_uid()` reads `libc::geteuid` under `cfg(unix)` — `geteuid` is POSIX, defined on
+# every unix, not just Linux; the gate here matches that `cfg(unix)` use.
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]

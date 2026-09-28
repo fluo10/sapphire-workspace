@@ -421,10 +421,11 @@ pub(crate) async fn inbound(bridge: Arc<Bridge>, net: NetConfig) -> Result<()> {
             // 4. Nobody home.
             //
             // The ticket is already parked, and its TTL is what gives an owner the bridge
-            // starts here the time to start, connect and claim it. A `Service` owner is
-            // never started: it runs as root (spec §3), and the bridge — running as the
-            // human user — can no more start it than a CLI can. Its workspace is reported
-            // offline, and its service manager is left to answer for it.
+            // starts here the time to start, connect and claim it. A `Service`-managed
+            // owner is never started from here: its own service manager starts it, and
+            // neither the bridge nor the CLI is that manager. Wake stays `Spawned`-only,
+            // so its workspace is reported offline and its service manager is left to
+            // answer for it.
             None if net.wake_on_sync && route.managed_by == ManagedBy::Spawned => {
                 // `claim` first, and unconditionally: it is what records the attempt, and a
                 // failed start must not be retried on every ask either.

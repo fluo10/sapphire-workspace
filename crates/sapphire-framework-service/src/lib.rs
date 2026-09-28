@@ -3,7 +3,7 @@
 //! An application describes itself with a [`ServiceSpec`]; this crate turns that into a unit
 //! file and hands it to the OS service manager — one real implementation per platform, plus
 //! a recording one for tests, so no test ever touches the host's service manager. See the
-//! process-architecture spec, §3.2 and §9 step 10.
+//! process-architecture spec, §3 and §9 step 10.
 //!
 //! The one unit kind each platform offers, and how this crate installs it:
 //!

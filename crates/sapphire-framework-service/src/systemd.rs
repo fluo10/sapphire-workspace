@@ -4,7 +4,7 @@
 //! The unit file is the contract between this crate and the machine: what it says is what
 //! the service manager does. It turns what an install needs — which unit file to write and
 //! what starts it — into systemd's own words.
-//! See the process-architecture spec, §3.2 and §9 step 10.
+//! See the process-architecture spec, §3 and §9 step 10.
 
 use std::path::{Path, PathBuf};
 

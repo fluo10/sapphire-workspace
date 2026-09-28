@@ -117,4 +117,24 @@ mod tests {
         assert_eq!(escape("&"), "&amp;");
         assert_eq!(escape("<&>"), "&lt;&amp;&gt;");
     }
+
+    #[test]
+    fn a_double_hyphen_in_a_description_is_comment_safe() {
+        let spec = ServiceSpec {
+            app_name: "sapphire-agent",
+            description: "Notes -- ledger".into(),
+            args: vec![],
+            post_install: None,
+        };
+        let ctx = InstallContext {
+            unit_path: PathBuf::from("/dev/null"),
+            exe: PathBuf::from("/usr/bin/sapphire-agent"),
+        };
+        let rendered = render_launch_agent(&spec, &ctx);
+        assert!(rendered.contains("<!-- Notes - - ledger -->"), "{rendered}");
+        assert!(
+            !rendered.contains("<!-- Notes -- ledger -->"),
+            "a `--` run inside a comment is illegal XML: {rendered}"
+        );
+    }
 }

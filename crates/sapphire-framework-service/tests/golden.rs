@@ -89,3 +89,23 @@ fn a_scheduled_task_runs_at_logon() {
     let rendered = render_task(&spec(), &ctx());
     assert!(rendered.contains("LogonTrigger"), "{rendered}");
 }
+
+#[test]
+fn an_argument_with_a_space_survives_the_xml() {
+    let mut with_space = spec();
+    with_space.args = vec!["server".into(), "--note".into(), "a b".into()];
+    let rendered = render_task(&with_space, &ctx());
+    assert!(rendered.contains("\"a b\""), "{rendered}");
+}
+
+#[test]
+fn an_ampersand_in_a_description_is_escaped() {
+    let mut awkward = spec();
+    awkward.description = "Notes & ledger".into();
+    let rendered = render_task(&awkward, &ctx());
+    assert!(rendered.contains("Notes &amp; ledger"), "{rendered}");
+    assert!(
+        !rendered.contains("Notes & ledger"),
+        "unescaped XML: {rendered}"
+    );
+}

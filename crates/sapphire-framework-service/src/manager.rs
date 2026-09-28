@@ -597,7 +597,7 @@ mod tests {
         // is the only type that runs anything, and it is never constructed above.
         //
         // The needle is assembled from two pieces so that counting it does not count its
-        // own text; the two remaining occurrences are the type's definition and thethe trait
+        // own text; the two remaining occurrences are the type's definition and the trait
         // implementation that follows it.
         let source = include_str!("manager.rs");
         let constructions = source.matches(concat!("System", "Manager")).count();

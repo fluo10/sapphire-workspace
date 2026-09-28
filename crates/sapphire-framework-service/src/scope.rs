@@ -48,7 +48,8 @@ pub struct InstallContext {
 /// Every environment fact an install needs.
 ///
 /// Read through a value rather than from the machine, so every combination is testable
-/// without becoming root, without `sudo`, and without another operating system.
+/// without another operating system. The effective uid is a fact about the invoking
+/// user's session — on macOS, the `gui/<uid>` domain a LaunchAgent activates into.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Environment {
     /// The effective uid of the process doing the installing, which names the `gui/<uid>`
