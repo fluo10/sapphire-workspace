@@ -140,7 +140,7 @@ the bridge, which has no search stack.
 | Implementation | Used by | Endpoint |
 |---|---|---|
 | `UnixTransport` | Linux, macOS | `<runtime dir>/<app>.sock` (§2.5) |
-| `PipeTransport` | Windows | `\\.\pipe\sapphire.<user-sid>.<app>`, `PIPE_REJECT_REMOTE_CLIENTS` |
+| `PipeTransport` | Windows | `\\.\pipe\sapphire.<user-sid>.<dir-hash>.<app>`, `PIPE_REJECT_REMOTE_CLIENTS` |
 | `ChannelTransport` | mobile, tests | in-process `tokio::sync::mpsc` |
 
 `ChannelTransport` still serialises. Paying that cost keeps mobile on the same code path as

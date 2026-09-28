@@ -11,6 +11,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ### Fixed
 
 - `sapphire-track`: change detection no longer misses edits made within the same second as the last scan. Stored mtimes are now nanosecond-resolution and the stored file size is compared too; the track snapshot value format changed accordingly, so `Workspace::track_db_path()` moved to `track_v2.redb` and pre-existing `track_v1.redb` snapshots are orphaned (one full re-index rebuilds them). Consumers of `TrackStore::mtimes()`/`Observed` must adapt to the new `(mtime_ns, len)` value (#118).
+- `sapphire-framework-ipc`: the Windows named-pipe name now includes a hash of the endpoint directory, so same-name endpoints in different directories no longer collide. The pipe-name shape changed, so on Windows an old client and a new server will not find each other (#151).
 
 ## [0.12.0](https://github.com/fluo10/sapphire-workspace/compare/v0.11.0...v0.12.0) - 2026-05-23
 

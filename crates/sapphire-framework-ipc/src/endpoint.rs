@@ -100,7 +100,7 @@ impl Endpoint {
     /// salted with a hash of the endpoint directory so two same-named endpoints in
     /// different directories get separate pipes too. The directory is part of an
     /// endpoint's identity on both platforms: on Unix it *is* the socket path, and here
-    /// it shapes the pipe name (see [`dir_salt`]).
+    /// it shapes the pipe name (see `dir_salt`).
     pub fn pipe_name(&self) -> String {
         format!(
             "\\\\.\\pipe\\sapphire.{}.{}.{}",
