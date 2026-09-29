@@ -6,31 +6,27 @@
 //! answers from canned output, so the flows can be driven by tests that never touch the
 //! host's own service manager.
 //!
-//! [`install`] is the scope decision table in motion: it resolves the scope and the target
-//! user ([`crate::scope`]), renders the platform's file ([`crate::systemd`],
-//! [`crate::launchd`], [`crate::windows`]), writes it through the manager and runs the
-//! activation commands. When activation fails, the half-written unit is removed before the
-//! error returns: a unit file that was written but never enabled is invisible to `status`
-//! and springs to life at the next reboot. [`uninstall`] is idempotent — stopping,
-//! disabling or removing something that is not there is not an error — and [`status`]
-//! reports whatever the manager said.
+//! [`install`] renders the platform's file ([`crate::systemd`], [`crate::launchd`],
+//! [`crate::windows`]), writes it through the manager and runs the activation commands. When
+//! activation fails, the half-written unit is removed before the error returns: a unit file
+//! that was written but never enabled is invisible to `status` and springs to life at the
+//! next reboot. [`uninstall`] is idempotent — stopping, disabling or removing something that
+//! is not there is not an error — and [`status`] reports whatever the manager said.
 //!
-//! Off Linux the flows are user level only, because [`resolve_scope`] refuses a system
-//! scope there before any of this runs: macOS goes through `launchctl` with the LaunchAgent
-//! from [`crate::launchd`], Windows through `schtasks` with the task XML from
-//! [`crate::windows`]. The activation hint for a user unit on a machine that should run it
-//! without a login ([`crate::systemd::linger_hint`]) is not carried here: an install
-//! returns an [`InstallContext`], and the app CLI asks for the hint itself.
+//! Every install is user level: Linux goes through `systemctl --user` with the unit from
+//! [`crate::systemd`], macOS through `launchctl` with the LaunchAgent from
+//! [`crate::launchd`], Windows through `schtasks` with the task XML from [`crate::windows`].
+//! The activation hint for a user unit on a machine that should run it without a login
+//! ([`crate::systemd::linger_hint`]) is not carried here: an install returns an
+//! [`InstallContext`], and the app CLI asks for the hint itself.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::error::{Error, Result};
 use crate::launchd::{agent_path, label, render_launch_agent};
-use crate::scope::{
-    Environment, InstallContext, Os, Scope, ServiceSpec, resolve_scope, resolve_target_user,
-};
-use crate::systemd::{activation, linger_hint, render_unit, unit_path};
+use crate::scope::{Environment, InstallContext, Os, ServiceSpec};
+use crate::systemd::{activation, linger_hint, render_unit, unit_path, words};
 use crate::windows::render_task;
 
 /// The commands a service manager is driven with.
@@ -50,19 +46,6 @@ pub trait ServiceManager {
 
     /// Remove a unit file. Removing one that is not there is not an error.
     fn remove_unit(&self, path: &Path) -> Result<()>;
-
-    /// Hand a file the install wrote over to the user the service runs as, because a
-    /// post-install hook about to write there runs as root.
-    ///
-    /// Only a Linux system install whose [`ServiceSpec`] named a user calls this; every
-    /// other install needs nobody but its writer. The default does nothing: ownership
-    /// changes are real work on a real machine, and each implementation owns how, whether
-    /// and when its files change hands. Returning an error fails the install — the user the
-    /// hook is about to write for would otherwise find files owned by root.
-    fn chown_to_user(&self, path: &Path, user: &str) -> Result<()> {
-        let _ = (path, user);
-        Ok(())
-    }
 }
 
 /// The real service manager: real files, real commands.
@@ -106,48 +89,6 @@ impl ServiceManager for SystemManager {
             Err(error) => Err(error.into()),
         }
     }
-
-    fn chown_to_user(&self, path: &Path, user: &str) -> Result<()> {
-        hand_over_to_user(path, user)
-    }
-}
-
-/// Hand one file over to `user`, on Linux only.
-///
-/// Ownership is a Unix idea; the flows never call this off Linux, and a cfg here keeps the
-/// crate compiling where the call has no counterpart. The call runs while root, so the
-/// lookup goes through the C library's `getpwnam`; linking against libc anyway matches the
-/// crate's other Linux-only peers. A user who does not exist fails the install: a hook
-/// about to write into their directories has nowhere it belongs.
-#[cfg(target_os = "linux")]
-fn hand_over_to_user(path: &Path, user: &str) -> Result<()> {
-    let name = std::ffi::CString::new(user)
-        .map_err(|_| Error::Config(format!("the user {user:?} contains a NUL")))?;
-    // SAFETY: `name` is NUL-terminated and alive for the call, and `passwd` may stay
-    // uninitialised while the result is `NULL`.
-    let passwd = unsafe { libc::getpwnam(name.as_ptr()) };
-    if passwd.is_null() {
-        return Err(Error::Config(format!(
-            "no such user: {user}; the unit names {user} as the one the service runs as"
-        )));
-    }
-    // SAFETY: `passwd` is valid while the result is used; `path` is NUL-free because a path
-    // from this crate never holds a NUL, and it is alive for the call.
-    let uid = unsafe { (*passwd).pw_uid };
-    let gid = unsafe { (*passwd).pw_gid };
-    let path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes())
-        .map_err(|_| Error::Config("the unit path contains a NUL".to_owned()))?;
-    // SAFETY: `path` is NUL-terminated and alive for the call.
-    if unsafe { libc::chown(path.as_ptr(), uid, gid) } != 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    Ok(())
-}
-
-/// Hand one file over to `user`, on Linux only — nothing to do elsewhere.
-#[cfg(not(target_os = "linux"))]
-fn hand_over_to_user(_path: &Path, _user: &str) -> Result<()> {
-    Ok(())
 }
 
 /// What a [`RecordingManager`] was asked to do, in order.
@@ -279,35 +220,11 @@ impl ServiceManager for RecordingManager {
 #[derive(Clone, Debug, clap::Subcommand)]
 pub enum ServiceCommand {
     /// Install the service and start it.
-    Install(InstallArgs),
+    Install,
     /// Stop, disable and remove the service.
     Uninstall,
     /// Report what the service manager says about the service.
     Status,
-}
-
-/// The flags an install accepts.
-///
-/// The scope flags are also what an uninstall or a status uses to decide which unit it
-/// means, so all three take the same struct: an install run as a regular user and an
-/// uninstall run the same way address the same user unit.
-#[derive(Clone, Debug, Default, clap::Args)]
-pub struct InstallArgs {
-    /// Install a user unit, in the invoking user's own configuration.
-    #[arg(long)]
-    pub user: bool,
-
-    /// Install a system unit, in `/etc/systemd/system`.
-    #[arg(long)]
-    pub system: bool,
-
-    /// The user a system unit runs as, when it is not the invoking one.
-    #[arg(long, value_name = "USER")]
-    pub run_as: Option<String>,
-
-    /// Leave the application's own post-install hook to the user.
-    #[arg(long)]
-    pub keep_helper: bool,
 }
 
 impl ServiceCommand {
@@ -326,32 +243,29 @@ impl ServiceCommand {
         manager: &dyn ServiceManager,
     ) -> Result<i32> {
         match self {
-            ServiceCommand::Install(args) => {
-                let context = install(spec, args, env, manager)?;
+            ServiceCommand::Install => {
+                let context = install(spec, env, manager)?;
                 println!(
                     "installed the {} service ({})",
                     spec.app_name,
                     context.unit_path.display()
                 );
                 // A user unit dies with its login session; the hint to make it survive one
-                // is Linux's own (`loginctl`), so it is only offered there. A system unit
-                // runs regardless of logins, and says nothing.
+                // is Linux's own (`loginctl`), so it is only offered there.
                 if env.os == Os::Linux
-                    && let Some(hint) = linger_hint(context.scope, context.target_user.as_deref())
+                    && let Some(hint) = linger_hint()
                 {
                     println!("{hint}");
                 }
                 Ok(0)
             }
             ServiceCommand::Uninstall => {
-                // No scope flags: an uninstall of what a plain install made addresses the
-                // same unit that install did.
-                uninstall(spec, &InstallArgs::default(), env, manager)?;
+                uninstall(spec, env, manager)?;
                 println!("removed the {} service", spec.app_name);
                 Ok(0)
             }
             ServiceCommand::Status => {
-                let report = status(spec, &InstallArgs::default(), env, manager)?;
+                let report = status(spec, env, manager)?;
                 // Another tool's output, printed as it came: it is what the user asked for.
                 print!("{report}");
                 if !report.ends_with('\n') {
@@ -363,60 +277,29 @@ impl ServiceCommand {
     }
 }
 
-impl InstallArgs {
-    /// The scope the flags ask for, if they ask for one.
-    ///
-    /// Asking for both is refused here rather than left to the caller: they name two
-    /// different units, and quietly picking one would install something nobody asked for.
-    fn requested_scope(&self) -> Result<Option<Scope>> {
-        match (self.user, self.system) {
-            (true, true) => Err(Error::Config(
-                "--user and --system name two different units; pass at most one".to_owned(),
-            )),
-            (true, false) => Ok(Some(Scope::User)),
-            (false, true) => Ok(Some(Scope::System)),
-            (false, false) => Ok(None),
-        }
-    }
-}
-
-/// Install a service: decide the scope and the target user, write the platform's file,
-/// activate it, and run the spec's post-install hook on what was installed.
+/// Install a service: write the platform's file, activate it, and run the spec's
+/// post-install hook on what was installed.
 ///
 /// The unit's `ExecStart` (or its platform's equivalent) is the absolute path of the
 /// running executable — the app that called this — plus the spec's own arguments, because a
 /// service manager starts one file and nothing else.
 ///
 /// The hook runs last, with the [`InstallContext`] the install resolved, so what it sees is
-/// what was installed, not what was asked for. It may skip out of it: an install with
-/// `--keep-helper` never runs the hook, leaving the file the application's configuration
-/// names to whoever wrote that configuration. When the hook fails, the install reports the
-/// hook's own error and that the service is installed and running — the files exist and the
-/// manager has started the service, which is exactly why a failed hook should be able to
-/// wait for a fix rather than undo an otherwise good install.
-///
-/// On a Linux system install that resolved to a named user, the unit file is handed to that
-/// user before the hook runs: files the hook writes into their directories are theirs, not
-/// root's. An app that drops privileges itself ([`RunAs::Root`] or privilege separation)
-/// resolves to no user, so nothing changes hands.
+/// what was installed. When the hook fails, the install reports the hook's own error and
+/// that the service is installed and running — the files exist and the manager has started
+/// the service, which is exactly why a failed hook should be able to wait for a fix rather
+/// than undo an otherwise good install.
 pub fn install(
     spec: &ServiceSpec,
-    args: &InstallArgs,
     env: &Environment,
     manager: &dyn ServiceManager,
 ) -> Result<InstallContext> {
-    let scope = resolve_scope(env, args.requested_scope()?)?;
-    let target_user = resolve_target_user(env, scope, spec, args.run_as.as_deref())?;
     let context = InstallContext {
-        scope,
-        target_user,
-        unit_path: install_path(spec, scope, env)?,
+        unit_path: install_path(spec, env)?,
         exe: std::env::current_exe()?,
     };
-
     let body = render_install(spec, &context, env.os);
     manager.write_unit(&context.unit_path, &body)?;
-
     for command in install_commands(spec, &context, env) {
         if let Err(error) = manager.run(&command) {
             if let Err(cleanup) = manager.remove_unit(&context.unit_path) {
@@ -429,35 +312,20 @@ pub fn install(
             return Err(error);
         }
     }
-
     if env.os == Os::Windows {
         // The XML was a hand-over: `/create` copies the task into the scheduler, and the
-        // copy left under the temporary directory has done its job. Failing an install that
-        // succeeded over a leftover hand-over file would be the wrong trade.
+        // copy left under the temporary directory has done its job.
         let _ = manager.remove_unit(&context.unit_path);
     }
-
-    // The hook runs on an installed, running service, with the scope and the user the
-    // install resolved. `--keep-helper` leaves the file the application's configuration
-    // names to whoever wrote that configuration.
-    if let Some(hook) = spec.post_install.as_ref().filter(|_| !args.keep_helper) {
-        // A hook that writes into the target user's directories writes over files root
-        // owns; handing the unit file over first is what makes those writes the user's.
-        // Three conditions, two lines: the flat form hides them.
-        #[allow(clippy::collapsible_if)]
-        if let Some(user) = &context.target_user {
-            if env.os == Os::Linux && scope == Scope::System {
-                manager.chown_to_user(&context.unit_path, user)?;
-            }
-        }
-        if let Err(error) = hook(&context) {
-            return Err(Error::Manager(format!(
-                "{error}; the service is installed and running, so fix what the hook needs \
-                 and rerun the uninstall and install of your choice"
-            )));
-        }
+    // The hook runs last, on an installed, running service, with what the install resolved.
+    if let Some(hook) = spec.post_install.as_ref()
+        && let Err(error) = hook(&context)
+    {
+        return Err(Error::Manager(format!(
+            "{error}; the service is installed and running, so fix what the hook needs \
+             and rerun the uninstall and install of your choice"
+        )));
     }
-
     Ok(context)
 }
 
@@ -469,14 +337,12 @@ pub fn install(
 /// failure to remove the file does, and is returned.
 pub fn uninstall(
     spec: &ServiceSpec,
-    args: &InstallArgs,
     env: &Environment,
     manager: &dyn ServiceManager,
 ) -> Result<()> {
-    let scope = resolve_scope(env, args.requested_scope()?)?;
-    let path = install_path(spec, scope, env)?;
+    let path = install_path(spec, env)?;
 
-    for command in uninstall_commands(spec, scope, env) {
+    for command in uninstall_commands(spec, env) {
         // Idempotence: "not running" and "not enabled" are what we came for.
         let _ = manager.run(&command);
     }
@@ -486,33 +352,19 @@ pub fn uninstall(
 /// Report what the service manager says about the service.
 pub fn status(
     spec: &ServiceSpec,
-    args: &InstallArgs,
     env: &Environment,
     manager: &dyn ServiceManager,
 ) -> Result<String> {
-    let scope = resolve_scope(env, args.requested_scope()?)?;
-    manager.run(&status_command(spec, scope, env))
+    manager.run(&status_command(spec, env))
 }
 
-/// Where a platform keeps the file an install writes.
-///
-/// Windows is the odd one out: a scheduled task is registered from XML and the scheduler
-/// keeps its own copy, so the file named here is a hand-over on its way into the
-/// registration, not the task itself.
-///
-/// The home directory is read only where it is used: a system unit lives in `/etc` whatever
-/// `HOME` says, and a scheduled task's hand-over lives in the temporary directory, so
-/// neither should fail for want of a variable it never consults.
-fn install_path(spec: &ServiceSpec, scope: Scope, env: &Environment) -> Result<PathBuf> {
-    match (env.os, scope) {
-        // A system unit lives in `/etc` whatever `HOME` says.
-        (Os::Linux, Scope::System) => {
-            Ok(unit_path(spec.app_name, scope, Path::new("/nonexistent")))
-        }
-        (Os::Linux, Scope::User) => Ok(unit_path(spec.app_name, scope, &home_dir(env)?)),
-        // macOS is user level only, so it always needs the home directory.
-        (Os::MacOs, _) => Ok(agent_path(spec.app_name, &home_dir(env)?)),
-        (Os::Windows, _) => Ok(std::env::temp_dir().join(format!("{}-task.xml", spec.app_name))),
+/// Where each platform keeps the file an install writes: the invoking user's own directory;
+/// a Windows task's hand-over lives in the temporary directory.
+fn install_path(spec: &ServiceSpec, env: &Environment) -> Result<PathBuf> {
+    match env.os {
+        Os::Linux => Ok(unit_path(spec.app_name, &home_dir(env)?)),
+        Os::MacOs => Ok(agent_path(spec.app_name, &home_dir(env)?)),
+        Os::Windows => Ok(std::env::temp_dir().join(format!("{}-task.xml", spec.app_name))),
     }
 }
 
@@ -525,24 +377,6 @@ fn render_install(spec: &ServiceSpec, context: &InstallContext, os: Os) -> Strin
     }
 }
 
-/// A command line built from its words.
-fn words(parts: &[&str]) -> Vec<String> {
-    parts.iter().map(|part| (*part).to_owned()).collect()
-}
-
-/// A `systemctl` command: a user unit goes through the invoking user's own manager.
-fn systemctl_command(scope: Scope, tail: &[&str]) -> Vec<String> {
-    let scope_flag: &[&str] = match scope {
-        Scope::User => &["--user"],
-        Scope::System => &[],
-    };
-    std::iter::once("systemctl")
-        .chain(scope_flag.iter().copied())
-        .chain(tail.iter().copied())
-        .map(str::to_owned)
-        .collect()
-}
-
 /// The commands that activate what was just installed.
 fn install_commands(
     spec: &ServiceSpec,
@@ -550,7 +384,7 @@ fn install_commands(
     env: &Environment,
 ) -> Vec<Vec<String>> {
     match env.os {
-        Os::Linux => activation(spec.app_name, context.scope),
+        Os::Linux => activation(spec.app_name),
         // `gui/<uid>` is the agent session of the user doing the install; a LaunchAgent
         // belongs to them.
         Os::MacOs => vec![words(&[
@@ -573,11 +407,11 @@ fn install_commands(
 }
 
 /// The commands that stop and disable an installed service.
-fn uninstall_commands(spec: &ServiceSpec, scope: Scope, env: &Environment) -> Vec<Vec<String>> {
+fn uninstall_commands(spec: &ServiceSpec, env: &Environment) -> Vec<Vec<String>> {
     match env.os {
         Os::Linux => vec![
-            systemctl_command(scope, &["stop", spec.app_name]),
-            systemctl_command(scope, &["disable", spec.app_name]),
+            words(&["systemctl", "--user", "stop", spec.app_name]),
+            words(&["systemctl", "--user", "disable", spec.app_name]),
         ],
         Os::MacOs => vec![words(&[
             "launchctl",
@@ -590,10 +424,10 @@ fn uninstall_commands(spec: &ServiceSpec, scope: Scope, env: &Environment) -> Ve
 }
 
 /// The command that asks the manager about a service.
-fn status_command(spec: &ServiceSpec, scope: Scope, env: &Environment) -> Vec<String> {
+fn status_command(spec: &ServiceSpec, env: &Environment) -> Vec<String> {
     match env.os {
         // `--no-pager`: the answer is captured, not read off a terminal.
-        Os::Linux => systemctl_command(scope, &["--no-pager", "status", spec.app_name]),
+        Os::Linux => words(&["systemctl", "--user", "--no-pager", "status", spec.app_name]),
         Os::MacOs => words(&[
             "launchctl",
             "print",
@@ -626,53 +460,41 @@ fn home_dir(env: &Environment) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scope::RunAs;
-    use std::sync::atomic::{AtomicBool, Ordering};
 
     fn spec() -> ServiceSpec {
         ServiceSpec {
             app_name: "sapphire-agent",
             description: "Sapphire agent server".into(),
             args: vec!["server".into(), "run".into()],
-            system_run_as: RunAs::InvokingUser,
-            privileges: None,
             post_install: None,
         }
     }
 
-    fn linux_user() -> Environment {
+    fn linux() -> Environment {
         Environment {
             euid: 1000,
-            sudo_user: None,
             os: Os::Linux,
         }
     }
 
-    fn linux_root() -> Environment {
+    fn macos() -> Environment {
         Environment {
-            euid: 0,
-            sudo_user: Some("alice".into()),
-            os: Os::Linux,
+            euid: 1000,
+            os: Os::MacOs,
         }
     }
 
-    /// The brief's privilege helper, against this crate's own `privilege` types: they moved
-    /// here from `-server` in Task 1, so `-server` is not part of a unit file's vocabulary.
-    fn privileges_for(run_as: &str, helper: &str) -> crate::privilege::PrivilegeConfig {
-        crate::privilege::PrivilegeConfig {
-            run_as: run_as.parse().unwrap(),
-            helper: Some(crate::privilege::HelperSpec {
-                user: helper.parse().unwrap(),
-                program: std::path::PathBuf::from("/usr/lib/sapphire-agent/tool-broker"),
-                args: vec![],
-            }),
+    fn windows() -> Environment {
+        Environment {
+            euid: 1000,
+            os: Os::Windows,
         }
     }
 
     #[test]
     fn installing_writes_a_unit_and_activates_it() {
         let manager = RecordingManager::default();
-        install(&spec(), &InstallArgs::default(), &linux_user(), &manager).unwrap();
+        install(&spec(), &linux(), &manager).unwrap();
 
         let calls = manager.calls();
         assert_eq!(calls.units.len(), 1);
@@ -693,8 +515,10 @@ mod tests {
 
     #[test]
     fn a_user_install_uses_the_user_flag() {
+        // The one install kind always goes through the invoking user's own manager: every
+        // command carries `--user`, so nothing here can reach the system's units.
         let manager = RecordingManager::default();
-        install(&spec(), &InstallArgs::default(), &linux_user(), &manager).unwrap();
+        install(&spec(), &linux(), &manager).unwrap();
         assert!(
             manager
                 .calls()
@@ -707,24 +531,9 @@ mod tests {
     }
 
     #[test]
-    fn a_system_install_does_not() {
-        let manager = RecordingManager::default();
-        install(&spec(), &InstallArgs::default(), &linux_root(), &manager).unwrap();
-        assert!(
-            manager
-                .calls()
-                .commands
-                .iter()
-                .all(|c| !c.contains(&"--user".to_owned())),
-            "{:?}",
-            manager.calls().commands
-        );
-    }
-
-    #[test]
     fn a_failing_activation_leaves_no_unit_behind() {
         let manager = RecordingManager::failing_on("enable");
-        assert!(install(&spec(), &InstallArgs::default(), &linux_user(), &manager).is_err());
+        assert!(install(&spec(), &linux(), &manager).is_err());
         assert!(
             !manager.calls().removed.is_empty(),
             "a half-installed service is worse than none: the unit must be cleaned up"
@@ -734,7 +543,7 @@ mod tests {
     #[test]
     fn uninstalling_stops_disables_and_removes() {
         let manager = RecordingManager::default();
-        uninstall(&spec(), &InstallArgs::default(), &linux_user(), &manager).unwrap();
+        uninstall(&spec(), &linux(), &manager).unwrap();
 
         let calls = manager.calls();
         let flat: Vec<String> = calls.commands.iter().flatten().cloned().collect();
@@ -745,37 +554,20 @@ mod tests {
     #[test]
     fn uninstalling_something_that_is_not_installed_is_not_an_error() {
         let manager = RecordingManager::failing_on("disable");
-        uninstall(&spec(), &InstallArgs::default(), &linux_user(), &manager)
-            .expect("uninstall is idempotent");
+        uninstall(&spec(), &linux(), &manager).expect("uninstall is idempotent");
     }
 
     #[test]
     fn status_reports_what_the_manager_said() {
         let manager = RecordingManager::returning("active");
-        let text = status(&spec(), &InstallArgs::default(), &linux_user(), &manager).unwrap();
+        let text = status(&spec(), &linux(), &manager).unwrap();
         assert!(text.contains("active"), "{text}");
     }
 
     #[test]
-    fn asking_for_both_scopes_is_refused() {
-        let args = InstallArgs {
-            user: true,
-            system: true,
-            ..InstallArgs::default()
-        };
-        let err = install(&spec(), &args, &linux_root(), &RecordingManager::default()).unwrap_err();
-        assert!(err.to_string().contains("--user"), "{err}");
-    }
-
-    #[test]
     fn a_macos_install_bootstraps_a_launch_agent() {
-        let env = Environment {
-            euid: 1000,
-            sudo_user: None,
-            os: Os::MacOs,
-        };
         let manager = RecordingManager::default();
-        install(&spec(), &InstallArgs::default(), &env, &manager).unwrap();
+        install(&spec(), &macos(), &manager).unwrap();
 
         let calls = manager.calls();
         assert_eq!(calls.units.len(), 1);
@@ -791,28 +583,12 @@ mod tests {
 
     #[test]
     fn a_windows_install_registers_a_scheduled_task() {
-        let env = Environment {
-            euid: 1000,
-            sudo_user: None,
-            os: Os::Windows,
-        };
         let manager = RecordingManager::default();
-        install(&spec(), &InstallArgs::default(), &env, &manager).unwrap();
+        install(&spec(), &windows(), &manager).unwrap();
 
         let flat: Vec<String> = manager.calls().commands.iter().flatten().cloned().collect();
         assert!(flat.contains(&"schtasks".to_owned()), "{flat:?}");
         assert!(flat.contains(&"/create".to_owned()), "{flat:?}");
-    }
-
-    #[test]
-    fn a_system_install_reads_no_home_directory() {
-        // A system unit lives in `/etc` whatever `HOME` says, so an install must not fail
-        // for want of a variable it never uses.
-        let path = install_path(&spec(), Scope::System, &linux_root()).unwrap();
-        assert_eq!(
-            path,
-            std::path::PathBuf::from("/etc/systemd/system/sapphire-agent.service")
-        );
     }
 
     #[test]
@@ -821,7 +597,7 @@ mod tests {
         // is the only type that runs anything, and it is never constructed above.
         //
         // The needle is assembled from two pieces so that counting it does not count its
-        // own text; the two remaining occurrences are the type's definition and thethe trait
+        // own text; the two remaining occurrences are the type's definition and the trait
         // implementation that follows it.
         let source = include_str!("manager.rs");
         let constructions = source.matches(concat!("System", "Manager")).count();
@@ -842,7 +618,7 @@ mod tests {
         }));
 
         let manager = RecordingManager::ordered(Arc::clone(&order));
-        install(&spec, &InstallArgs::default(), &linux_user(), &manager).unwrap();
+        install(&spec, &linux(), &manager).unwrap();
 
         let order = order.lock().unwrap().clone();
         assert_eq!(
@@ -853,55 +629,11 @@ mod tests {
     }
 
     #[test]
-    fn post_install_sees_the_resolved_target_user() {
-        let seen = Arc::new(Mutex::new(Option::<String>::None));
-        let recorded = Arc::clone(&seen);
-        let mut spec = spec();
-        spec.post_install = Some(Box::new(move |ctx| {
-            *recorded.lock().unwrap() = ctx.target_user.clone();
-            Ok(())
-        }));
-
-        install(
-            &spec,
-            &InstallArgs::default(),
-            &linux_root(),
-            &RecordingManager::default(),
-        )
-        .unwrap();
-        assert_eq!(seen.lock().unwrap().as_deref(), Some("alice"));
-    }
-
-    #[test]
-    fn keep_helper_skips_post_install() {
-        let ran = Arc::new(AtomicBool::new(false));
-        let flag = Arc::clone(&ran);
-        let mut spec = spec();
-        spec.post_install = Some(Box::new(move |_| {
-            flag.store(true, Ordering::Relaxed);
-            Ok(())
-        }));
-
-        let args = InstallArgs {
-            keep_helper: true,
-            ..InstallArgs::default()
-        };
-        install(&spec, &args, &linux_user(), &RecordingManager::default()).unwrap();
-        assert!(!ran.load(Ordering::Relaxed));
-    }
-
-    #[test]
     fn a_failing_post_install_fails_the_install_and_says_what_was_done() {
         let mut spec = spec();
         spec.post_install = Some(Box::new(|_| Err(Error::Config("no room".into()))));
 
-        let err = install(
-            &spec,
-            &InstallArgs::default(),
-            &linux_user(),
-            &RecordingManager::default(),
-        )
-        .unwrap_err();
+        let err = install(&spec, &linux(), &RecordingManager::default()).unwrap_err();
         let message = err.to_string();
         assert!(message.contains("no room"), "{message}");
         assert!(
@@ -912,26 +644,10 @@ mod tests {
     }
 
     #[test]
-    fn a_privilege_separated_spec_installs_as_a_root_unit_whatever_run_as_says() {
-        let mut spec = spec();
-        spec.system_run_as = RunAs::InvokingUser;
-        spec.privileges = Some(privileges_for("alice", "sapphire-agent-tools"));
-
-        let manager = RecordingManager::default();
-        install(&spec, &InstallArgs::default(), &linux_root(), &manager).unwrap();
-
-        let body = &manager.calls().units[0].1;
-        assert!(
-            !body.contains("\nUser="),
-            "an app that drops privileges itself must start as root: {body}"
-        );
-    }
-
-    #[test]
     fn running_an_install_command_activates_the_service() {
         let manager = RecordingManager::default();
-        let code = ServiceCommand::Install(InstallArgs::default())
-            .run(&spec(), &linux_user(), &manager)
+        let code = ServiceCommand::Install
+            .run(&spec(), &linux(), &manager)
             .unwrap();
 
         assert_eq!(code, 0, "a successful install is a zero exit");
@@ -942,7 +658,7 @@ mod tests {
     fn running_an_uninstall_command_removes_the_unit() {
         let manager = RecordingManager::default();
         let code = ServiceCommand::Uninstall
-            .run(&spec(), &linux_user(), &manager)
+            .run(&spec(), &linux(), &manager)
             .unwrap();
 
         assert_eq!(code, 0);
@@ -953,7 +669,7 @@ mod tests {
     fn running_a_status_command_reports_what_the_manager_said() {
         let manager = RecordingManager::returning("active (running)");
         let code = ServiceCommand::Status
-            .run(&spec(), &linux_user(), &manager)
+            .run(&spec(), &linux(), &manager)
             .unwrap();
         assert_eq!(code, 0, "a status that answered is a zero exit");
     }
@@ -961,26 +677,9 @@ mod tests {
     #[test]
     fn a_failing_install_through_the_command_is_an_error() {
         let manager = RecordingManager::failing_on("enable");
-        let err = ServiceCommand::Install(InstallArgs::default())
-            .run(&spec(), &linux_user(), &manager)
+        let err = ServiceCommand::Install
+            .run(&spec(), &linux(), &manager)
             .unwrap_err();
         assert!(err.to_string().contains("enable"), "{err}");
-    }
-
-    #[test]
-    fn the_command_installs_against_the_environment_it_is_given() {
-        // A root install of a command that asked for no scope: the scope rule reads the
-        // injected environment, which is what lets a test drive this without becoming root.
-        let manager = RecordingManager::default();
-        ServiceCommand::Install(InstallArgs::default())
-            .run(&spec(), &linux_root(), &manager)
-            .unwrap();
-
-        let unit = &manager.calls().units[0].0;
-        assert!(
-            unit.starts_with("/etc/systemd/system"),
-            "root gets a system unit: {}",
-            unit.display()
-        );
     }
 }

@@ -18,7 +18,7 @@ use std::io::Write as _;
 use sapphire_bridge_api::{
     BRIDGE_NAME, BridgeClient, InviteParams, JoinParams, PeerInfo, StatusResult,
 };
-use sapphire_framework_service::{Environment, RunAs, ServiceCommand, ServiceSpec, SystemManager};
+use sapphire_framework_service::{Environment, ServiceCommand, ServiceSpec, SystemManager};
 use sapphire_ipc::Endpoint;
 
 #[cfg(feature = "node")]
@@ -71,22 +71,15 @@ pub enum BridgeCommand {
 
 /// The service this binary installs.
 ///
-/// The unit runs the bare binary with `serve`, so a service manager starts a bridge and nothing
-/// else. `system_run_as` is [`RunAs::InvokingUser`]: a bridge installed as a root system unit
-/// would put the bridge directory under `/root` and create synced files owned by root, and
-/// unlike an app that drops privileges itself, a bridge cannot come back from that.
-/// `privileges` is `None` for the same reason the bridge has no privilege separation — it
-/// owns no workspace, so it has no filesystem access to separate.
-///
-/// The description names `version`, so whoever reads the installed unit can tell which build
-/// it starts without inspecting the binary; the frame is what an app's own spec says too.
+/// The unit runs the bare binary with `serve`, so a service manager starts a bridge and
+/// nothing else. The description names `version`, so whoever reads the installed unit can
+/// tell which build it starts without inspecting the binary; the frame is what an app's own
+/// spec says too.
 pub fn bridge_service_spec(version: &str) -> ServiceSpec {
     ServiceSpec {
         app_name: "sapphire-bridge",
         description: format!("Sapphire bridge daemon {version}"),
         args: vec!["serve".to_owned()],
-        system_run_as: RunAs::InvokingUser,
-        privileges: None,
         post_install: None,
     }
 }
@@ -861,7 +854,6 @@ mod pairing_cli_tests {
     fn the_bridge_service_subcommands_parse() {
         for args in [
             vec!["b", "service", "install"],
-            vec!["b", "service", "install", "--user"],
             vec!["b", "service", "uninstall"],
             vec!["b", "service", "status"],
         ] {
@@ -874,7 +866,6 @@ mod pairing_cli_tests {
 mod service_spec_tests {
     use super::*;
     use clap::Parser;
-    use sapphire_framework_service::RunAs;
 
     #[derive(Parser)]
     struct Probe {
@@ -886,10 +877,6 @@ mod service_spec_tests {
     fn the_bridge_service_spec_runs_the_bridge() {
         let spec = bridge_service_spec("0.0.0");
         assert_eq!(spec.args, vec!["serve".to_owned()]);
-        assert!(
-            matches!(spec.system_run_as, RunAs::InvokingUser),
-            "a root bridge would put the bridge directory under /root"
-        );
     }
 
     #[test]
@@ -900,6 +887,5 @@ mod service_spec_tests {
             !spec.description.is_empty(),
             "a unit with an empty Description= is a unit a reader cannot identify"
         );
-        assert!(spec.privileges.is_none(), "the bridge separates nothing");
     }
 }

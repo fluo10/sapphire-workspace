@@ -39,38 +39,6 @@ jobs:
             cargo check -p sapphire-framework --no-default-features --features "$f" --locked || exit 1
           done
 
-  # Privilege separation is the one thing the job above cannot test: these tests must start
-  # as root, become two other users, and prove they cannot become root again. They are
-  # `#[ignore]`d everywhere else, and the two accounts they name exist only here.
-  #
-  # `--test-threads=1` is not a nicety: the drop is process-wide, so two of these running at
-  # once would fight over the identity of the same process. That is also why each test forks
-  # a child and drops there.
-  #
-  # `sudo -E` keeps the runner's environment (so RUSTUP_HOME still finds the pinned
-  # toolchain); `env "PATH=$PATH" "CARGO_HOME=$CARGO_HOME"` spells out the two the root
-  # cargo needs — plain `sudo` resets them, and a root build with its own CARGO_HOME would
-  # download the whole index into /root.
-  privileged:
-    name: privilege separation (root)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Print the toolchain
-        run: cargo --version
-
-      - name: Create the two test accounts
-        run: |
-          sudo useradd -m sapphire-human
-          sudo useradd -m sapphire-tools
-
-      - name: Run the privileged tests
-        run: |
-          sudo -E env "PATH=$PATH" "CARGO_HOME=$CARGO_HOME" \
-            cargo test -p sapphire-framework-server --all-features \
-            --test privilege_root -- --ignored --test-threads=1
-
   # The Windows named pipe carrier (crates/sapphire-framework-ipc/src/windows.rs) sits
   # behind `#[cfg(windows)]`, so the job above never compiles it. This job runs that
   # crate's tests on Windows, where the pipe, the DACL and the SID lookup are real.

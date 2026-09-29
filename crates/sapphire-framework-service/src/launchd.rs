@@ -2,9 +2,7 @@
 //!
 //! A LaunchAgent starts with the user's session and lives in their own
 //! `~/Library/LaunchAgents`, so it is theirs to remove — the macOS counterpart of a systemd
-//! user unit. LaunchDaemons (system-wide, before login) and system units elsewhere are
-//! Linux only: see [`crate::scope::resolve_scope`], which refuses a system scope off Linux
-//! before any of this code runs.
+//! user unit.
 
 use std::path::{Path, PathBuf};
 
@@ -118,5 +116,25 @@ mod tests {
         assert_eq!(escape("a & b"), "a &amp; b");
         assert_eq!(escape("&"), "&amp;");
         assert_eq!(escape("<&>"), "&lt;&amp;&gt;");
+    }
+
+    #[test]
+    fn a_double_hyphen_in_a_description_is_comment_safe() {
+        let spec = ServiceSpec {
+            app_name: "sapphire-agent",
+            description: "Notes -- ledger".into(),
+            args: vec![],
+            post_install: None,
+        };
+        let ctx = InstallContext {
+            unit_path: PathBuf::from("/dev/null"),
+            exe: PathBuf::from("/usr/bin/sapphire-agent"),
+        };
+        let rendered = render_launch_agent(&spec, &ctx);
+        assert!(rendered.contains("<!-- Notes - - ledger -->"), "{rendered}");
+        assert!(
+            !rendered.contains("<!-- Notes -- ledger -->"),
+            "a `--` run inside a comment is illegal XML: {rendered}"
+        );
     }
 }

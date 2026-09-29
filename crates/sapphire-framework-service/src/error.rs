@@ -9,16 +9,6 @@ pub enum Error {
     #[error(transparent)]
     Io(#[from] std::io::Error),
 
-    /// The requested kind of installation is not supported on this platform.
-    #[error("system-wide installation is supported on Linux only; {0}")]
-    Unsupported(String),
-
-    /// A user the install needs to name could not be determined.
-    ///
-    /// Carries what the caller should have provided (`--run-as <user>`) and why it matters.
-    #[error("{0}")]
-    MissingUser(String),
-
     /// The OS service manager refused something.
     #[error("the service manager failed: {0}")]
     Manager(String),

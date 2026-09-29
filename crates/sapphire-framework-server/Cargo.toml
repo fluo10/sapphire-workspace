@@ -38,9 +38,6 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "ti
 toml.workspace = true
 tracing.workspace = true
 
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
-
 [dev-dependencies]
 # Default features turn the redb store on (`first_pins_the_problem` needs a real
 # exclusive file lock to pin), while the lib dependency above keeps the server
@@ -52,11 +49,7 @@ sapphire-framework-bridge = { package = "sapphire-framework-bridge", version = "
 sapphire-framework-server = { path = ".", features = ["test-util"] }
 tempfile = "3"
 toml.workspace = true
-# The privilege tests fork and call `geteuid` / `waitpid` directly, so `libc` has to be
-# reachable from the integration test. The `[target.'cfg(unix)'.dependencies]` entry above
-# already is — a normal dependency reaches every target, tests included — and this crate's
-# test suite was verified to compile with this section removed. It stays because it is where
-# a reader looks for a test target's dependencies, and because it keeps the tests honest if
-# the library's own libc use ever moves behind a cfg the tests do not share.
+
 [target.'cfg(unix)'.dev-dependencies]
+# The signal test sends SIGTERM with `libc::kill` directly.
 libc = "0.2"

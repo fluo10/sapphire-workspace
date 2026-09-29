@@ -14,10 +14,9 @@ serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
-# `SystemManager`'s hand-over of a unit file to the user the service runs as looks the user
-# up in the password database and calls `chown`; that is Linux only, so the dependency is
-# Linux only too.
-[target.'cfg(target_os = "linux")'.dependencies]
+# `effective_uid()` reads `libc::geteuid` under `cfg(unix)` — `geteuid` is POSIX, defined on
+# every unix, not just Linux; the gate here matches that `cfg(unix)` use.
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]
