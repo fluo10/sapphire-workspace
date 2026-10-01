@@ -493,6 +493,9 @@ impl Replica {
     }
 
     /// Compare one path's file with its state: record an edit, or settle the state.
+    /// A file holding a version the store already knows is settled, not recorded: a
+    /// watcher-driven scan of content a live session just materialized must not re-record it
+    /// as a local edit (issue #157).
     fn reconcile_path(
         &mut self,
         rel: &str,
@@ -551,6 +554,38 @@ impl Replica {
         if file_hash == disk.hash {
             if let Some(mut state) = state {
                 if file_hash.is_some() && (stamp != (disk.mtime_ns, disk.len) || is_racy(&disk)) {
+                    state.disk.mtime_ns = stamp.0;
+                    state.disk.len = stamp.1;
+                    state.disk.checked_ns = now_ns();
+                    self.commit_state(rel, &state, index)?;
+                }
+                self.ensure_conflict_copies(rel, &state, filter, source, index, report)?;
+                self.settle(rel, state, filter, source, index, report)?;
+            }
+            return Ok(());
+        }
+
+        // A watcher-driven scan can fire after a live session has already committed a peer's
+        // version to the store and written its bytes to disk. The file then holds content the
+        // store already knows, but `disk.hash` still names the file the commit replaced, so
+        // `file_hash != disk.hash`. Recording it here would invent a fresh own dot, sibling to
+        // the version just received: a spurious conflict copy, and a delete context polluted
+        // enough to stop a later delete from propagating (issue #157). Content the store
+        // already knows is a materialization to settle, not a local edit to record.
+        if let Some(hash) = file_hash
+            && state
+                .as_ref()
+                .is_some_and(|s| s.versions.iter().any(|v| v.content.hash() == Some(hash)))
+        {
+            if let Some(mut state) = state {
+                // The on-disk file now holds `file_hash`, but the stored `disk` still
+                // describes the file the commit replaced; refresh it so `settle` sees the
+                // disk as already matching the known version instead of re-materializing it.
+                if state.disk.hash != file_hash
+                    || stamp != (disk.mtime_ns, disk.len)
+                    || is_racy(&disk)
+                {
+                    state.disk.hash = file_hash;
                     state.disk.mtime_ns = stamp.0;
                     state.disk.len = stamp.1;
                     state.disk.checked_ns = now_ns();
