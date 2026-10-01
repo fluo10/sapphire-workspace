@@ -168,3 +168,54 @@ async fn an_unreachable_peer_does_not_stall_the_others() {
     assert_eq!(await_file(&b, "despite-s.md").await, "x");
     let _ = s;
 }
+
+/// Wait for `rel` on `host` to hold `want`, with a deadline rather than a sleep.
+async fn await_contents(host: &common::Host, rel: &str, want: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        if std::fs::read_to_string(host.ws.join(rel)).is_ok_and(|text| text == want) {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{rel} never became {want:?} on {}",
+            host.ws.display()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+/// Wait for `rel` on `host` to be gone, with a deadline rather than a sleep.
+async fn await_absent(host: &common::Host, rel: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        if std::fs::symlink_metadata(host.ws.join(rel)).is_err() {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{rel} never disappeared from {}",
+            host.ws.display()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_delete_after_a_remote_edit_propagates_over_a_live_session() {
+    let net = LoopbackNetwork::new();
+    let (a, b) = common::synced_pair(&net).await;
+    common::settle(&[&a, &b]).await;
+
+    // a creates the file through its app server; b receives it over the live session.
+    write(&a, "note.md", "one").await;
+    assert_eq!(await_file(&b, "note.md").await, "one");
+
+    // b edits it outside the server, and the live session carries it back to a.
+    std::fs::write(b.ws.join("note.md"), "two").unwrap();
+    await_contents(&a, "note.md", "two").await;
+
+    // a deletes it; the delete must reach b.
+    std::fs::remove_file(a.ws.join("note.md")).unwrap();
+    await_absent(&b, "note.md").await;
+}

@@ -385,14 +385,24 @@ impl SyncRuntime {
             // dial.
             let updates = match &outcome {
                 ScanOutcome::Scanned(report) => {
-                    let vv = replica.vv().clone();
+                    // The unit of replication is the path state (design doc section 2.4):
+                    // the `seen` a peer prunes against is the *path's* version vector - the
+                    // context the recorded entry was built on plus its own dot - never the
+                    // whole replica vv. Sending the global vv here made receivers prune
+                    // causally-related versions they still held: a conflict copy on the
+                    // first remote edit, and tombstones pruned so deletes stopped
+                    // propagating (issue #157).
                     report
                         .recorded
                         .iter()
                         .map(|entry| PathUpdate {
                             path: entry.path.clone(),
                             versions: vec![entry.clone()],
-                            seen: vv.clone(),
+                            seen: {
+                                let mut seen = entry.context.clone();
+                                seen.add_dot(&entry.dot);
+                                seen
+                            },
                         })
                         .collect()
                 }

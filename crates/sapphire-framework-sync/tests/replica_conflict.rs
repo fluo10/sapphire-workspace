@@ -256,3 +256,72 @@ fn an_unrelated_file_at_the_copy_path_does_not_become_the_copy() {
         "{report:?}"
     );
 }
+
+/// The live ordering: a peer's edit is committed to the store, and *then* the file the store
+/// committed is written to disk (which is what the live session does, and what the watcher
+/// fires on). The scan that follows must not re-record known content as a fresh local edit.
+#[test]
+fn a_received_write_scanned_after_the_store_commit_is_not_a_local_edit() {
+    let (mut a, mut b) = (node(1), node(2));
+    based(&mut a, &mut b);
+    b.clock.set(9_000_000);
+    write(&b, "a.txt", "v2");
+    scan(&mut b);
+
+    // a joins b's version, but the bytes are not available, so the store commits the new
+    // version while `disk.hash` still names a's old file.
+    let b_vv = b.replica.vv().clone();
+    let updates = b.replica.delta_for(a.replica.vv()).unwrap();
+    a.replica.apply(&updates, &MapSource::default()).unwrap();
+    a.replica.commit_session(&b_vv).unwrap();
+
+    // The live session's write: the file now holds the version the store already knows.
+    write(&a, "a.txt", "v2");
+    let report = scan(&mut a);
+
+    assert_eq!(read(&a, "a.txt").as_deref(), Some("v2"));
+    let state = a.replica.state("a.txt").unwrap().unwrap();
+    assert_eq!(
+        state.versions.len(),
+        1,
+        "known content must not be recorded as a second, concurrent version"
+    );
+    assert!(report.conflicts.is_empty(), "{report:?}");
+    assert!(
+        tree(&a).keys().all(|p| !p.contains(".conflict-")),
+        "no conflict copy for known content: {:?}",
+        tree(&a).keys().collect::<Vec<_>>()
+    );
+
+    // And no conflict copy reaches b either.
+    sync(&mut a, &mut b);
+    assert_eq!(tree(&b).len(), 1);
+}
+
+/// The second symptom of the same root cause: the invented dot pollutes the delete's
+/// context, so the delete fails to propagate.
+#[test]
+fn a_delete_after_a_received_edit_propagates() {
+    let (mut a, mut b) = (node(1), node(2));
+    based(&mut a, &mut b);
+    b.clock.set(9_000_000);
+    write(&b, "a.txt", "v2");
+    scan(&mut b);
+
+    let b_vv = b.replica.vv().clone();
+    let updates = b.replica.delta_for(a.replica.vv()).unwrap();
+    a.replica.apply(&updates, &MapSource::default()).unwrap();
+    a.replica.commit_session(&b_vv).unwrap();
+
+    write(&a, "a.txt", "v2");
+    scan(&mut a);
+
+    remove(&a, "a.txt");
+    scan(&mut a);
+    sync(&mut a, &mut b);
+    sync(&mut a, &mut b);
+
+    assert_eq!(read(&b, "a.txt"), None, "the delete must reach b");
+    assert_eq!(tree(&a), tree(&b));
+    assert!(tree(&a).is_empty());
+}
