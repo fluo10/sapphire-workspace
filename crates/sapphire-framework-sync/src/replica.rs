@@ -572,10 +572,23 @@ impl Replica {
         // the version just received: a spurious conflict copy, and a delete context polluted
         // enough to stop a later delete from propagating (issue #157). Content the store
         // already knows is a materialization to settle, not a local edit to record.
+        //
+        // Matched against the *winner* specifically, not any sibling (issue #161). A path in
+        // conflict keeps every loser's bytes alive too — as a conflict copy next to it — so a
+        // local write can land on a loser's content without having materialized anything: a
+        // deliberate edit that merely coincides with a version already present elsewhere in
+        // the conflict set, not a re-appearance of what this scan's own disk state already
+        // reflects. The winner is the one version this branch's premise actually describes
+        // (disk already *is* this content, only the bookkeeping is stale), and it is also
+        // `settle`'s own criterion for "nothing to do" once `disk.hash` is refreshed below —
+        // matching any sibling let a write that changes which content wins slip through
+        // silently, destroying the winner's only copy (the file) with nothing recording that
+        // anything superseded it, and no conflict copy to fall back on (conflict copies exist
+        // for losers, never for the winner).
         if let Some(hash) = file_hash
             && state
                 .as_ref()
-                .is_some_and(|s| s.versions.iter().any(|v| v.content.hash() == Some(hash)))
+                .is_some_and(|s| s.winner().content.hash() == Some(hash))
         {
             if let Some(mut state) = state {
                 // The on-disk file now holds `file_hash`, but the stored `disk` still
