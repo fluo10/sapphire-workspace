@@ -272,10 +272,17 @@ mod tests {
         assert_eq!(mode & 0o777, 0o700, "mode was {:o}", mode & 0o777);
     }
 
-    #[test]
-    fn the_environment_variable_replaces_the_whole_path() {
+    // issue #165: `BRIDGE_DIR_ENV` is process-global, and `cargo test` runs a binary's
+    // tests in parallel — this test raced `command::test_env`'s own tests over the same
+    // variable, each clobbering the other's value mid-test, and failed one of them (never
+    // this one, since it never checks anything in between) 20 times out of 20 run
+    // together. `command::test_env::lock` is the one lock every test touching this
+    // variable anywhere in the crate holds.
+    #[tokio::test]
+    async fn the_environment_variable_replaces_the_whole_path() {
+        let _guard = crate::command::test_env::lock().await;
         let tmp = tempfile::tempdir().unwrap();
-        // SAFETY: the test binary sets this before any other thread reads it.
+        // SAFETY: `_guard` holds the lock every other test touching this variable holds too.
         unsafe { std::env::set_var(BRIDGE_DIR_ENV, tmp.path()) };
         let dir = BridgeDir::open().unwrap();
         unsafe { std::env::remove_var(BRIDGE_DIR_ENV) };
