@@ -242,3 +242,38 @@ async fn a_push_larger_than_the_inline_limit_is_fetched_by_hash() {
     // And by the time it is announced the file is there, so a forwarder can serve it.
     assert_eq!(await_file(&b, "big.md").await.len(), 300_000);
 }
+
+#[tokio::test(start_paused = true)]
+async fn an_exchange_gives_up_on_a_peer_that_never_says_hello() {
+    // The far end took the stream and then said nothing: a peer whose bridge parked the
+    // stream for an owner that never claimed it, or one that went away between the dial and
+    // its `Hello`. Nothing closes the stream, so nothing ends the read on its own.
+    //
+    // The exchange holds the replica's lock, so waiting for ever pins this host's replica —
+    // no scan, no commit and no other session for the rest of the process's life. The
+    // session has to give up instead, and say so.
+    let ws = grain_id::GrainId::random();
+    let a = side("a");
+    // Held, not dropped: a dropped half would end the read with end of file, which is the
+    // case that already works. This one is a peer that is simply silent.
+    let (mine, _theirs) = tokio::io::duplex(64 * 1024);
+
+    let opened = tokio::time::timeout(
+        std::time::Duration::from_secs(600),
+        open_live_session(mine, Arc::clone(&a.replica), ws),
+    )
+    .await
+    .expect("a silent peer must not hold the exchange open for ever");
+
+    let Err(err) = opened else {
+        panic!("a session with a peer that never spoke must not be reported as open");
+    };
+    assert!(
+        err.to_string().contains("Hello"),
+        "the failure must name what was waited for, got: {err}"
+    );
+    assert!(
+        a.replica.try_lock().is_ok(),
+        "the replica's lock must be released when the exchange gives up"
+    );
+}

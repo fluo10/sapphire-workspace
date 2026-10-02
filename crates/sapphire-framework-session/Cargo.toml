@@ -16,10 +16,11 @@ serde_json.workspace = true
 thiserror.workspace = true
 # `rt` and `sync` for the writer task and its channel; `io-util` for split and the
 # AsyncRead/AsyncWrite traits.
-tokio = { workspace = true, features = ["io-util", "rt", "sync", "sync"] }
+# `time` for the deadline the initial exchange puts on a peer's `Hello`.
+tokio = { workspace = true, features = ["io-util", "rt", "sync", "time"] }
 tracing.workspace = true
 
 [dev-dependencies]
 sapphire-sync = { package = "sapphire-framework-sync", version = "0.14.0", path = "../sapphire-framework-sync", features = ["test-util"] }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util", "time"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util", "time", "test-util"] }
 tempfile = "3"

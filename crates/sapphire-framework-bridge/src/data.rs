@@ -116,12 +116,32 @@ where
 ///
 /// The bridge never looks at what it is copying: the replication protocol runs end to end
 /// between two app servers.
-pub(crate) async fn splice<A, B>(mut a: A, mut b: B)
+///
+/// *Either* side, not both. [`tokio::io::copy_bidirectional`] returns only once both
+/// directions have ended, which is right for a proxy whose ends can half-close and wrong
+/// here: the far end of a replication session goes quiet while the near end is still
+/// waiting for its first frame, so the near-to-far direction never ends on its own. Waiting
+/// for it would hold this relay — and with it the app server's connection — open for the
+/// rest of the bridge's life, and the app server would wait on a `Hello` from a peer that
+/// is already gone. Returning is what drops both halves and lets the app server read end
+/// of file; a half-close would not do, because a transport may have none to offer
+/// (`poll_shutdown` on a Windows named pipe does nothing).
+///
+/// Nothing in flight is lost by returning. A direction that ends has copied everything the
+/// side that closed had sent, and bytes still queued the other way have nowhere to go: the
+/// side they were bound for is the one that closed.
+pub(crate) async fn splice<A, B>(a: A, b: B)
 where
     A: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     B: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    if let Err(err) = tokio::io::copy_bidirectional(&mut a, &mut b).await {
+    let (mut a_read, mut a_write) = tokio::io::split(a);
+    let (mut b_read, mut b_write) = tokio::io::split(b);
+    let result = tokio::select! {
+        result = tokio::io::copy(&mut a_read, &mut b_write) => result,
+        result = tokio::io::copy(&mut b_read, &mut a_write) => result,
+    };
+    if let Err(err) = result {
         tracing::debug!("a relayed stream ended: {err}");
     }
 }
@@ -363,6 +383,10 @@ pub(crate) async fn inbound(bridge: Arc<Bridge>, net: NetConfig) -> Result<()> {
         // workspaces this host holds by watching which requests are answered differently.
         // Nothing is ever sent back on a stream that fails this test.
         let Some(workgroup) = bridge.workgroup()? else {
+            tracing::debug!(
+                peer = %peer_node_id,
+                "hung up on an inbound stream: this host has no workgroup"
+            );
             drop(stream);
             continue;
         };
@@ -376,7 +400,19 @@ pub(crate) async fn inbound(bridge: Arc<Bridge>, net: NetConfig) -> Result<()> {
         };
 
         // 2. Whose workspace is it?
+        //
+        // Nobody's, often enough: two hosts enable a workspace at their own pace, so the
+        // peer that asks first asks before this host has a route for it. Hanging up is the
+        // answer — there is nothing to park the stream for — and the dialler reads the end
+        // of its stream and retries. Logged because that retry traffic is otherwise
+        // unexplained: a dialler can only report "the peer left before the exchange
+        // finished", and this is the line that says why it left.
         let Some(route) = bridge.route(workspace_id) else {
+            tracing::debug!(
+                peer = %peer_node_id,
+                %workspace_id,
+                "hung up on an inbound stream: no app server here holds that workspace"
+            );
             drop(stream);
             continue;
         };
@@ -609,6 +645,28 @@ mod tests {
             0,
             "closing one side must show as end of file on the other"
         );
+    }
+
+    #[tokio::test]
+    async fn a_relay_ends_as_soon_as_the_peer_half_closes() {
+        // The peer's half is dropped and the app server keeps its own end open, waiting for
+        // a `Hello` — which is exactly what the inbound loop leaves behind when it has no
+        // route for the workspace a peer asked for.
+        //
+        // The relay has to *end* there, because ending is what drops the app server's
+        // connection and lets it read end of file. A relay that also waited for the
+        // app-server-to-peer direction would wait for ever: that direction only ends when
+        // the app server closes, and the app server is the one waiting. Half-closing
+        // instead of ending is not enough — a transport may have no half-close to offer
+        // (`poll_shutdown` on a Windows named pipe does nothing), and then the app server
+        // never hears anything at all.
+        let (_app_mine, app_theirs) = tokio::io::duplex(256);
+        let (peer_mine, peer_theirs) = tokio::io::duplex(256);
+        drop(peer_theirs);
+
+        tokio::time::timeout(Duration::from_secs(5), splice(app_theirs, peer_mine))
+            .await
+            .expect("a relay whose peer has gone must end, not wait on the app server");
     }
 
     #[tokio::test(flavor = "multi_thread")]
