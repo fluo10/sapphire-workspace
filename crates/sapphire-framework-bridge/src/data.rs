@@ -418,14 +418,22 @@ pub(crate) async fn inbound(bridge: Arc<Bridge>, net: NetConfig) -> Result<()> {
         };
 
         // The bridge is the app server of the workgroup's own workspace: no ticket and no
-        // announcement, the session is served here, and the loop goes straight back to
-        // accepting.
+        // announcement, the session is served here.
+        //
+        // Spawned rather than awaited inline (issue #164): the replica's own `Mutex`
+        // already serialises these sessions one at a time, so spawning adds no concurrency
+        // there, but awaiting here would hold this loop — and with it every other peer's
+        // stream, for any other workspace — behind this one session until it finishes or
+        // times out. A peer that parked this stream and has not sent its `Hello` yet
+        // blocks for up to `HELLO_TIMEOUT`; nothing else inbound should wait on that.
         if route.app_name == wgsync::WORKSPACE_APP_NAME {
             match bridge.workgroup_replica() {
                 Some(replica) => {
-                    if let Err(err) = replica.session(stream).await {
-                        tracing::warn!("a workgroup replication session failed: {err}");
-                    }
+                    tokio::spawn(async move {
+                        if let Err(err) = replica.session(stream).await {
+                            tracing::warn!("a workgroup replication session failed: {err}");
+                        }
+                    });
                 }
                 None => tracing::warn!("the workgroup's own workspace has no replica on this host"),
             }
