@@ -64,6 +64,25 @@ const PAGE: usize = 256;
 /// far one peer can make the other buffer by asking faster than it reads.
 const QUEUE: usize = 64;
 
+/// How long the exchange waits for the peer's `Hello`.
+///
+/// The one wait in a session with nothing behind it. Every later read is answering something
+/// the peer asked for or was told, and a peer that stops mid-exchange ends the read with end
+/// of file. The `Hello` is different: the stream is open, the peer has its end, and it may
+/// simply never speak — a bridge that parked the stream for an app server which never
+/// claimed it, or a peer that went away between the dial and its first frame on a transport
+/// with no half-close to report it with.
+///
+/// Waiting for ever is not an option, because the caller holds the replica's lock across the
+/// exchange: one silent peer would pin this host's replica for the rest of the process's
+/// life, and no scan, no commit and no other session would get through. The same reasoning
+/// the bridge's workgroup driver applies to a whole session.
+///
+/// Generous on purpose, and a bound rather than a pace: a peer's bridge may hold a stream
+/// parked for about a minute while it starts a stopped app server, which is waiting that is
+/// working as intended, and nothing waits this out when the peer answers.
+pub const HELLO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+
 /// What a session did.
 #[derive(Clone, Debug, Default)]
 pub struct SessionOutcome {
@@ -223,7 +242,20 @@ where
     )
     .await?;
 
-    let peer_vv = match read_frame(&mut reader).await? {
+    // A peer that never speaks is given up on rather than waited out: see [`HELLO_TIMEOUT`].
+    // The queue is dropped rather than drained, because a peer that did not send a `Hello`
+    // cannot be expected to be reading either.
+    let hello = match tokio::time::timeout(HELLO_TIMEOUT, read_frame(&mut reader)).await {
+        Ok(frame) => frame,
+        Err(_) => {
+            abort(out_tx, writer_task);
+            return Err(Error::Protocol(format!(
+                "the peer sent no Hello within {HELLO_TIMEOUT:?}"
+            )));
+        }
+    };
+
+    let peer_vv = match hello? {
         Some(Frame::Control(Message::Hello {
             format,
             workspace_id: theirs,
