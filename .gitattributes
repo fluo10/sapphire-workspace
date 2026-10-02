@@ -1,0 +1,6 @@
+# Golden files compared byte-for-byte (well, line-for-line) against what this crate
+# generates. The generators always emit LF; a checkout under `core.autocrlf=true` (Git for
+# Windows' own installer default) would otherwise turn these into CRLF on disk, failing every
+# comparison on a line-ending difference that has nothing to do with what is under test
+# (issue #166). Pinned to LF regardless of any `core.autocrlf` setting, on any platform.
+crates/sapphire-framework-service/tests/golden/* text eol=lf
