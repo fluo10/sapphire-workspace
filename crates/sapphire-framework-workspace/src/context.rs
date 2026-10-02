@@ -265,9 +265,32 @@ mod tests {
         TestEnv::set("SAPPHIRE_TESTJOURNAL_CONFIG_DIR", config.path());
         let ctx: &'static AppContext = Box::leak(Box::new(AppContext::new("sapphire-testjournal")));
         ctx.init(AppKind::Server);
-        assert_eq!(ctx.cache_dir(), cache.path().join("sapphire-testjournal"));
-        assert_eq!(ctx.data_dir(), data.path().join("sapphire-testjournal"));
-        assert_eq!(ctx.config_dir(), config.path().join("sapphire-testjournal"));
+        // `category_root` canonicalizes the env override (#162), so the expected side must
+        // match — the same pattern `workspace.rs`'s own tests already use for a canonicalizing
+        // code path.
+        assert_eq!(
+            ctx.cache_dir(),
+            cache
+                .path()
+                .canonicalize()
+                .unwrap()
+                .join("sapphire-testjournal")
+        );
+        assert_eq!(
+            ctx.data_dir(),
+            data.path()
+                .canonicalize()
+                .unwrap()
+                .join("sapphire-testjournal")
+        );
+        assert_eq!(
+            ctx.config_dir(),
+            config
+                .path()
+                .canonicalize()
+                .unwrap()
+                .join("sapphire-testjournal")
+        );
     }
 
     #[test]
@@ -281,11 +304,28 @@ mod tests {
             Box::leak(Box::new(AppContext::new("sapphire-testjournal2")));
         ctx.init(AppKind::Server);
         ctx.init(AppKind::Cli); // first writer wins — no change
-        assert_eq!(ctx.cache_dir(), cache.path().join("sapphire-testjournal2"));
-        assert_eq!(ctx.data_dir(), data.path().join("sapphire-testjournal2"));
+        assert_eq!(
+            ctx.cache_dir(),
+            cache
+                .path()
+                .canonicalize()
+                .unwrap()
+                .join("sapphire-testjournal2")
+        );
+        assert_eq!(
+            ctx.data_dir(),
+            data.path()
+                .canonicalize()
+                .unwrap()
+                .join("sapphire-testjournal2")
+        );
         assert_eq!(
             ctx.config_dir(),
-            config.path().join("sapphire-testjournal2")
+            config
+                .path()
+                .canonicalize()
+                .unwrap()
+                .join("sapphire-testjournal2")
         );
     }
 
@@ -301,7 +341,11 @@ mod tests {
         let ctx: &'static AppContext =
             Box::leak(Box::new(AppContext::new("sapphire-testjournal4")));
         ctx.init(AppKind::Cli);
-        let app_dir = cache.path().join("sapphire-testjournal4");
+        let app_dir = cache
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("sapphire-testjournal4");
         assert_eq!(ctx.cache_dir(), app_dir);
         assert!(
             app_dir.join(uuid).is_dir(),
@@ -351,7 +395,12 @@ mod tests {
         let uuid = crate::path_uuid(root.path()).to_string();
         assert_eq!(
             ctx.cache_dir_for(root.path()),
-            cache.path().join("sapphire-testjournal3").join(uuid)
+            cache
+                .path()
+                .canonicalize()
+                .unwrap()
+                .join("sapphire-testjournal3")
+                .join(uuid)
         );
     }
 
@@ -367,7 +416,12 @@ mod tests {
         ctx.init(AppKind::Desktop);
         assert_eq!(
             ctx.model_cache_dir(),
-            cache.path().join("sapphire-testjournal6").join("models")
+            cache
+                .path()
+                .canonicalize()
+                .unwrap()
+                .join("sapphire-testjournal6")
+                .join("models")
         );
     }
 }
