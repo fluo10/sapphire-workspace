@@ -580,11 +580,25 @@ pub(crate) mod test_env {
     /// The environment variables these tests set are process-global, and `cargo test`
     /// runs a binary's tests in parallel: two tests setting them would race, and one
     /// reading another test's directory would pass by luck until it does not. One lock
-    /// serializes every test that touches them.
+    /// serializes every test that touches them — not just the ones in this file: anything
+    /// anywhere in this crate that reads or sets `SAPPHIRE_RUNTIME_DIR` or
+    /// [`crate::dir::BRIDGE_DIR_ENV`] directly must hold it too (see [`lock`]), or it can
+    /// still race one of these (issue #165 — `dir::tests::
+    /// the_environment_variable_replaces_the_whole_path` did exactly that, unguarded,
+    /// reproducing a failure here 20 times out of 20 run alongside it).
     static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     /// Distinguishes the directories two concurrent tests may set, so a set after this
     /// test's window is never confused with this test's.
     static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    /// Hold this for the duration of any test elsewhere in the crate that reads or sets
+    /// `SAPPHIRE_RUNTIME_DIR` or [`crate::dir::BRIDGE_DIR_ENV`] directly, without going
+    /// through [`with_dirs`]. These are the same process-global variables [`with_dirs`]
+    /// serializes access to, and a test outside this module is exactly as able to race one
+    /// of its tests as two of its own tests would be able to race each other.
+    pub(crate) async fn lock() -> tokio::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().await
+    }
 
     /// Run `body` with both directories pointed inside `tmp`, and alone.
     ///
