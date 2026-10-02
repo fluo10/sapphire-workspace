@@ -24,7 +24,7 @@ pub use error::{Error, Result};
 pub use frame::{Frame, read_frame, read_framed, write_blob, write_control, write_framed};
 pub use live::{LiveSession, open_live_session};
 pub use message::Message;
-pub use session::{SessionOutcome, run_session};
+pub use session::{HELLO_TIMEOUT, SessionOutcome, run_session};
 
 /// The session format this build speaks. Sent in the first message and checked.
 pub const SESSION_FORMAT_VERSION: u32 = 1;
