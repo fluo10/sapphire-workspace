@@ -19,9 +19,15 @@ fn golden(name: &str) -> String {
 
 fn check(name: &str, rendered: &str) {
     let want = golden(name);
+    // The generators always emit LF; the golden file on disk might not, on a checkout where
+    // `core.autocrlf` turned it into CRLF despite `.gitattributes` pinning it to LF (a stale
+    // working tree from before that was added, or a git client that does not honour it,
+    // issue #166). Normalizing both sides is what keeps a failure here about a real change
+    // in what is generated, not about how the checkout's line endings happened to land.
+    let normalize = |s: &str| s.replace("\r\n", "\n");
     assert_eq!(
-        rendered.trim_end(),
-        want.trim_end(),
+        normalize(rendered.trim_end()),
+        normalize(want.trim_end()),
         "\n--- generated ---\n{rendered}\n--- {name} ---\n{want}\n"
     );
 }
