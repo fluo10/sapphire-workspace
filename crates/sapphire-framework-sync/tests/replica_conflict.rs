@@ -325,3 +325,67 @@ fn a_delete_after_a_received_edit_propagates() {
     assert_eq!(tree(&a), tree(&b));
     assert!(tree(&a).is_empty());
 }
+
+/// A regression found by `convergence.rs`'s proptest for issue #161: the known-content
+/// short-circuit #157 added (`reconcile_path`, "a file holding a version the store already
+/// knows is settled, not recorded") matched *any* sibling at the path, not just the current
+/// winner. A local write landing on a *losing* sibling's bytes — the content the winner is
+/// not, but a different version that happens to coexist at the path as a conflict — tripped
+/// it exactly the same as the #157 scenario, and silently discarded the winner it overwrote:
+/// its only copy (the file) is gone, nothing records that a later entry superseded it, and no
+/// conflict copy exists for a winner (conflict copies are written for losers, not winners).
+#[test]
+fn a_local_write_matching_a_losing_sibling_still_supersedes_the_winner_it_overwrites() {
+    let (mut a, mut b) = (node(1), node(2));
+    based(&mut a, &mut b);
+
+    // b's write gets the later clock, so it is the winner once a's reaches it.
+    write(&a, "a.txt", "from a");
+    scan(&mut a);
+    b.clock.set(9_000_000);
+    write(&b, "a.txt", "from b");
+    scan(&mut b);
+    push(&a, &mut b);
+
+    // b now holds both as siblings: "from b" as the winner materialized at a.txt, and
+    // "from a" as a conflict copy next to it.
+    let state = b.replica.state("a.txt").unwrap().unwrap();
+    assert_eq!(state.versions.len(), 2, "a conflict, not a replace");
+    assert_eq!(
+        read(&b, "a.txt").as_deref(),
+        Some("from b"),
+        "b's own edit still wins"
+    );
+    let copy = tree(&b).into_keys().find(|p| p != "a.txt").unwrap();
+    assert_eq!(read(&b, &copy).as_deref(), Some("from a"));
+
+    // b now independently writes bytes that happen to match the *losing* sibling — not a
+    // live session catching up with its own just-written winner, a new decision that
+    // happens to coincide with content already present elsewhere in the conflict set.
+    write(&b, "a.txt", "from a");
+    let report = scan(&mut b);
+
+    assert_eq!(
+        report.recorded.len(),
+        1,
+        "a local write that changes which content is at the path is a new edit, not a \
+         re-appearance of the winner to settle silently"
+    );
+    let state = b.replica.state("a.txt").unwrap().unwrap();
+    assert_eq!(
+        state.versions.len(),
+        1,
+        "the new edit's context covers both prior siblings, so neither survives as a \
+         live version"
+    );
+    assert_eq!(
+        read(&b, "a.txt").as_deref(),
+        Some("from a"),
+        "the file on disk already held this; it must not be reverted or left unaccounted for"
+    );
+
+    // Converges cleanly: nothing was silently lost, so a holds exactly what b now has.
+    sync(&mut a, &mut b);
+    assert_eq!(tree(&a), tree(&b));
+    assert_eq!(contents(&a), BTreeSet::from(["from a".to_string()]));
+}
