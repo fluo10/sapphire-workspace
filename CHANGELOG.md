@@ -8,6 +8,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Changed (breaking)
+
+- `sapphire-framework-session`: `run_session` now takes `&tokio::sync::Mutex<Replica>` instead of `&mut Replica`. It locks the replica itself, only from after the peer's `Hello` is in through to the end of the exchange — not while waiting for it — so a caller that used to pre-lock a `Mutex<Replica>` around the whole call should pass the mutex itself instead: pre-locking defeats the fix, pinning the replica against a concurrent scan or another session for as long as a slow-to-speak peer is waited on (issue #163).
+
 ### Fixed
 
 - `sapphire-framework-sync`: a scan's "known content → settle, don't record" short-circuit (added for #157) matched a local write against *any* sibling version at the path, not just the current winner. A write that changed which content was at a path, but happened to land on bytes already present as a *losing* conflict sibling, was discarded instead of recorded — destroying the previous winner's only copy (the file) with nothing recording that it was superseded, and no conflict copy to fall back on (conflict copies exist for losers, never for the winner). Now matched against the winner specifically, which is also what the branch's own premise (disk already holds the version the store knows, only the bookkeeping is stale) actually describes (#161).

@@ -49,7 +49,7 @@ use sapphire_sync::{
     Content, ContentHash, ContentSource, PathUpdate, Replica, Report, VersionVector,
 };
 use tokio::io::{AsyncRead, AsyncWrite, ReadHalf};
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
 
 use crate::error::{Error, Result};
@@ -149,11 +149,17 @@ pub(crate) struct Exchange<S> {
 /// side asked for has been answered — with the bytes, or with `Missing`. A stream that ends
 /// first returns without an error, but commits nothing.
 ///
+/// `replica` is locked only from after the peer's `Hello` is in through to the end of the
+/// exchange — not while waiting for it (issue #163). A caller that used to pre-lock a
+/// `Mutex<Replica>` around the whole call should stop: passing the mutex itself is what lets
+/// a peer merely taking its time with `Hello` (up to [`HELLO_TIMEOUT`]) leave the replica
+/// free for a scan or another session meanwhile.
+///
 /// `S` must be `'static` because the write half is moved into a task; a stream owned by the
 /// caller (a socket, a spliced pipe, a duplex) is.
 pub async fn run_session<S>(
     stream: S,
-    replica: &mut Replica,
+    replica: &Mutex<Replica>,
     workspace_id: GrainId,
 ) -> Result<SessionOutcome>
 where
@@ -175,7 +181,10 @@ where
             // `Settled`, which is queued but not yet written. Draining the writer delivers
             // `Done`, `Settled` and every pending answer.
             let _ = queued.await;
-            let result = materialise(replica, &received, &peer_vv, outcome);
+            let result = {
+                let mut locked = replica.lock().await;
+                materialise(&mut locked, &received, &peer_vv, outcome)
+            };
             close(out, writer, result).await
         }
         // The peer is gone or has misbehaved, so there is nothing to deliver and a write
@@ -205,9 +214,16 @@ where
 /// Both session kinds start here. Nothing is committed: the caller decides, so that an
 /// interrupted exchange leaves the version vector where it was. An error means the exchange
 /// never reached its end markers, and `run_session`'s own error mapping is the caller's job.
+///
+/// `replica` is locked twice, not once for the whole call (issue #163): briefly at the very
+/// start, to read the two values this side's own `Hello` needs, and again once the peer's
+/// `Hello` is in, held from there through the rest of the exchange — which does need it
+/// continuously, applying and committing each page as it arrives. The gap between the two is
+/// the point: nothing from here to the peer's `Hello` touches the replica, so a peer that
+/// merely takes its time (up to [`HELLO_TIMEOUT`]) must not pin it while this side waits.
 pub(crate) async fn initial_exchange<S>(
     stream: S,
-    replica: &mut Replica,
+    replica: &Mutex<Replica>,
     workspace_id: GrainId,
 ) -> Result<Exchange<S>>
 where
@@ -230,14 +246,20 @@ where
         }
     });
 
-    // 1. Hello, before anything else.
+    // 1. Hello, before anything else. Reading `replica_id`/`vv` is instantaneous, so the
+    // lock is released again immediately — nothing below here needs the replica until the
+    // peer's own `Hello` is in.
+    let (replica_id, vv) = {
+        let locked = replica.lock().await;
+        (locked.replica_id(), locked.vv().clone())
+    };
     send(
         &out_tx,
         Out::Control(Message::Hello {
             format: SESSION_FORMAT_VERSION,
             workspace_id,
-            replica_id: replica.replica_id(),
-            vv: replica.vv().clone(),
+            replica_id,
+            vv,
         }),
     )
     .await?;
@@ -313,6 +335,10 @@ where
         }
     };
 
+    // The peer's `Hello` is in: from here to the end of the exchange, every step reads or
+    // writes the replica, so the lock is held continuously rather than re-taken per step.
+    let mut replica = replica.lock().await;
+
     // 2. Build the outgoing side as owned data, then hand it to a task. Computing it up
     //    front keeps the read loop free while it is written.
     let delta = replica
@@ -373,7 +399,7 @@ where
                     .map_err(|e| Error::Sync(e.to_string()))?;
                 merge_report(&mut report, page);
                 // Ask for content the page needs that this session does not have.
-                for hash in needed(replica, &updates, &received)? {
+                for hash in needed(&replica, &updates, &received)? {
                     if wanted.insert(hash) {
                         send(&out_tx, Out::Control(Message::Want(hash))).await?;
                     }
