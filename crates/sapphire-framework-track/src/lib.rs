@@ -533,7 +533,7 @@ mod tests {
         let changes = detect_changes(&store, &scan(tmp.path(), |_| true).unwrap()).unwrap();
         assert_eq!(
             changes.modified,
-            vec![file.canonicalize().unwrap_or(file.clone())],
+            vec![file.clone()],
             "a same-second, same-length rewrite must count as modified"
         );
     }
