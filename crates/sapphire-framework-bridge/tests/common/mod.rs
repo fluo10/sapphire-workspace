@@ -63,7 +63,7 @@ pub struct Host {
 
 impl Host {
     /// The registration this host's stub app server sends for `workspace_id`.
-    fn registration(&self, workspace_id: GrainId) -> RegisterParams {
+    pub fn registration(&self, workspace_id: GrainId) -> RegisterParams {
         RegisterParams {
             app_name: APP.into(),
             exe_path: self.app_server.exe_path.clone(),

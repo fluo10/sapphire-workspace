@@ -86,6 +86,43 @@ async fn a_stream_for_an_unowned_workspace_is_refused() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_stream_the_peer_has_no_route_for_ends_rather_than_leaving_the_dialler_waiting() {
+    // Each app server registers a workspace of its own: the state two hosts pass through
+    // whenever one enables a workspace before the other does, which is every startup where
+    // the two do not happen to be in step. A's bridge has a route to dial on, and B's has
+    // none to route the arriving stream to.
+    //
+    // A learns that by the stream ending. It is waiting for the peer's first frame and
+    // nothing else will ever arrive, so a stream left open is a dialler that waits for ever
+    // — holding its replica's lock while it does.
+    let net = LoopbackNetwork::new();
+    let a = start(&net, NODE_A, "host-a").await;
+    let b = start(&net, NODE_B, "host-b").await;
+
+    let mine = grain_id::GrainId::random();
+    let theirs = grain_id::GrainId::random();
+    let client_a = connect(&a).await;
+    client_a.register(a.registration(mine)).await.unwrap();
+    let client_b = connect(&b).await;
+    let reg_b = client_b.register(b.registration(theirs)).await.unwrap();
+    introduce(&a.dir, a.workgroup_id, "host-a", &b.dir, b.workgroup_id);
+    introduce(&b.dir, b.workgroup_id, "host-b", &a.dir, a.workgroup_id);
+
+    // The open itself succeeds: A's own bridge holds the route, and B is reachable.
+    let mut from_a = client_a.open_stream(mine, reg_b.device_id).await.unwrap();
+
+    let mut buf = [0u8; 1];
+    let read = tokio::time::timeout(std::time::Duration::from_secs(10), from_a.read(&mut buf))
+        .await
+        .expect("a stream the peer cannot route must end, not leave the dialler waiting")
+        .unwrap();
+    assert_eq!(
+        read, 0,
+        "end of file is how a dialler learns the peer never took the stream"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_peer_outside_the_workgroup_is_refused_before_any_app_server_hears_of_it() {
     let net = LoopbackNetwork::new();
     let a = start(&net, NODE_A, "host-a").await;
