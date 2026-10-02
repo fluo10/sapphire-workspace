@@ -117,10 +117,11 @@ struct Pending {
 /// and `Settled` — "we are caught up" — while the session itself keeps going until a side
 /// closes it or the stream ends.
 ///
-/// The replica is locked for the exchange and for every arriving batch, so a scan or a local
-/// commit on this side waits behind one batch rather than behind the session. Nothing is
-/// committed when the peer goes away or breaks the protocol: the error says which happened,
-/// and the replica's version vector is left where it was.
+/// The replica is locked once the peer's `Hello` is in — not while waiting for it (issue
+/// #163) — and held from there through the exchange and for every arriving batch, so a scan
+/// or a local commit on this side waits behind one batch rather than behind the session.
+/// Nothing is committed when the peer goes away or breaks the protocol: the error says which
+/// happened, and the replica's version vector is left where it was.
 ///
 /// `S` must be `'static` because both halves of the stream are moved into tasks; a stream
 /// owned by the caller (a socket, a spliced pipe, a duplex) is.
@@ -132,10 +133,7 @@ pub async fn open_live_session<S>(
 where
     S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
 {
-    let exchange = {
-        let mut locked = replica.lock().await;
-        session::initial_exchange(stream, &mut locked, workspace_id).await?
-    };
+    let exchange = session::initial_exchange(stream, &replica, workspace_id).await?;
 
     // A session is only live once the exchange reached its end markers. Anything else is
     // reported as the failure it is: `run_session` may treat a peer that simply left as

@@ -1,14 +1,20 @@
 //! Two replicas in one process, connected by a duplex, must converge.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use sapphire_framework_session::run_session;
 use sapphire_sync::{Replica, ReplicaConfig, SystemClock};
+use tokio::sync::Mutex;
 
 struct Fixture {
     _tmp: tempfile::TempDir,
     root: std::path::PathBuf,
-    replica: Replica,
+    // Behind a `Mutex`, not owned directly: `run_session` only locks it from after the
+    // peer's `Hello` through to the end of the exchange (issue #163), so passing it the
+    // mutex itself — rather than pre-locking around the whole call, as every fixture here
+    // once did — is what the fix is for.
+    replica: Mutex<Replica>,
 }
 
 fn replica(name: &str, device: grain_id::GrainId) -> Fixture {
@@ -18,11 +24,11 @@ fn replica(name: &str, device: grain_id::GrainId) -> Fixture {
     let state = tmp.path().join("state");
     std::fs::create_dir_all(&state).unwrap();
     let config = ReplicaConfig::new("test-app", root.clone(), device, &state);
-    let replica = Replica::open(config, std::sync::Arc::new(SystemClock)).unwrap();
+    let replica = Replica::open(config, Arc::new(SystemClock)).unwrap();
     Fixture {
         _tmp: tmp,
         root,
-        replica,
+        replica: Mutex::new(replica),
     }
 }
 
@@ -34,11 +40,19 @@ fn write(root: &Path, rel: &str, content: &str) {
     std::fs::write(path, content).unwrap();
 }
 
+/// Scan `fixture`'s replica — a single-locker convenience for a test with nothing else
+/// touching it concurrently.
+async fn scan(fixture: &Fixture) {
+    fixture.replica.lock().await.scan().unwrap();
+}
+
 /// Run one session between `a` and `b` over an in-process duplex.
-async fn sync(a: &mut Replica, b: &mut Replica, ws: grain_id::GrainId) {
+async fn sync(a: &Fixture, b: &Fixture, ws: grain_id::GrainId) {
     let (left, right) = tokio::io::duplex(64 * 1024);
-    let (ra, rb) = (a, b);
-    let (x, y) = tokio::join!(run_session(left, ra, ws), run_session(right, rb, ws));
+    let (x, y) = tokio::join!(
+        run_session(left, &a.replica, ws),
+        run_session(right, &b.replica, ws)
+    );
     x.unwrap();
     y.unwrap();
 }
@@ -46,13 +60,13 @@ async fn sync(a: &mut Replica, b: &mut Replica, ws: grain_id::GrainId) {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_file_written_on_one_side_appears_on_the_other() {
     let ws = grain_id::GrainId::random();
-    let mut a = replica("a", grain_id::GrainId::random());
-    let mut b = replica("b", grain_id::GrainId::random());
+    let a = replica("a", grain_id::GrainId::random());
+    let b = replica("b", grain_id::GrainId::random());
 
     write(&a.root, "notes/hello.md", "# hello");
-    a.replica.scan().unwrap();
+    scan(&a).await;
 
-    sync(&mut a.replica, &mut b.replica, ws).await;
+    sync(&a, &b, ws).await;
 
     assert_eq!(
         std::fs::read_to_string(b.root.join("notes/hello.md")).unwrap(),
@@ -63,14 +77,14 @@ async fn a_file_written_on_one_side_appears_on_the_other() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_file_larger_than_the_inline_limit_is_fetched_by_hash() {
     let ws = grain_id::GrainId::random();
-    let mut a = replica("a", grain_id::GrainId::random());
-    let mut b = replica("b", grain_id::GrainId::random());
+    let a = replica("a", grain_id::GrainId::random());
+    let b = replica("b", grain_id::GrainId::random());
 
     let big = "x".repeat(300_000);
     write(&a.root, "big.md", &big);
-    a.replica.scan().unwrap();
+    scan(&a).await;
 
-    sync(&mut a.replica, &mut b.replica, ws).await;
+    sync(&a, &b, ws).await;
 
     assert_eq!(
         std::fs::read_to_string(b.root.join("big.md"))
@@ -83,17 +97,17 @@ async fn a_file_larger_than_the_inline_limit_is_fetched_by_hash() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_second_session_sends_nothing_new() {
     let ws = grain_id::GrainId::random();
-    let mut a = replica("a", grain_id::GrainId::random());
-    let mut b = replica("b", grain_id::GrainId::random());
+    let a = replica("a", grain_id::GrainId::random());
+    let b = replica("b", grain_id::GrainId::random());
 
     write(&a.root, "a.md", "one");
-    a.replica.scan().unwrap();
-    sync(&mut a.replica, &mut b.replica, ws).await;
+    scan(&a).await;
+    sync(&a, &b, ws).await;
 
     let (left, right) = tokio::io::duplex(64 * 1024);
     let (x, _) = tokio::join!(
-        run_session(left, &mut a.replica, ws),
-        run_session(right, &mut b.replica, ws)
+        run_session(left, &a.replica, ws),
+        run_session(right, &b.replica, ws)
     );
     assert_eq!(
         x.unwrap().sent,
@@ -105,15 +119,15 @@ async fn a_second_session_sends_nothing_new() {
 #[tokio::test(flavor = "multi_thread")]
 async fn edits_on_both_sides_both_arrive() {
     let ws = grain_id::GrainId::random();
-    let mut a = replica("a", grain_id::GrainId::random());
-    let mut b = replica("b", grain_id::GrainId::random());
+    let a = replica("a", grain_id::GrainId::random());
+    let b = replica("b", grain_id::GrainId::random());
 
     write(&a.root, "from-a.md", "a");
     write(&b.root, "from-b.md", "b");
-    a.replica.scan().unwrap();
-    b.replica.scan().unwrap();
+    scan(&a).await;
+    scan(&b).await;
 
-    sync(&mut a.replica, &mut b.replica, ws).await;
+    sync(&a, &b, ws).await;
 
     assert!(b.root.join("from-a.md").exists());
     assert!(a.root.join("from-b.md").exists());
@@ -122,17 +136,17 @@ async fn edits_on_both_sides_both_arrive() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_deletion_propagates() {
     let ws = grain_id::GrainId::random();
-    let mut a = replica("a", grain_id::GrainId::random());
-    let mut b = replica("b", grain_id::GrainId::random());
+    let a = replica("a", grain_id::GrainId::random());
+    let b = replica("b", grain_id::GrainId::random());
 
     write(&a.root, "doomed.md", "x");
-    a.replica.scan().unwrap();
-    sync(&mut a.replica, &mut b.replica, ws).await;
+    scan(&a).await;
+    sync(&a, &b, ws).await;
     assert!(b.root.join("doomed.md").exists());
 
     std::fs::remove_file(a.root.join("doomed.md")).unwrap();
-    a.replica.scan().unwrap();
-    sync(&mut a.replica, &mut b.replica, ws).await;
+    scan(&a).await;
+    sync(&a, &b, ws).await;
 
     assert!(!b.root.join("doomed.md").exists());
 }
@@ -140,20 +154,20 @@ async fn a_deletion_propagates() {
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_edits_leave_a_conflict_copy_rather_than_losing_one() {
     let ws = grain_id::GrainId::random();
-    let mut a = replica("a", grain_id::GrainId::random());
-    let mut b = replica("b", grain_id::GrainId::random());
+    let a = replica("a", grain_id::GrainId::random());
+    let b = replica("b", grain_id::GrainId::random());
 
     write(&a.root, "shared.md", "seed");
-    a.replica.scan().unwrap();
-    sync(&mut a.replica, &mut b.replica, ws).await;
+    scan(&a).await;
+    sync(&a, &b, ws).await;
 
     // Both edit without seeing the other.
     write(&a.root, "shared.md", "from a");
     write(&b.root, "shared.md", "from b");
-    a.replica.scan().unwrap();
-    b.replica.scan().unwrap();
+    scan(&a).await;
+    scan(&b).await;
 
-    sync(&mut a.replica, &mut b.replica, ws).await;
+    sync(&a, &b, ws).await;
 
     let names: Vec<String> = std::fs::read_dir(&b.root)
         .unwrap()
@@ -168,13 +182,13 @@ async fn concurrent_edits_leave_a_conflict_copy_rather_than_losing_one() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_session_for_a_different_workspace_is_refused() {
-    let mut a = replica("a", grain_id::GrainId::random());
-    let mut b = replica("b", grain_id::GrainId::random());
+    let a = replica("a", grain_id::GrainId::random());
+    let b = replica("b", grain_id::GrainId::random());
 
     let (left, right) = tokio::io::duplex(64 * 1024);
     let (x, y) = tokio::join!(
-        run_session(left, &mut a.replica, grain_id::GrainId::random()),
-        run_session(right, &mut b.replica, grain_id::GrainId::random())
+        run_session(left, &a.replica, grain_id::GrainId::random()),
+        run_session(right, &b.replica, grain_id::GrainId::random())
     );
     assert!(
         x.is_err() || y.is_err(),
@@ -185,15 +199,15 @@ async fn a_session_for_a_different_workspace_is_refused() {
 #[tokio::test(flavor = "multi_thread")]
 async fn an_interrupted_session_does_not_advance_the_version_vector() {
     let ws = grain_id::GrainId::random();
-    let mut a = replica("a", grain_id::GrainId::random());
+    let a = replica("a", grain_id::GrainId::random());
     let b = replica("b", grain_id::GrainId::random());
 
     write(&a.root, "a.md", "one");
-    a.replica.scan().unwrap();
+    scan(&a).await;
 
     // B's side is dropped as soon as it has said Hello, so A never sees Done.
     let (left, right) = tokio::io::duplex(64 * 1024);
-    let before = b.replica.vv().clone();
+    let before = b.replica.lock().await.vv().clone();
     let cut = tokio::spawn(async move {
         let mut right = right;
         use tokio::io::AsyncReadExt;
@@ -201,11 +215,11 @@ async fn an_interrupted_session_does_not_advance_the_version_vector() {
         let _ = right.read(&mut buf).await;
         drop(right);
     });
-    let _ = run_session(left, &mut a.replica, ws).await;
+    let _ = run_session(left, &a.replica, ws).await;
     cut.await.unwrap();
 
     assert_eq!(
-        b.replica.vv(),
+        b.replica.lock().await.vv(),
         &before,
         "an interrupted session must leave the version vector untouched"
     );

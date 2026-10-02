@@ -171,13 +171,15 @@ impl WorkgroupReplica {
     ///
     /// The session is symmetric: this side sends what the peer lacks and applies what it is
     /// sent, so the same method serves a stream dialed to a peer and one a peer dialed to
-    /// the bridge. The replica is locked for the session's whole life.
+    /// the bridge. `run_session` locks the replica itself, only from after the peer's
+    /// `Hello` is in through to the end of the exchange — not while waiting for it (issue
+    /// #163) — so a peer that merely takes its time with `Hello` does not pin this host's
+    /// replica against a concurrent [`scan`](WorkgroupReplica::scan) or another session.
     pub async fn session<S>(&self, stream: S) -> Result<()>
     where
         S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
     {
-        let mut replica = self.replica.lock().await;
-        let outcome = run_session(stream, &mut replica, self.workspace_id)
+        let outcome = run_session(stream, &self.replica, self.workspace_id)
             .await
             .map_err(|e| Error::Peer(format!("a workgroup replication session failed: {e}")))?;
         tracing::debug!(?outcome, "a workgroup replication session ended");
