@@ -55,7 +55,8 @@ fn arguments(args: &[String]) -> String {
 /// a long-running agent.
 pub fn render_task(spec: &ServiceSpec, ctx: &InstallContext) -> String {
     let mut task = String::new();
-    task.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+    // No XML declaration: `schtasks /create /xml` rejects a UTF-8 file that declares its
+    // encoding ("cannot switch encoding"), and a file without one is read as the text it is.
     task.push_str(
         "<Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\n",
     );
