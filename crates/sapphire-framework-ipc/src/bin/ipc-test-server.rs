@@ -25,6 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let endpoint = Endpoint::in_dir(app.clone(), dir.into());
     let info = ServerInfo {
         version,
+        api: 1,
         pid: std::process::id(),
         managed_by: ManagedBy::Service,
     };

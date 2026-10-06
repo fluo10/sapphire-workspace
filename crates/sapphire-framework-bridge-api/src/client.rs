@@ -32,6 +32,7 @@ impl BridgeClient {
         let info = ClientInfo {
             kind: kind.to_owned(),
             version: version.to_owned(),
+            api: crate::API_VERSION,
             pid: std::process::id(),
         };
         let (client, _) = connect_or_absent(&endpoint, BRIDGE_NAME, info)

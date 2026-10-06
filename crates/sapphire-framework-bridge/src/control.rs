@@ -529,6 +529,7 @@ mod tests {
     fn info() -> ServerInfo {
         ServerInfo {
             version: "0.0.0".into(),
+            api: 1,
             pid: 1,
             managed_by: sapphire_bridge_api::ManagedBy::Spawned,
         }
@@ -548,6 +549,7 @@ mod tests {
             ClientInfo {
                 kind: "test".into(),
                 version: "0.0.0".into(),
+                api: 1,
                 pid: std::process::id(),
             },
         )

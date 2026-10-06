@@ -33,6 +33,7 @@ fn client_info() -> ClientInfo {
     ClientInfo {
         kind: "cli".into(),
         version: "0.0.0".into(),
+        api: 1,
         pid: std::process::id(),
     }
 }
@@ -40,6 +41,7 @@ fn client_info() -> ClientInfo {
 fn server_info() -> ServerInfo {
     ServerInfo {
         version: "0.0.0".into(),
+        api: 1,
         pid: std::process::id(),
         managed_by: ManagedBy::Spawned,
     }
@@ -255,15 +257,15 @@ async fn a_call_made_after_the_server_has_gone_fails_rather_than_hanging() {
     );
 }
 
-/// A server of another version cannot be connected to and cannot be replaced, so the
-/// handshake answers with [`Error::ServiceVersionMismatch`], whose advice is to restart
-/// the service — this crate no longer retires anything, and a version mismatch is the
-/// caller's to resolve by restarting (migrated from the deleted `race.rs`).
+/// A server of another API version cannot be connected to and cannot be replaced, so the
+/// handshake answers with [`Error::ApiVersionMismatch`], whose advice is to upgrade and
+/// restart — this crate no longer retires anything, and a mismatch is the caller's to
+/// resolve (migrated from the deleted `race.rs`).
 #[tokio::test]
-async fn a_server_of_another_version_is_reported_not_replaced() {
+async fn a_server_of_another_api_version_is_reported_not_replaced() {
     let (client_conn, server_conn) = Connection::pair();
     let wrong = ServerInfo {
-        version: "9.9.9".into(),
+        api: 2,
         ..server_info()
     };
     tokio::spawn(async move {
@@ -276,7 +278,11 @@ async fn a_server_of_another_version_is_reported_not_replaced() {
     assert!(
         matches!(
             err,
-            sapphire_framework_ipc::Error::ServiceVersionMismatch { .. }
+            sapphire_framework_ipc::Error::ApiVersionMismatch {
+                running: 2,
+                ours: 1,
+                ..
+            }
         ),
         "got {err:?}"
     );
@@ -284,4 +290,36 @@ async fn a_server_of_another_version_is_reported_not_replaced() {
         err.to_string().contains("restart the service"),
         "the error must carry the advice: {err}"
     );
+}
+
+/// The crate versions are not compared: an app server talks to a bridge built from
+/// another crate, and their versions never line up. Only the API has to agree.
+#[tokio::test]
+async fn a_server_of_another_crate_version_but_the_same_api_is_connected_to() {
+    let (client_conn, server_conn) = Connection::pair();
+    let other = ServerInfo {
+        version: "9.9.9".into(),
+        ..server_info()
+    };
+    tokio::spawn(async move {
+        let _ = serve(server_conn, router(), "test-app", other).await;
+    });
+
+    let (_client, info) = Client::handshake(client_conn, "test-app", client_info())
+        .await
+        .expect("the same API is enough");
+    assert_eq!(info.version, "9.9.9");
+}
+
+/// A server built before API versions were exchanged sends no `api`; it spoke
+/// [`FIRST_API`], so a client expecting that still talks to it without a restart.
+#[test]
+fn a_server_info_without_an_api_speaks_the_first_api() {
+    let info: ServerInfo = serde_json::from_value(serde_json::json!({
+        "version": "0.14.0",
+        "pid": 1,
+        "managed_by": "service",
+    }))
+    .unwrap();
+    assert_eq!(info.api, sapphire_framework_ipc::FIRST_API);
 }

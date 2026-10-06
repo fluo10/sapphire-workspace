@@ -59,11 +59,11 @@ pub async fn probe(endpoint: &Endpoint) -> Result<bool> {
 /// Handshake with the server on `endpoint`, or report that nothing is there.
 ///
 /// `Ok(None)` covers both "nothing is listening" and "a corpse socket": `probe` has
-/// already cleared the latter. A server of a different version is an error, not a
+/// already cleared the latter. A server of a different API version is an error, not a
 /// replacement — start-on-demand retired spawned servers by re-exec, and this crate no
-/// longer starts anything. A service-managed server of the wrong version is reported as
-/// [`Error::ServiceVersionMismatch`]: the caller restarts the service, and no client
-/// fixes it.
+/// longer starts anything. It is reported as [`Error::ApiVersionMismatch`]: the caller
+/// upgrades and restarts the service, and no client fixes it. A different crate version
+/// alone is no mismatch.
 pub async fn connect_or_absent(
     endpoint: &Endpoint,
     app: &str,
@@ -72,8 +72,8 @@ pub async fn connect_or_absent(
     if !probe(endpoint).await? {
         return Ok(None);
     }
-    // The version gate lives in the handshake itself: a server of another version is
-    // [`Error::ServiceVersionMismatch`], whose advice is to restart the service. Nothing
+    // The API gate lives in the handshake itself: a server of another API version is
+    // [`Error::ApiVersionMismatch`], whose advice is to upgrade and restart. Nothing
     // replaces a server any more.
     match Client::handshake(connect(endpoint).await?, app, client).await {
         Ok(pair) => Ok(Some(pair)),

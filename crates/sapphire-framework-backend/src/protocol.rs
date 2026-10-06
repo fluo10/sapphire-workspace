@@ -14,6 +14,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::{BackendEvent, FileSearchResult, SearchMode};
 
+/// The version of the app server's API: the framework's methods below and their types.
+///
+/// This, not the crate version, is what a CLI, MCP server or desktop UI must agree on
+/// with the running server, so that a release that leaves the method set alone does not
+/// demand a service restart. Bump it on a breaking change to a method, a parameter or a
+/// result here.
+pub const API_VERSION: u32 = 1;
+
 /// Search the workspace.
 pub const SEARCH: &str = "workspace.search";
 /// Read a text file in full.

@@ -42,6 +42,7 @@ impl IpcBackend {
         let info = ClientInfo {
             kind: kind.to_owned(),
             version: version.to_owned(),
+            api: proto::API_VERSION,
             pid: std::process::id(),
         };
         let (client, _) = connect_or_absent(endpoint, app, info)

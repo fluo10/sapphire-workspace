@@ -158,6 +158,7 @@ mod tests {
         tokio::spawn(async move {
             let info = ServerInfo {
                 version: "0.0.0".into(),
+                api: 1,
                 pid: std::process::id(),
                 managed_by: ManagedBy::Service,
             };
@@ -166,6 +167,7 @@ mod tests {
         let info = ClientInfo {
             kind: "cli".into(),
             version: "0.0.0".into(),
+            api: 1,
             pid: std::process::id(),
         };
         let (client, _) = Client::handshake(client_conn, "sapphire-syncmethods", info)
@@ -336,6 +338,7 @@ mod map_tests {
         tokio::spawn(async move {
             let info = ServerInfo {
                 version: "0.0.0".into(),
+                api: 1,
                 pid: std::process::id(),
                 managed_by: ManagedBy::Service,
             };
@@ -344,6 +347,7 @@ mod map_tests {
         let info = ClientInfo {
             kind: "cli".into(),
             version: "0.0.0".into(),
+            api: 1,
             pid: std::process::id(),
         };
         let (client, _) = Client::handshake(client_conn, "sapphire-syncmap", info)

@@ -252,6 +252,7 @@ impl Bridge {
         let bridge = self;
         let info = ServerInfo {
             version: bridge.version.to_owned(),
+            api: sapphire_bridge_api::API_VERSION,
             pid: std::process::id(),
             // The bridge is not installed as a service yet; it is started on demand. A
             // client that finds a mismatched version may therefore replace it, which is the

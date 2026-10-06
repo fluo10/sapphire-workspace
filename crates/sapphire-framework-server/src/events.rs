@@ -191,6 +191,7 @@ mod tests {
         tokio::spawn(async move {
             let info = ServerInfo {
                 version: "0.0.0".into(),
+                api: 1,
                 pid: std::process::id(),
                 managed_by: ManagedBy::Spawned,
             };
@@ -199,6 +200,7 @@ mod tests {
         let client_info = ClientInfo {
             kind: "test".into(),
             version: "0.0.0".into(),
+            api: 1,
             pid: std::process::id(),
         };
         let (client, _) = Client::handshake(client_conn, "sapphire-eventtest", client_info)

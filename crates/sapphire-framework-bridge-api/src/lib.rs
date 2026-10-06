@@ -18,6 +18,13 @@ pub use sapphire_ipc::ManagedBy;
 mod client;
 pub use client::BridgeClient;
 
+/// The version of the bridge's control-plane API: the methods below and their types.
+///
+/// This, not the crate version, is what an app server and the bridge must agree on —
+/// they are different crates on different release lines. Bump it on a breaking change to
+/// a method, a parameter or a result here.
+pub const API_VERSION: u32 = 1;
+
 /// The endpoint name the bridge's control plane listens under.
 pub const BRIDGE_NAME: &str = "bridge";
 /// The endpoint name the bridge's data plane listens under.
