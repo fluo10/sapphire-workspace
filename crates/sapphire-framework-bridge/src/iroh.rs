@@ -12,7 +12,9 @@ use std::time::Duration;
 
 use grain_id::GrainId;
 use sapphire_bridge_api::ALPN;
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf};
+use tokio::io::{
+    AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf,
+};
 
 // `iroh` is also the name of this module, so the crate is spelled with a leading `::` or the
 // path would be ambiguous.
