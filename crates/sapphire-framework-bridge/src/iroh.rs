@@ -6,10 +6,13 @@
 
 use std::net::SocketAddr;
 use std::path::Path;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use std::time::Duration;
 
 use grain_id::GrainId;
 use sapphire_bridge_api::ALPN;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf};
 
 // `iroh` is also the name of this module, so the crate is spelled with a leading `::` or the
 // path would be ambiguous.
@@ -33,6 +36,74 @@ use crate::relay::RelayConfig;
 /// The request is a small JSON object; anything past this is a peer that is not speaking this
 /// protocol, and reading forever on it would be a way to make the bridge allocate.
 const MAX_REQUEST_LINE: u64 = 4 * 1024;
+
+/// How long [`AcceptedStream`] keeps a connection's last handle alive after the stream
+/// itself is dropped, waiting for the peer to close it.
+///
+/// Per [`iroh::endpoint::Connection`]'s own doc: once every handle to a connection — the
+/// `Connection` itself, and every stream still live on it — has been dropped, the connection
+/// closes at once, and "closing the connection immediately abandons efforts to deliver data
+/// to the peer". `SendStream::finish` only *registers* that a stream is done; it is the
+/// connection's own background driver that puts the bytes on the wire and waits for the
+/// peer's ack. Every caller here follows the same shape — write a reply, then let the
+/// stream drop — so without this, the drop can race that driver: the peer sees its
+/// connection die instead of receiving the reply it was just sent. Keeping one more handle
+/// open until the peer actually closes (or this timeout elapses) is iroh's own fix, lifted
+/// from its `listen` example.
+const ACCEPT_CLOSE_GRACE: Duration = Duration::from_secs(5);
+
+/// An inbound stream, plus the connection it came from.
+///
+/// [`IrohTransport::accept`] hands this out instead of the bare joined stream it used to:
+/// see [`ACCEPT_CLOSE_GRACE`] for why a connection must outlive every stream that answered
+/// on it.
+struct AcceptedStream {
+    io: tokio::io::Join<::iroh::endpoint::RecvStream, ::iroh::endpoint::SendStream>,
+    conn: ::iroh::endpoint::Connection,
+}
+
+impl AsyncRead for AcceptedStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().io).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for AcceptedStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.get_mut().io).poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().io).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().io).poll_shutdown(cx)
+    }
+}
+
+impl Drop for AcceptedStream {
+    fn drop(&mut self) {
+        // `io`'s streams are each a handle on this same connection and are about to drop
+        // right along with this clone, so without it this would be the last handle —
+        // exactly the case this type exists to avoid. The wait runs in the background:
+        // `Drop::drop` cannot be `async`, and nothing here needs to block on it — the point
+        // is only to give the connection's driver a chance to run before every handle that
+        // kept it alive is finally gone.
+        let conn = self.conn.clone();
+        tokio::spawn(async move {
+            let _ = tokio::time::timeout(ACCEPT_CLOSE_GRACE, conn.closed()).await;
+        });
+    }
+}
 
 /// A device's node id and the addresses that reach it.
 ///
@@ -298,7 +369,10 @@ impl PeerTransport for IrohTransport {
                 // the one connection that arrives before membership exists.
                 return Ok(Inbound::Pairing(
                     from.to_string(),
-                    Box::new(tokio::io::join(recv, send)),
+                    Box::new(AcceptedStream {
+                        io: tokio::io::join(recv, send),
+                        conn,
+                    }),
                 ));
             }
             let (request, recv) = match read_request(recv).await {
@@ -323,7 +397,10 @@ impl PeerTransport for IrohTransport {
                 request.workspace_id,
                 // `read_request` split the request line off `recv`; put the halves back
                 // together for the caller, which sees one stream starting at the payload.
-                Box::new(tokio::io::join(recv, send)),
+                Box::new(AcceptedStream {
+                    io: tokio::io::join(recv, send),
+                    conn,
+                }),
             ));
         }
     }

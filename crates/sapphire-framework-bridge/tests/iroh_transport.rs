@@ -168,6 +168,46 @@ async fn two_endpoints_exchange_bytes() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_reply_survives_the_accepting_side_dropping_the_stream_at_once() {
+    // This is the shape every caller in this crate uses: write the last message, then let
+    // the stream — and nothing else — go out of scope. Per `iroh::endpoint::Connection`'s
+    // own doc, once every handle to a connection (the `Connection` itself, and every stream
+    // still live on it) has dropped, the connection closes at once and "immediately abandons
+    // efforts to deliver data to the peer" — discarding whatever was queued but not yet on
+    // the wire. `accept` must keep the connection alive a little past the stream it hands
+    // out, or the opener never sees what was just written to it.
+    let tmp = tempfile::tempdir().unwrap();
+    let a = transport(&tmp, "a.key", &offline()).await;
+    let b = Arc::new(transport(&tmp, "b.key", &offline()).await);
+
+    let b_node_id = b.node_id();
+    let b_addr = b.node_addr().await.unwrap();
+    a.add_known_address(&b_addr).unwrap();
+
+    let ws = GrainId::random();
+    let accepting = Arc::clone(&b);
+    let accept = tokio::spawn(async move {
+        let Inbound::Workspace(_, _, mut stream) = accepting.accept().await.unwrap() else {
+            panic!("expected a workspace stream");
+        };
+        stream.write_all(b"reply").await.unwrap();
+        stream.flush().await.unwrap();
+        // Dropped here, at the end of the task — no shutdown, no linger, no wait for the
+        // opener to finish reading.
+    });
+
+    let mut opened = a.open(&b_node_id, ws).await.unwrap();
+    accept.await.unwrap();
+
+    let mut buf = [0u8; 5];
+    tokio::time::timeout(Duration::from_secs(10), opened.read_exact(&mut buf))
+        .await
+        .expect("the read must not hang")
+        .expect("the reply must survive the accepting side's drop");
+    assert_eq!(&buf, b"reply");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_node_id_that_is_not_a_node_id_is_refused() {
     let tmp = tempfile::tempdir().unwrap();
     let a = transport(&tmp, "a.key", &offline()).await;
