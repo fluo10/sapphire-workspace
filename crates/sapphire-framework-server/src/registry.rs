@@ -53,7 +53,7 @@ impl HostRegistry {
         HostRegistry::at(ctx.config_dir().join(HOST_REGISTRY_FILE))
     }
 
-    /// The registry at an explicit path (tests).
+    /// The registry at an explicit path (tests, tools).
     pub fn at(path: PathBuf) -> HostRegistry {
         HostRegistry { path }
     }
@@ -65,12 +65,19 @@ impl HostRegistry {
     }
 
     /// Record `root`, returning its id. An existing root keeps its id and its flags.
+    ///
+    /// `root` must be canonical, as [`std::fs::canonicalize`] returns it: rows are matched
+    /// by exact path, so another spelling of the same directory adds a duplicate row. A new
+    /// row's id is the root's directory name, slugified and made unique against the others.
     pub fn upsert(&self, root: &Path) -> Result<String> {
         self.edit(|file| upsert_in(file, root))
     }
 
     /// Set `root`'s `synced` flag. A root not on record is added only when `insert` is set:
     /// enabling sync records a workspace, disabling one we never had must not invent it.
+    ///
+    /// `root` must be canonical, as for [`upsert`](Self::upsert): another spelling of the
+    /// same directory misses its row, and with `insert` adds a duplicate one.
     pub fn set_synced(&self, root: &Path, synced: bool, insert: bool) -> Result<()> {
         self.edit(|file| {
             let id = match file.workspace.iter().find(|(_, e)| e.root == root) {
@@ -146,9 +153,11 @@ fn upsert_in(file: &mut File, root: &Path) -> String {
 
 /// The registry id a workspace root carries: its directory name, slugified.
 ///
-/// Uniqueness comes from the directory itself — a second `init` of one directory is the
-/// idempotent path — so the slug is not uniquified against the rest of the registry the
-/// way the GUI's manager is.
+/// Two uses, with different uniqueness. The id `workspace.init` writes into the
+/// workspace's own marker registry is this slug as it is — not uniquified: that registry
+/// holds the one workspace, and a second `init` of one directory is the idempotent path.
+/// The host registry's id starts from it too, but is made unique against the other rows
+/// by [`HostRegistry::upsert`] (`notes`, `notes-2`, …).
 pub(crate) fn slug(root: &Path) -> String {
     let base: String = root
         .file_name()
