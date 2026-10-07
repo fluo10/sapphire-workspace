@@ -8,6 +8,22 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+
+- `bridge.workgroup_create` and `bridge.device_retire` on the bridge control plane; the framework and bridge CLIs use them when the bridge runs.
+- App server: a host workspace registry (`<config dir>/workspaces.toml`), `workspace.list` and `workspace.forget` (which also tears down sync for a workspace whose root no longer exists); `serve` restores synced workspaces on start.
+- `sapphire-framework-gui`: `client::FrameworkClient`, `views::*` and `SyncPanel` for workgroup, device and workspace management; every refresh is time-boxed to 5 s and every command to 30 s (join 90 s), configurable via `ClientConfig::{fetch_timeout, command_timeout}`; `fonts::{system_cjk_font, add_system_cjk_fallback, install_system_cjk_fallback}` (a CJK system font on Windows / macOS / Linux, no bundled assets); `pub use egui`.
+
+### Changed
+
+- `workspace list` lists this host's workspaces from the running server.
+- `StatusReport` / `StatusRow` live in `backend::protocol` (still re-exported from the server crate).
+- `sapphire-framework-bridge-api` is versioned on its own (2.0.0; its major is the control-plane `API_VERSION`), no longer `version.workspace`.
+
+### Breaking
+
+- Backend `API_VERSION` 2 and bridge-api 2.0.0 (`API_VERSION` 2): replace and restart every CLI, server and bridge on a host together.
+
 ### Changed (breaking)
 
 - `sapphire-framework-session`: `run_session` now takes `&tokio::sync::Mutex<Replica>` instead of `&mut Replica`. It locks the replica itself, only from after the peer's `Hello` is in through to the end of the exchange — not while waiting for it — so a caller that used to pre-lock a `Mutex<Replica>` around the whole call should pass the mutex itself instead: pre-locking defeats the fix, pinning the replica against a concurrent scan or another session for as long as a slow-to-speak peer is waited on (issue #163).
