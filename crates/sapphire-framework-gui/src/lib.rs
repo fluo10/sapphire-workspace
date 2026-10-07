@@ -18,6 +18,7 @@
 pub use egui;
 
 pub mod client;
+pub mod views;
 
 use std::path::{Path, PathBuf};
 
