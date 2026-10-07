@@ -314,3 +314,39 @@ async fn forget_tears_down_sync_even_when_the_root_is_gone() {
     drop(c);
     stop(&CTX_D, &endpoint, task).await;
 }
+
+static CTX_C: AppContext = AppContext::new("sapphire-hostreg-c");
+const VARS_C: [&str; 3] = [
+    "SAPPHIRE_HOSTREG_C_CACHE_DIR",
+    "SAPPHIRE_HOSTREG_C_DATA_DIR",
+    "SAPPHIRE_HOSTREG_C_CONFIG_DIR",
+];
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_cli_list_renders_the_servers_rows() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = point_at(&CTX_C, VARS_C, tmp.path());
+    std::fs::create_dir_all(tmp.path().join("run")).unwrap();
+    let endpoint = Endpoint::in_dir("sapphire-hostreg-c", tmp.path().join("run"));
+    let (_stub, task) = start(&CTX_C, &endpoint).await;
+    let c = client(&CTX_C, &endpoint).await;
+    let root = tmp.path().join("notes");
+    std::fs::create_dir_all(&root).unwrap();
+    let _: proto::WorkspaceInitResult = c
+        .call(
+            proto::WORKSPACE_INIT,
+            proto::WorkspaceInitParams { dir: root },
+        )
+        .await
+        .unwrap();
+
+    let mut out = String::new();
+    let code = sapphire_framework_server::render_workspace_list(&c, &mut out)
+        .await
+        .unwrap();
+    assert_eq!(code, 0);
+    assert!(out.contains("notes"), "{out}");
+    assert!(out.contains("not synced"), "{out}");
+    drop(c);
+    stop(&CTX_C, &endpoint, task).await;
+}

@@ -52,6 +52,7 @@ mod test_support;
 
 pub use command::{
     DeviceCommand, FrameworkCommand, StatusReport, StatusRow, WorkgroupCommand, WorkspaceCommand,
+    render_workspace_list,
 };
 pub use error::{Error, Result};
 pub use events::subscribe_method;

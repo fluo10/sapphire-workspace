@@ -3,14 +3,12 @@
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
-use sapphire_backend::WorkspaceRegistry;
 use sapphire_backend::protocol as proto;
 use sapphire_bridge_api::{
     BridgeClient, DeviceRetireParams, InviteParams, JoinParams, WorkgroupCreateParams,
 };
 use sapphire_framework_service::{Environment, ServiceCommand, SystemManager};
 use sapphire_ipc::{ClientInfo, Endpoint};
-use sapphire_workspace::{AppContext, Workspace};
 
 use crate::AppServer;
 use crate::error::{Error, Result};
@@ -73,8 +71,8 @@ impl FrameworkCommand {
 /// The `workspace` subcommands (spec decisions 1/6/7).
 ///
 /// `init` and `map`'s write go to the app's server over IPC, because the server owns the
-/// marker directories, the registries and the sync ids; `list` reads the local registry
-/// the same way the server does and then asks the bridge for the workgroup's ledger;
+/// marker directories, the registries and the sync ids; `list` asks the server for this
+/// host's workspaces and then the bridge for the workgroup's ledger;
 /// `map`'s selector resolution is the workgroup's word, so it goes to the bridge first.
 #[derive(Debug, clap::Subcommand)]
 pub enum WorkspaceCommand {
@@ -86,7 +84,7 @@ pub enum WorkspaceCommand {
         #[arg(long)]
         sync: bool,
     },
-    /// List this app's workspaces: local rows first, then the workgroup's.
+    /// List this host's workspaces (from the server), then the workgroup's.
     List,
     /// Tie a local directory to a workspace the workgroup knows.
     Map {
@@ -353,38 +351,57 @@ async fn workspace_init(
     Ok(0)
 }
 
-/// `workspace list`: local rows from the registry, then the workgroup's ledger.
+/// Render the server's `workspace.list` as the CLI prints it: `id root state`.
 ///
-/// The registry lives in the workspace's marker `config.toml`, and the CLI is inside a
-/// workspace when it runs — the same upward walk `find_from` does. Rows print in the
-/// registry's order, as `id path`. The workgroup's ledger is the bridge's to answer, and
-/// the bridge being down is not the local half's failure: local rows still print, the
-/// ledger's absence is one line, and the exit is 0.
-async fn workspace_list(app: &'static str, version: &'static str) -> Result<i32> {
-    let _ = version;
-    // `Workspace` holds its context for `'static`, so the one-off context leaks — one
-    // small struct per `workspace list` run, and the process is about to exit anyway.
-    let ctx: &'static AppContext = Box::leak(Box::new(AppContext::new(app)));
-    let workspace = match Workspace::find(ctx) {
-        Ok(workspace) => workspace,
-        Err(_) => {
-            println!("no {app} workspace contains the current directory");
-            return Ok(0);
-        }
-    };
-    let registry = workspace_registry(&workspace.config_path());
-    if registry.ids().next().is_none() {
-        println!(
-            "no workspaces are registered in {}",
-            workspace.config_path().display()
-        );
+/// Public so the integration tests can capture it; the `workspace list` verb writes it to
+/// standard output.
+pub async fn render_workspace_list(client: &sapphire_ipc::Client, out: &mut String) -> Result<i32> {
+    let list: proto::WorkspaceListResult = client
+        .call(proto::WORKSPACE_LIST, serde_json::json!({}))
+        .await?;
+    if list.workspaces.is_empty() {
+        writeln!(out, "no workspaces on this host").expect("writing to a String cannot fail");
     }
-    for id in registry.ids() {
-        let entry = registry.get(id);
-        let path = entry
-            .and_then(|e| e.path.clone())
-            .unwrap_or_else(|| "-".into());
-        println!("{id} {}", path.display());
+    for row in list.workspaces {
+        let state = if !row.reachable {
+            "unreachable"
+        } else if row.sync.enabled {
+            "synced"
+        } else {
+            "not synced"
+        };
+        writeln!(out, "{} {} {state}", row.id, row.root.display())
+            .expect("writing to a String cannot fail");
+    }
+    Ok(0)
+}
+
+/// `workspace list`: this host's workspaces from the server, then the workgroup's ledger.
+///
+/// The server owns the host registry, so the first half is its `workspace.list`; nothing
+/// listening → the one line and exit 1, like `init`. The workgroup's ledger is the bridge's
+/// to answer, and the bridge being down is not the server half's failure: the ledger's
+/// absence is one line, and the exit is 0.
+async fn workspace_list(app: &'static str, version: &'static str) -> Result<i32> {
+    let endpoint = Endpoint::for_app(app)?;
+    let client_info = ClientInfo {
+        kind: "cli".to_owned(),
+        version: version.to_owned(),
+        api: proto::API_VERSION,
+        pid: std::process::id(),
+    };
+    let Some((client, _)) = sapphire_ipc::connect_or_absent(&endpoint, app, client_info).await?
+    else {
+        println!("no {app} server is running");
+        return Ok(1);
+    };
+    let mut out = String::new();
+    let code = render_workspace_list(&client, &mut out).await?;
+    for line in out.lines() {
+        println!("{line}");
+    }
+    if code != 0 {
+        return Ok(code);
     }
 
     let Some(client) = BridgeClient::connect_running("cli", version).await.ok() else {
@@ -402,26 +419,6 @@ async fn workspace_list(app: &'static str, version: &'static str) -> Result<i32>
         }
     }
     Ok(0)
-}
-
-/// The registry a marker's `config.toml` holds, or an empty one.
-///
-/// The same read-modify-write-free read the server's `init` handler does; a config of
-/// another shape is an empty registry, because the marker is the app's own file.
-fn workspace_registry(path: &std::path::Path) -> WorkspaceRegistry {
-    #[derive(serde::Deserialize, Default)]
-    struct Config {
-        #[serde(default)]
-        workspace: WorkspaceRegistry,
-    }
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|text| {
-            toml::from_str::<Config>(&text)
-                .map(|config| config.workspace)
-                .ok()
-        })
-        .unwrap_or_default()
 }
 
 /// `workspace map`: the bridge resolves the selector, the server takes the write.
