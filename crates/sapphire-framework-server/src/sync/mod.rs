@@ -419,6 +419,8 @@ impl SyncRuntime {
                 };
             }
         }
+        let has_live = self.live_peers(&key).await.is_some();
+        tracing::debug!(root = %key.display(), recorded = ?updates.iter().map(|u| &u.path).collect::<Vec<_>>(), live = has_live, "DIAG scan done");
         // After the map is unlocked: a push awaits every peer, and the table must not be
         // held behind a slow one.
         self.after_commit(&key, updates).await;
@@ -946,6 +948,7 @@ impl SyncRuntime {
         }
 
         while let Some(root) = rx.recv().await {
+            tracing::debug!(root = %root.display(), "DIAG watcher report");
             // Logged, not fatal: a failed scan or dial leaves the replica behind, and the
             // next report tries again. Neither may take the app server down (spec §10).
             if let Err(err) = self.scan(&root).await {

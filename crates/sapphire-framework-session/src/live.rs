@@ -195,6 +195,7 @@ where
                 let mut wrote_content = false;
                 match read_frame(&mut reader).await {
                     Ok(Some(Frame::Control(Message::Live(batch)))) => {
+                        tracing::debug!(paths = ?batch.iter().map(|u| &u.path).collect::<Vec<_>>(), "DIAG live RECV");
                         // The peer had all of this when it sent the batch, so its own
                         // version vector covers it. Merging now is what keeps a forwarder
                         // from sending the same entries back for ever.
@@ -230,9 +231,11 @@ where
                             }
                             outstanding.insert(hash);
                         }
+                        tracing::debug!(want = outstanding.len(), "DIAG live applied");
                         pending.push(Pending { batch, outstanding });
                     }
                     Ok(Some(Frame::Control(Message::Want(hash)))) => {
+                        tracing::debug!(%hash, "DIAG live WANT recv");
                         let answer = {
                             let locked = replica.lock().await;
                             match locked.read_content(&hash) {
@@ -252,6 +255,7 @@ where
                             tracing::warn!("content does not match {hash}");
                             break;
                         }
+                        tracing::debug!(%hash, "DIAG live BLOB recv");
                         remember(&mut wanted, &mut pending, hash);
                         received.0.insert(hash, bytes);
                         wrote_content = true;
@@ -260,6 +264,7 @@ where
                     // stays unmaterialised until one does, and the batches that wanted it
                     // can be announced without it.
                     Ok(Some(Frame::Control(Message::Missing(hash)))) => {
+                        tracing::debug!(%hash, "DIAG live MISSING recv");
                         remember(&mut wanted, &mut pending, hash);
                     }
                     // The exchange is over and frames arrive in order, so `Done`, `Settled`,
@@ -288,6 +293,7 @@ where
                 // means nobody is listening.
                 pending.retain(|entry| {
                     if entry.outstanding.is_empty() {
+                        tracing::debug!(paths = ?entry.batch.iter().map(|u| &u.path).collect::<Vec<_>>(), "DIAG live ANNOUNCE");
                         let _ = updates.send(entry.batch.clone());
                         false
                     } else {

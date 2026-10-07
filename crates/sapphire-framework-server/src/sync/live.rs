@@ -92,8 +92,10 @@ impl LivePeers {
             }
             let seen: Vec<_> = updates.iter().map(|u| u.seen.clone()).collect();
             if seen.iter().all(|v| session.peer_vv().covers(v)) {
+                tracing::debug!(%device, paths = ?updates.iter().map(|u| &u.path).collect::<Vec<_>>(), seen = ?seen, peer_vv = ?session.peer_vv(), "DIAG fan_out SKIP: peer covers");
                 continue;
             }
+            tracing::debug!(%device, paths = ?updates.iter().map(|u| &u.path).collect::<Vec<_>>(), seen = ?seen, peer_vv = ?session.peer_vv(), "DIAG fan_out PUSH");
             if let Err(err) = session.push(updates.to_vec()).await {
                 tracing::debug!(%device, "a live push failed: {err}");
             }
