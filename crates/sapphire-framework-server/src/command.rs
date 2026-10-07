@@ -317,6 +317,7 @@ async fn workspace_init(
     let client_info = ClientInfo {
         kind: "cli".to_owned(),
         version: version.to_owned(),
+        api: proto::API_VERSION,
         pid: std::process::id(),
     };
     let Some((client, _)) = sapphire_ipc::connect_or_absent(&endpoint, app, client_info).await?
@@ -475,6 +476,7 @@ async fn workspace_map(
     let client_info = ClientInfo {
         kind: "cli".to_owned(),
         version: version.to_owned(),
+        api: proto::API_VERSION,
         pid: std::process::id(),
     };
     let Some((client, _)) = sapphire_ipc::connect_or_absent(&endpoint, app, client_info).await?
@@ -506,11 +508,12 @@ async fn status(server: &AppServer, version: &str) -> Result<i32> {
 
 /// Probe, handshake and call `SERVER_INFO` in one go, or report absence.
 ///
-/// Every step the CLI needs — liveness and the version gate — is inside
+/// Every step the CLI needs — liveness and the API gate — is inside
 /// [`connect_or_absent`], so the command is that call plus one `SERVER_INFO` round trip.
-/// The version gate doubles as the liveness check here: a live server of another version
-/// is `ServiceVersionMismatch`, which names both versions and advises restarting the
-/// service. The report goes through [`run_status_into`] so tests can capture it.
+/// The API gate doubles as the liveness check here: a live server of another API version
+/// is `ApiVersionMismatch`, which names both API versions and advises upgrading and
+/// restarting the service. The report goes through [`run_status_into`] so tests can
+/// capture it.
 async fn run_status(endpoint: &Endpoint, app: &str, version: &str) -> Result<i32> {
     let mut out = String::new();
     let code = run_status_into(endpoint, app, version, &mut out).await?;
@@ -531,6 +534,7 @@ async fn run_status_into(
     let client_info = ClientInfo {
         kind: "cli".to_owned(),
         version: version.to_owned(),
+        api: proto::API_VERSION,
         pid: std::process::id(),
     };
     let Some((client, _)) = sapphire_ipc::connect_or_absent(endpoint, app, client_info).await?
@@ -729,6 +733,7 @@ mod status_tests {
             sapphire_ipc::ClientInfo {
                 kind: "test".into(),
                 version: "0.0.0".into(),
+                api: 1,
                 pid: std::process::id(),
             },
         )

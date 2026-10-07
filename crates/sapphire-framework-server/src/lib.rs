@@ -232,6 +232,7 @@ impl AppServer {
         // to report.
         let info = ServerInfo {
             version: version.to_owned(),
+            api: proto::API_VERSION,
             pid: std::process::id(),
             managed_by: ManagedBy::Service,
         };
@@ -579,6 +580,7 @@ mod tests {
         ClientInfo {
             kind: "test".into(),
             version: "0.0.0".into(),
+            api: 1,
             pid: std::process::id(),
         }
     }

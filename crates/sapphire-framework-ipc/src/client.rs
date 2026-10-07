@@ -99,9 +99,9 @@ impl Client {
         app: &str,
         client: ClientInfo,
     ) -> Result<(Client, ServerInfo)> {
-        // Remembered here so the version gate below can name both sides; the moved-out
+        // Remembered here so the API gate below can name both sides; the moved-out
         // `client` goes into the hello.
-        let ours = client.version.clone();
+        let ours = client.api;
         let sender = conn.sender();
         let hello = Hello {
             protocol: crate::PROTOCOL_VERSION,
@@ -135,13 +135,15 @@ impl Client {
             });
         }
 
-        // The crate-version gate. Nothing replaces a server any more, so every mismatch
-        // is an error; the message's advice (restart the service) is written for the only
-        // kind of server that survives one, the service-managed kind.
-        if welcome.server.version != ours {
-            return Err(Error::ServiceVersionMismatch {
-                running: welcome.server.version,
+        // The API gate. The crate versions are not compared: the two ends are often
+        // different crates (an app server and the bridge) whose versions never line up,
+        // and a release that leaves the method set alone must not lock its peers out.
+        // Nothing replaces a server any more, so every mismatch is an error.
+        if welcome.server.api != ours {
+            return Err(Error::ApiVersionMismatch {
+                running: welcome.server.api,
                 ours,
+                server_version: welcome.server.version,
             });
         }
 
@@ -250,6 +252,7 @@ mod tests {
         ClientInfo {
             kind: "cli".into(),
             version: "0.0.0".into(),
+            api: 1,
             pid: std::process::id(),
         }
     }
@@ -257,6 +260,7 @@ mod tests {
     fn server_info() -> ServerInfo {
         ServerInfo {
             version: "0.0.0".into(),
+            api: 1,
             pid: 1,
             managed_by: ManagedBy::Spawned,
         }

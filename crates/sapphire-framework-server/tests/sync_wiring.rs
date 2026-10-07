@@ -93,6 +93,7 @@ fn client_info() -> ClientInfo {
     ClientInfo {
         kind: "test".into(),
         version: "0.0.0".into(),
+        api: 1,
         pid: std::process::id(),
     }
 }

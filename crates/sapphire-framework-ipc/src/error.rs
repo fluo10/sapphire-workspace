@@ -61,17 +61,23 @@ pub enum Error {
     #[error("{0}")]
     NotRunning(String),
 
-    /// A running server speaks a different version and cannot be replaced because it is
-    /// managed by the OS service manager.
+    /// A running server speaks a different API version than this process expects.
+    ///
+    /// Only the API is compared, never the crate version: an app and the bridge are
+    /// different crates, and a patch release of either one must not lock the other out.
+    /// The running server is not replaced, because the OS service manager owns it, so the
+    /// fix is to upgrade whichever side is older and restart it.
     #[error(
-        "the installed service is version {running}, this process is version {ours}; \
-         restart the service"
+        "the running service (version {server_version}) speaks API v{running}, this \
+         process speaks API v{ours}; upgrade whichever is older and restart the service"
     )]
-    ServiceVersionMismatch {
-        /// Version reported by the running server.
-        running: String,
-        /// This process's version.
-        ours: String,
+    ApiVersionMismatch {
+        /// API version reported by the running server.
+        running: u32,
+        /// API version this process expects.
+        ours: u32,
+        /// Crate version reported by the running server, for the message.
+        server_version: String,
     },
 }
 

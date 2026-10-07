@@ -1270,6 +1270,7 @@ mod tests {
         tokio::spawn(async move {
             let info = sapphire_ipc::ServerInfo {
                 version: "0.0.0".into(),
+                api: 1,
                 pid: std::process::id(),
                 managed_by: ManagedBy::Spawned,
             };
@@ -1278,6 +1279,7 @@ mod tests {
         let info = sapphire_ipc::ClientInfo {
             kind: "test".into(),
             version: "0.0.0".into(),
+            api: 1,
             pid: std::process::id(),
         };
         let (client, _) = sapphire_ipc::Client::handshake(client_conn, "sapphire-synctest", info)

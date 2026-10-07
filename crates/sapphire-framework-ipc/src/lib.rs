@@ -30,7 +30,7 @@ pub use client::{Client, NOTIFICATION_CAPACITY};
 pub use conn::{Connection, Sender};
 pub use endpoint::{BRIDGE_NAME, Endpoint, RUNTIME_DIR_ENV, runtime_dir};
 pub use error::{Error, Result};
-pub use handshake::{ClientInfo, Hello, ManagedBy, ServerInfo, Welcome};
+pub use handshake::{ClientInfo, FIRST_API, Hello, ManagedBy, ServerInfo, Welcome};
 pub use message::{Message, Notification, Request, Response, ResponsePayload, RpcError, codes};
 pub use raw::{RawIo, RawStream};
 pub use router::{HANDSHAKE_METHOD, HandlerFuture, PeerHandle, RequestCtx, Router, serve};
