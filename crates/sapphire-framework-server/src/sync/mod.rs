@@ -196,6 +196,13 @@ impl SyncRuntime {
         if let Err(err) = self.sync_now(&key).await {
             tracing::warn!(root = %key.display(), "the first session after enabling failed: {err}");
         }
+
+        // Remembered for the next start: restart restore re-enables what this flag says.
+        if let Err(err) =
+            crate::registry::HostRegistry::for_app(self.ctx).set_synced(&key, true, true)
+        {
+            tracing::warn!(root = %key.display(), "could not record the workspace as synced: {err}");
+        }
         Ok(workspace_id)
     }
 
@@ -222,6 +229,11 @@ impl SyncRuntime {
                 .await
                 .map_err(|e| Error::Bridge(e.to_string()))?;
             self.reregister().await?;
+        }
+        if let Err(err) =
+            crate::registry::HostRegistry::for_app(self.ctx).set_synced(&key, false, false)
+        {
+            tracing::warn!(root = %key.display(), "could not record the workspace as not synced: {err}");
         }
         Ok(())
     }

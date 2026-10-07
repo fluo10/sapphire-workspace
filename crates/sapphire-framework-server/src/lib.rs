@@ -44,6 +44,7 @@ mod error;
 mod events;
 mod handlers;
 mod host;
+mod listing;
 mod registry;
 pub mod sync;
 #[cfg(test)]
@@ -56,7 +57,7 @@ pub use error::{Error, Result};
 pub use events::subscribe_method;
 pub use handlers::{workspace_router, workspace_router_with_sync};
 pub use host::{DEFAULT_IDLE, DEFAULT_MAX_OPEN, WorkspaceHost};
-pub use registry::{HostEntry, HostRegistry};
+pub use registry::{HOST_REGISTRY_FILE, HostEntry, HostRegistry};
 pub use sync::{SyncRuntime, SyncStatus, sync_router};
 
 /// An application's server.
@@ -254,6 +255,7 @@ impl AppServer {
             // `workspace.*` namespace is complete.
             router = sync_router(Arc::clone(runtime), router);
         }
+        router = listing::listing_methods(ctx, sync.clone(), router);
         // `server.info` answers the typed [`StatusReport`] — the same shape the CLI's
         // `status` renders — so the CLI and a future GUI read one record. The rows come
         // from the application's builder, called once per report.
@@ -335,7 +337,9 @@ impl AppServer {
                         tracing::warn!("the live dial loop ended: {err}");
                     }
                 });
-                Some((announcements, watching, dialling))
+                // What the registry says was synced comes back on every start.
+                let restoring = tokio::spawn(listing::restore(ctx, Arc::clone(runtime)));
+                Some((announcements, watching, dialling, restoring))
             }
             None => None,
         };
@@ -384,7 +388,8 @@ impl AppServer {
         }
 
         ticker.abort();
-        if let Some((announcements, watching, dialling)) = _sync_tasks {
+        if let Some((announcements, watching, dialling, restoring)) = _sync_tasks {
+            restoring.abort();
             announcements.abort();
             watching.abort();
             dialling.abort();
@@ -486,6 +491,8 @@ fn init_workspace(ctx: &'static AppContext, dir: &Path) -> Result<proto::Workspa
         registry.insert(id.clone(), WorkspaceEntry::local(&root));
         write_registry(&config_path, &registry)?;
     }
+    // The host-wide list of workspaces, which `workspace.list` reads. `root` is canonical.
+    registry::HostRegistry::for_app(ctx).upsert(&root)?;
 
     Ok(proto::WorkspaceInitResult {
         root,
