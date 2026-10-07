@@ -197,13 +197,27 @@ Owns a `FrameworkClient` and the views; renders the banner on top and a left nav
 (Workspaces / Devices / Workgroup). sapphire-sync's desktop app is essentially
 `SyncPanel::ui(ui)` inside an eframe shell.
 
+### `fonts` (added 2026-10-07)
+
+No font assets are bundled in any repository or binary. `fonts::system_cjk_font()` scans the
+OS font directories with `fontdb` (pure Rust; on Linux it follows fontconfig's configuration
+without linking libfontconfig) and picks, in order, a preferred family with Japanese glyph
+forms (Windows: Yu Gothic UI / Yu Gothic / Meiryo UI / Meiryo / MS Gothic; macOS: Hiragino
+Sans / Hiragino Kaku Gothic ProN; Linux: Noto Sans CJK JP / Noto Sans JP / Source Han Sans JP /
+IPAexGothic / IPAGothic / …), verified with `ttf-parser` to contain `あ` and `漢`; failing
+those, any face that does. `.ttc` face indices map to egui's `FontData.index`.
+`fonts::install_system_cjk_fallback(ctx)` registers it behind egui's defaults for both
+families and returns the family used; with no such font it logs a warning and leaves egui's
+defaults (CJK renders as boxes; nothing fails).
+
 ## sapphire-sync desktop crate
 
 New `desktop` member in the sapphire-sync workspace (`sapphire-sync-desktop`, binary
 `sapphire-sync-desktop`). eframe 0.36 shell, a multi-thread tokio runtime whose handle goes
 to `FrameworkClient`, and `SyncPanel`. Journal's `gpu.rs` (device-lost handling on RDP
-reconnect) and `fonts.rs` (Japanese fonts) are copied in. Moving those two into the
-framework is a candidate for later, not part of this work.
+reconnect) is copied in, relicensed to `MIT OR Apache-2.0` with the author's consent; fonts
+come from the framework's `fonts` module. Moving `gpu.rs` into the framework is a candidate
+for later, not part of this work.
 
 ## Error handling
 
