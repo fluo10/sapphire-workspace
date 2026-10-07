@@ -18,7 +18,10 @@
 pub use egui;
 
 pub mod client;
+mod panel;
 pub mod views;
+
+pub use panel::SyncPanel;
 
 use std::path::{Path, PathBuf};
 
