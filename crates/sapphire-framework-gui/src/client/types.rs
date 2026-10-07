@@ -70,6 +70,11 @@ pub struct ClientConfig {
     pub service_exes: ServiceExes,
     /// How often to refresh the snapshot.
     pub refresh: Duration,
+    /// How long one process may take to answer a refresh (connect, handshake and calls)
+    /// before it reads as not answering.
+    pub fetch_timeout: Duration,
+    /// How long a command may take; a join, which dials peers, gets three times this.
+    pub command_timeout: Duration,
 }
 
 impl ClientConfig {
@@ -79,6 +84,8 @@ impl ClientConfig {
             endpoints: Endpoints::default_for(app.app_name).map_err(std::io::Error::other)?,
             service_exes: ServiceExes::siblings(app.app_name)?,
             refresh: Duration::from_secs(2),
+            fetch_timeout: Duration::from_secs(5),
+            command_timeout: Duration::from_secs(30),
             app,
         })
     }

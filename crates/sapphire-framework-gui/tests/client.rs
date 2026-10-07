@@ -55,6 +55,8 @@ fn config(f: &Fixture) -> ClientConfig {
             app: PathBuf::from("/nope/app"),
         },
         refresh: Duration::from_millis(100),
+        fetch_timeout: Duration::from_secs(5),
+        command_timeout: Duration::from_secs(30),
     }
 }
 
@@ -283,4 +285,40 @@ async fn workspace_init_sync_toggle_and_forget() {
             == Some(true)
     })
     .await;
+}
+
+/// Accept connections on `endpoint` and never answer them.
+async fn hang(endpoint: &Endpoint) -> tokio::task::JoinHandle<()> {
+    #[cfg(unix)]
+    let mut listener = sapphire_ipc::bind(endpoint).await.unwrap();
+    #[cfg(windows)]
+    let mut listener = sapphire_ipc::bind(endpoint).unwrap();
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok(conn) = listener.accept().await {
+            held.push(conn);
+        }
+    })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_process_that_never_answers_reads_error_and_does_not_stall_the_loop() {
+    let f = fixture();
+    let _hung = hang(&f.endpoints.bridge).await;
+    let mut cfg = config(&f);
+    cfg.fetch_timeout = Duration::from_millis(300);
+    let client = FrameworkClient::spawn(&tokio::runtime::Handle::current(), cfg, Arc::new(|| {}));
+    wait(|| async {
+        matches!(&client.snapshot().bridge, Conn::Error(m) if m.contains("did not answer"))
+    })
+    .await;
+    // The loop kept ticking: the server side was fetched too, and is simply absent.
+    assert!(client.snapshot().fetched);
+    assert!(matches!(client.snapshot().server, Conn::Absent));
+    // A command queued behind the hung bridge still gets an outcome.
+    let id = client.send(Command::SyncEnable {
+        root: f.tmp.path().into(),
+    });
+    let err = outcome(&client, id).await.unwrap_err();
+    assert!(err.contains("not running"), "{err}");
 }

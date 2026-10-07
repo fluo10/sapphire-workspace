@@ -3,7 +3,7 @@
 use sapphire_backend::protocol as proto;
 use sapphire_bridge_api::{DeviceRetireParams, InviteParams, JoinParams, WorkgroupCreateParams};
 
-use super::conn::Connections;
+use super::conn::{Connections, unanswered};
 use super::types::{ClientConfig, Command, CommandOutput, ServiceTarget};
 
 pub(crate) async fn execute(
@@ -11,20 +11,37 @@ pub(crate) async fn execute(
     conns: &mut Connections,
     command: Command,
 ) -> Result<CommandOutput, String> {
+    // A join dials peers, so it may take far longer than any other command.
+    let limit = match command {
+        Command::WorkgroupJoin { .. } => cfg.command_timeout * 3,
+        _ => cfg.command_timeout,
+    };
     match command {
-        Command::ServiceInstall(target) => install(cfg, target).await,
+        Command::ServiceInstall(target) => {
+            let name = match target {
+                ServiceTarget::Bridge => "sapphire-bridge service install",
+                ServiceTarget::App => "the app's service install",
+            };
+            tokio::time::timeout(limit, install(cfg, target))
+                .await
+                .unwrap_or_else(|_| Err(unanswered(name, limit)))
+        }
         Command::WorkgroupCreate { .. }
         | Command::WorkgroupJoin { .. }
         | Command::DeviceInvite { .. }
         | Command::DeviceRetire { .. } => {
-            let result = bridge_command(cfg, conns, command).await;
+            let result = tokio::time::timeout(limit, bridge_command(cfg, conns, command))
+                .await
+                .unwrap_or_else(|_| Err(unanswered("sapphire-bridge", limit)));
             if result.is_err() {
                 conns.drop_bridge();
             }
             result
         }
         _ => {
-            let result = app_command(cfg, conns, command).await;
+            let result = tokio::time::timeout(limit, app_command(cfg, conns, command))
+                .await
+                .unwrap_or_else(|_| Err(unanswered(cfg.app.app_name, limit)));
             if result.is_err() {
                 conns.drop_app();
             }
@@ -153,6 +170,7 @@ async fn install(cfg: &ClientConfig, target: ServiceTarget) -> Result<CommandOut
     }
     let output = tokio::process::Command::new(exe)
         .args(["service", "install"])
+        .kill_on_drop(true)
         .output()
         .await
         .map_err(|e| format!("{e}; run: {manual}"))?;

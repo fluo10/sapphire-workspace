@@ -1,5 +1,7 @@
 //! Cached connections, and turning failures into [`Conn`] states.
 
+use std::time::Duration;
+
 use sapphire_backend::protocol as proto;
 use sapphire_bridge_api::BridgeClient;
 use sapphire_ipc::{Client, ClientInfo};
@@ -13,6 +15,15 @@ pub fn classify<T>(err: &sapphire_ipc::Error) -> Conn<T> {
         sapphire_ipc::Error::ApiVersionMismatch { .. }
         | sapphire_ipc::Error::VersionMismatch { .. } => Conn::Incompatible(err.to_string()),
         other => Conn::Error(other.to_string()),
+    }
+}
+
+/// The message for a process that did not answer within `limit`.
+pub(crate) fn unanswered(process: &str, limit: Duration) -> String {
+    if limit.as_millis() < 1000 {
+        format!("{process} did not answer within {} ms", limit.as_millis())
+    } else {
+        format!("{process} did not answer within {} s", limit.as_secs())
     }
 }
 
@@ -64,7 +75,7 @@ impl Connections {
 
     /// Ask the bridge everything the views show.
     pub(crate) async fn fetch_bridge(&mut self, cfg: &ClientConfig) -> Conn<BridgeState> {
-        let result = async {
+        let result = tokio::time::timeout(cfg.fetch_timeout, async {
             let Some(c) = self.bridge(cfg).await? else {
                 return Ok(None);
             };
@@ -79,21 +90,25 @@ impl Connections {
                 peers,
                 ledger,
             }))
-        }
+        })
         .await;
         match result {
-            Ok(Some(state)) => Conn::Up(state),
-            Ok(None) => Conn::Absent,
-            Err(err) => {
+            Ok(Ok(Some(state))) => Conn::Up(state),
+            Ok(Ok(None)) => Conn::Absent,
+            Ok(Err(err)) => {
                 self.drop_bridge();
                 classify(&err)
+            }
+            Err(_) => {
+                self.drop_bridge();
+                Conn::Error(unanswered("sapphire-bridge", cfg.fetch_timeout))
             }
         }
     }
 
     /// Ask the app server everything the views show.
     pub(crate) async fn fetch_server(&mut self, cfg: &ClientConfig) -> Conn<ServerState> {
-        let result = async {
+        let result = tokio::time::timeout(cfg.fetch_timeout, async {
             let Some(c) = self.app(cfg).await? else {
                 return Ok(None);
             };
@@ -105,14 +120,18 @@ impl Connections {
                 info,
                 workspaces: list.workspaces,
             }))
-        }
+        })
         .await;
         match result {
-            Ok(Some(state)) => Conn::Up(state),
-            Ok(None) => Conn::Absent,
-            Err(err) => {
+            Ok(Ok(Some(state))) => Conn::Up(state),
+            Ok(Ok(None)) => Conn::Absent,
+            Ok(Err(err)) => {
                 self.drop_app();
                 classify(&err)
+            }
+            Err(_) => {
+                self.drop_app();
+                Conn::Error(unanswered(cfg.app.app_name, cfg.fetch_timeout))
             }
         }
     }
