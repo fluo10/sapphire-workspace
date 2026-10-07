@@ -84,7 +84,12 @@ enum Last {
 impl WorkgroupView {
     /// Render.
     pub fn ui(&mut self, ui: &mut egui::Ui, cx: &ViewCtx) -> Option<Command> {
-        ui.heading("Workgroup");
+        ui.horizontal(|ui| {
+            ui.heading("Workgroup");
+            if cx.busy {
+                ui.spinner();
+            }
+        });
         ui.separator();
         let Some(bridge) = cx.snapshot.bridge.up() else {
             unavailable(ui, "The bridge");
@@ -164,5 +169,32 @@ impl WorkgroupView {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_join_failure_goes_to_the_join_dialog() {
+        let mut view = WorkgroupView {
+            last: Some(Last::Join),
+            ..WorkgroupView::default()
+        };
+        view.on_outcome(&Err("bad ticket".into()));
+        assert_eq!(view.join.error.as_deref(), Some("bad ticket"));
+        assert!(view.error.is_none());
+    }
+
+    #[test]
+    fn a_create_failure_goes_to_the_view_error_line() {
+        let mut view = WorkgroupView {
+            last: Some(Last::Create),
+            ..WorkgroupView::default()
+        };
+        view.on_outcome(&Err("exists".into()));
+        assert_eq!(view.error.as_deref(), Some("exists"));
+        assert!(view.join.error.is_none());
     }
 }

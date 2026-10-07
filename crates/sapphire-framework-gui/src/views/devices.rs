@@ -96,13 +96,28 @@ impl InviteDialog {
     }
 }
 
+/// The retire confirmation: the name to type, and the last failure.
+#[derive(Default)]
+struct RetireConfirm {
+    name: String,
+    typed: String,
+    error: Option<String>,
+}
+
+/// Which command the last send was, so its outcome goes back to the right place.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Last {
+    Invite,
+    Retire,
+}
+
 /// The device screen: the workgroup's devices, invite, retire.
 #[derive(Default)]
 pub struct DeviceList {
     invite: InviteDialog,
-    confirm: Option<(String, String)>, // (device name, typed)
+    confirm: Option<RetireConfirm>,
     error: Option<String>,
-    last_was_invite: bool,
+    last: Option<Last>,
 }
 
 impl DeviceList {
@@ -111,6 +126,9 @@ impl DeviceList {
         let mut out = None;
         ui.horizontal(|ui| {
             ui.heading("Devices");
+            if cx.busy {
+                ui.spinner();
+            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let joined = cx
                     .snapshot
@@ -156,7 +174,10 @@ impl DeviceList {
                                 .add_enabled(!cx.busy, egui::Button::new("Retire"))
                                 .clicked()
                             {
-                                self.confirm = Some((peer.name.clone(), String::new()));
+                                self.confirm = Some(RetireConfirm {
+                                    name: peer.name.clone(),
+                                    ..RetireConfirm::default()
+                                });
                             }
                         });
                     });
@@ -165,21 +186,21 @@ impl DeviceList {
         });
 
         if let Some(c) = self.invite.ui(ui, cx) {
-            self.last_was_invite = true;
+            self.last = Some(Last::Invite);
             out = Some(c);
         }
-        if let Some(c) = self.confirm_ui(ui) {
-            self.last_was_invite = false;
+        if let Some(c) = self.confirm_ui(ui, cx) {
+            self.last = Some(Last::Retire);
             out = Some(c);
         }
         out
     }
 
-    fn confirm_ui(&mut self, ui: &mut egui::Ui) -> Option<Command> {
-        let (name, typed) = self.confirm.as_mut()?;
+    fn confirm_ui(&mut self, ui: &mut egui::Ui, cx: &ViewCtx) -> Option<Command> {
+        let confirm = self.confirm.as_mut()?;
         let mut out = None;
         let mut open = true;
-        let mut close = false;
+        let mut cancel = false;
         egui::Window::new("Retire device")
             .collapsible(false)
             .resizable(false)
@@ -189,37 +210,103 @@ impl DeviceList {
                 ui.label("A retired device can no longer connect. Its record stays.");
                 ui.horizontal_wrapped(|ui| {
                     ui.label("Type");
-                    ui.strong(name.as_str());
+                    ui.strong(confirm.name.as_str());
                     ui.label("to confirm:");
                 });
-                ui.text_edit_singleline(typed);
+                ui.text_edit_singleline(&mut confirm.typed);
+                error_line(ui, &mut confirm.error);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let matches = confirm.typed.trim() == confirm.name;
                     if ui
-                        .add_enabled(typed.trim() == name, egui::Button::new("Retire"))
+                        .add_enabled(matches && !cx.busy, egui::Button::new("Retire"))
                         .clicked()
                     {
+                        confirm.error = None;
                         out = Some(Command::DeviceRetire {
-                            selector: name.clone(),
+                            selector: confirm.name.clone(),
                         });
-                        close = true;
                     }
                     if ui.button("Cancel").clicked() {
-                        close = true;
+                        cancel = true;
+                    }
+                    if cx.busy {
+                        ui.spinner();
                     }
                 });
             });
-        if close || !open {
+        if cancel || !open {
             self.confirm = None;
         }
         out
     }
 
-    /// Route the result: to the invite dialog, or to the error line.
+    /// Route the result: to the invite dialog or the retire confirmation, whichever sent it.
     pub fn on_outcome(&mut self, result: &Result<CommandOutput, String>) {
-        if self.last_was_invite {
-            self.invite.on_outcome(result);
-        } else if let Err(e) = result {
-            self.error = Some(e.clone());
+        match self.last.take() {
+            Some(Last::Invite) => self.invite.on_outcome(result),
+            Some(Last::Retire) => match (result, self.confirm.as_mut()) {
+                (Ok(_), _) => self.confirm = None,
+                (Err(e), Some(c)) => c.error = Some(e.clone()),
+                (Err(e), None) => self.error = Some(e.clone()),
+            },
+            None => {
+                if let Err(e) = result {
+                    self.error = Some(e.clone());
+                }
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invite_ticket_is_routed_even_after_a_retire_was_opened() {
+        let mut list = DeviceList::default();
+        list.invite.open();
+        list.last = Some(Last::Invite);
+        list.on_outcome(&Ok(CommandOutput::Ticket("t".into())));
+        assert_eq!(list.invite.ticket.as_deref(), Some("t"));
+        assert!(list.last.is_none());
+    }
+
+    #[test]
+    fn retire_failure_stays_in_the_open_confirm() {
+        let mut list = DeviceList {
+            confirm: Some(RetireConfirm {
+                name: "laptop".into(),
+                typed: "laptop".into(),
+                error: None,
+            }),
+            last: Some(Last::Retire),
+            ..DeviceList::default()
+        };
+        list.on_outcome(&Err("boom".into()));
+        let c = list.confirm.as_ref().expect("confirm stays open");
+        assert_eq!(c.error.as_deref(), Some("boom"));
+        assert!(list.error.is_none());
+    }
+
+    #[test]
+    fn retire_success_closes_the_confirm() {
+        let mut list = DeviceList {
+            confirm: Some(RetireConfirm::default()),
+            last: Some(Last::Retire),
+            ..DeviceList::default()
+        };
+        list.on_outcome(&Ok(CommandOutput::Done));
+        assert!(list.confirm.is_none());
+    }
+
+    #[test]
+    fn open_resets_a_previous_ticket_and_error() {
+        let mut d = InviteDialog::default();
+        d.open();
+        d.on_outcome(&Ok(CommandOutput::Ticket("old".into())));
+        d.on_outcome(&Err("bad".into()));
+        d.open();
+        assert!(d.open && d.ticket.is_none() && d.error.is_none());
     }
 }

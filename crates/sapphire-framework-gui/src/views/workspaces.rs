@@ -18,6 +18,9 @@ impl WorkspaceList {
         let server_up = cx.snapshot.server.up().is_some();
         ui.horizontal(|ui| {
             ui.heading("Workspaces");
+            if cx.busy {
+                ui.spinner();
+            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui
                     .add_enabled(server_up && !cx.busy, egui::Button::new("Add existing…"))

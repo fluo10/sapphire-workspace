@@ -50,6 +50,9 @@ impl ServiceStatusBanner {
                 ui.separator();
             }
         });
+        if cx.busy {
+            ui.spinner();
+        }
         error_line(ui, &mut self.error);
         out
     }
