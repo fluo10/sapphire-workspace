@@ -185,7 +185,50 @@ async fn install(cfg: &ClientConfig, target: ServiceTarget) -> Result<CommandOut
     if output.status.success() {
         Ok(CommandOutput::Done)
     } else {
-        let text = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        Err(format!("{text}; run: {manual}"))
+        Err(install_failure(
+            &String::from_utf8_lossy(&output.stderr),
+            &String::from_utf8_lossy(&output.stdout),
+            output.status.code(),
+            &manual,
+        ))
+    }
+}
+
+/// The message for a failed `service install`: what it said on stderr, else on stdout,
+/// else its exit status — never empty before the `; run:` hint.
+fn install_failure(stderr: &str, stdout: &str, code: Option<i32>, manual: &str) -> String {
+    let said = [stderr.trim(), stdout.trim()]
+        .into_iter()
+        .find(|s| !s.is_empty())
+        .map(str::to_owned);
+    let what = said.unwrap_or_else(|| match code {
+        Some(code) => format!("exit status {code}"),
+        None => "it was stopped by a signal".to_owned(),
+    });
+    format!("{what}; run: {manual}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_install_failure_prefers_stderr_then_stdout_then_the_status() {
+        let manual = "x service install";
+        assert_eq!(
+            install_failure(" denied \n", "ignored", Some(1), manual),
+            "denied; run: x service install"
+        );
+        assert_eq!(
+            install_failure("  ", "need admin\n", Some(1), manual),
+            "need admin; run: x service install"
+        );
+        assert_eq!(
+            install_failure("", "", Some(3), manual),
+            "exit status 3; run: x service install"
+        );
+        let killed = install_failure("", "", None, manual);
+        assert!(!killed.starts_with(';'), "{killed}");
+        assert!(killed.ends_with("; run: x service install"), "{killed}");
     }
 }
