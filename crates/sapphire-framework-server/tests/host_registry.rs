@@ -258,3 +258,59 @@ async fn serve_restores_synced_rows_and_skips_missing_ones() {
     assert!(!stub.last_workspaces().contains(&ids[0]));
     stop(&CTX_B, &endpoint, task).await;
 }
+
+static CTX_D: AppContext = AppContext::new("sapphire-hostreg-d");
+const VARS_D: [&str; 3] = [
+    "SAPPHIRE_HOSTREG_D_CACHE_DIR",
+    "SAPPHIRE_HOSTREG_D_DATA_DIR",
+    "SAPPHIRE_HOSTREG_D_CONFIG_DIR",
+];
+
+#[tokio::test(flavor = "multi_thread")]
+async fn forget_tears_down_sync_even_when_the_root_is_gone() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = point_at(&CTX_D, VARS_D, tmp.path());
+    std::fs::create_dir_all(tmp.path().join("run")).unwrap();
+    let endpoint = Endpoint::in_dir("sapphire-hostreg-d", tmp.path().join("run"));
+    let (stub, task) = start(&CTX_D, &endpoint).await;
+    let c = client(&CTX_D, &endpoint).await;
+
+    let root = tmp.path().join("vanishing");
+    std::fs::create_dir_all(&root).unwrap();
+    let init: proto::WorkspaceInitResult = c
+        .call(
+            proto::WORKSPACE_INIT,
+            proto::WorkspaceInitParams { dir: root.clone() },
+        )
+        .await
+        .unwrap();
+    let enabled: proto::SyncEnableResult = c
+        .call(proto::SYNC_ENABLE, proto::WsParams { ws: init.root })
+        .await
+        .unwrap();
+    std::fs::remove_dir_all(&root).unwrap();
+
+    let rows = list(&c).await;
+    assert_eq!(rows.len(), 1);
+    assert!(!rows[0].reachable);
+    let _: proto::Ack = c
+        .call(
+            proto::WORKSPACE_FORGET,
+            proto::WorkspaceForgetParams {
+                id: rows[0].id.clone(),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(list(&c).await.is_empty());
+    assert!(
+        stub.seen
+            .lock()
+            .unwrap()
+            .unregistrations
+            .contains(&enabled.workspace_id),
+        "forget left the workspace registered with the bridge"
+    );
+    drop(c);
+    stop(&CTX_D, &endpoint, task).await;
+}

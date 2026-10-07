@@ -209,9 +209,9 @@ impl SyncRuntime {
     /// Stop syncing `root`. Files and the sync id stay, so re-enabling rejoins the same
     /// workspace rather than creating a second one.
     pub async fn disable(&self, root: &Path) -> Result<()> {
-        let Ok(key) = root.canonicalize() else {
-            return Ok(());
-        };
+        // A root that no longer exists cannot be canonicalized, but the keys of `synced` are
+        // canonical already, so the path as given (a registry root) still names the entry.
+        let key = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
         let removed = self.synced.lock().await.remove(&key);
         if removed.is_some()
             && let Some(watcher) = self.watcher.get()
