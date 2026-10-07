@@ -105,19 +105,27 @@ this errs on the safe side and matches the lockstep update practice.
 
 ### App server (`sapphire-framework-backend::protocol`, `-server`)
 
-- **Host workspace registry**: `<app config dir>/workspaces.toml`, a `WorkspaceRegistry`.
-  The server appends on `workspace.init` and `sync.map` (idempotent: an existing root keeps
-  its id). The per-marker registry stays as it is.
+- **Host workspace registry**: `<app config dir>/workspaces.toml`, its own small format
+  (`[workspace.<id>] root, name?, synced`) rather than `WorkspaceRegistry`, because it
+  carries the `synced` flag restart restore needs. The server appends on `workspace.init`
+  and `sync.map` (idempotent: an existing root keeps its id) and flips `synced` in
+  `SyncRuntime::enable` / `disable`. The per-marker registry stays as it is.
 - **`workspace.list`** → `{ workspaces: Vec<WorkspaceListEntry> }`, where
   `WorkspaceListEntry = { id, name: Option<String>, root, reachable: bool,
-  sync: Option<SyncState> }` and `SyncState = { workspace_id, enabled, peers, paused,
-  last_error }`. `reachable` is "the marker directory exists"; `sync` is `None` for a
-  workspace that has never been enabled.
+  workspace_id: Option<GrainId>, sync: SyncStatusResult }`. `reachable` is "the marker
+  directory exists"; `workspace_id` is the marker's sync id when one has been minted
+  (read, never minted by listing), so a disabled-but-known workspace still matches its
+  ledger row; `sync` is the existing `sync.status` shape (`enabled = false` when not synced
+  or when the server has no sync runtime).
+- **`StatusReport` / `StatusRow`** move from `-server` to `backend::protocol` (re-exported
+  from `-server` at the old path) so the GUI can decode `server.info` without linking the
+  server crate.
 - **`workspace.forget`** `{ id }` → `{}`: disable sync if enabled, then remove the row.
   Files are never touched.
-- **Restart restore**: the first implementation task establishes how synced roots come back
-  after a `serve` restart today. If nothing restores them, `serve` re-enables every registry
-  row whose sync state was enabled, using the same registry (a per-row `synced` flag).
+- **Restart restore**: established while planning — nothing restores synced roots today
+  (`SyncRuntime.synced` starts empty and the server never reads the bridge's `routes.toml`
+  back). `serve` therefore re-enables every registry row with `synced = true` once it is
+  listening, best-effort per row.
 - **Adding an existing folder** reuses `workspace.init` (already idempotent); no new method.
 - Backend `API_VERSION` goes 1 → 2.
 
@@ -152,8 +160,11 @@ client.drain_outcomes() -> Vec<Outcome>; // Outcome { id, result: Result<Command
   publishes a new `Snapshot` on a `watch` channel and calls `repaint`.
 - Service start: the app supplies, per target (`bridge`, `server`), the executable to
   register — by default the sibling `sapphire-bridge` / `<app>` binary next to the GUI's
-  own executable — and the client runs the framework's `ServiceCommand` install/start for
-  it. A missing binary yields an outcome error carrying the command line to run by hand.
+  own executable — and the client runs that binary's own `service install` verb as a child
+  process. (The framework's `install()` registers `current_exe()`, which inside the GUI
+  would be the GUI; running the CLI's verb registers the right binary with no API change.)
+  A missing binary or a failing install yields an outcome error carrying the command line
+  to run by hand.
 
 ### `views` (pure rendering)
 
