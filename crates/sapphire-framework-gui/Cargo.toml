@@ -15,6 +15,8 @@ sapphire-backend = { package = "sapphire-framework-backend", version = "0.14.0",
 sapphire-bridge-api = { package = "sapphire-framework-bridge-api", version = "2", path = "../sapphire-framework-bridge-api" }
 sapphire-ipc = { package = "sapphire-framework-ipc", version = "0.14.0", path = "../sapphire-framework-ipc" }
 egui = "0.36"
+fontdb = "0.23"
+ttf-parser = "0.25"
 rfd = "0.17"
 grain-id.workspace = true
 serde_json.workspace = true

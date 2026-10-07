@@ -18,6 +18,7 @@
 pub use egui;
 
 pub mod client;
+pub mod fonts;
 mod panel;
 pub mod views;
 
