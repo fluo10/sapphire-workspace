@@ -146,8 +146,27 @@ pub fn new_target_ok(picked: &Path, app_name: &str) -> Result<(), String> {
     } else {
         Err(format!(
             "Choose an empty folder ({} is not empty)",
-            picked.display()
+            display_path(picked).display()
         ))
+    }
+}
+
+/// `p` as a person writes it: without the Windows verbatim prefix `\\?\` that
+/// canonicalisation adds (`\\?\UNC\server\share` becomes `\\server\share`).
+///
+/// For showing a path and handing it to the file manager only; the registry keeps the
+/// canonical form. Plain string logic, the same on every platform; a path that is not
+/// UTF-8 is returned unchanged.
+pub fn display_path(p: &Path) -> PathBuf {
+    let Some(s) = p.to_str() else {
+        return p.to_owned();
+    };
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{rest}"))
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        PathBuf::from(rest)
+    } else {
+        p.to_owned()
     }
 }
 
@@ -165,7 +184,7 @@ pub fn display_name(entry: &WorkspaceListEntry) -> String {
 mod tests {
     use super::*;
     use sapphire_backend::protocol::SyncStatusResult;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     fn entry(
         id: &str,
@@ -319,6 +338,26 @@ mod tests {
         assert!(err.contains("is not empty"), "{err}");
         std::fs::create_dir(tmp.path().join(".app")).unwrap();
         assert_eq!(new_target_ok(tmp.path(), "app"), Ok(()));
+    }
+
+    #[test]
+    fn display_path_drops_the_verbatim_prefix() {
+        assert_eq!(
+            display_path(Path::new(r"\\?\C:\Users\me\notes")),
+            PathBuf::from(r"C:\Users\me\notes")
+        );
+        assert_eq!(
+            display_path(Path::new(r"\\?\UNC\server\share\notes")),
+            PathBuf::from(r"\\server\share\notes")
+        );
+        assert_eq!(
+            display_path(Path::new("/home/me/notes")),
+            PathBuf::from("/home/me/notes")
+        );
+        assert_eq!(
+            display_path(Path::new(r"C:\plain")),
+            PathBuf::from(r"C:\plain")
+        );
     }
 
     #[test]

@@ -2,7 +2,9 @@ use egui::{Align, Color32, Layout};
 
 use crate::client::{Command, CommandOutput};
 
-use super::model::{Badge, badge, bring_target, display_name, new_target_ok, remote_only};
+use super::model::{
+    Badge, badge, bring_target, display_name, display_path, new_target_ok, remote_only,
+};
 use super::{ViewCtx, error_line, unavailable};
 
 /// The workspace screen: this host's workspaces, then the workgroup's that are not here.
@@ -73,7 +75,7 @@ impl WorkspaceList {
                                 };
                                 ui.colored_label(colour, b.label());
                             });
-                            ui.small(entry.root.display().to_string());
+                            ui.small(display_path(&entry.root).display().to_string());
                         });
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             if ui
@@ -88,7 +90,7 @@ impl WorkspaceList {
                                 .add_enabled(entry.reachable, egui::Button::new("Open folder"))
                                 .clicked()
                             {
-                                open_folder(&entry.root);
+                                open_folder(&display_path(&entry.root));
                             }
                             let (label, cmd) = if entry.sync.enabled {
                                 (
