@@ -20,7 +20,9 @@ use crate::{BackendEvent, FileSearchResult, SearchMode};
 /// with the running server, so that a release that leaves the method set alone does not
 /// demand a service restart. Bump it on a breaking change to a method, a parameter or a
 /// result here.
-pub const API_VERSION: u32 = 1;
+///
+/// 2: `workspace.list`, `workspace.forget`.
+pub const API_VERSION: u32 = 2;
 
 /// Search the workspace.
 pub const SEARCH: &str = "workspace.search";
@@ -278,6 +280,31 @@ mod tests {
     }
 
     #[test]
+    fn workspace_list_and_forget_round_trip() {
+        let entry = WorkspaceListEntry {
+            id: "notes".into(),
+            name: Some("Notes".into()),
+            root: PathBuf::from("/home/me/notes"),
+            reachable: true,
+            workspace_id: Some(grain_id::GrainId::random()),
+            sync: SyncStatusResult::not_synced(),
+        };
+        let back = round_trip(&WorkspaceListResult {
+            workspaces: vec![entry.clone()],
+        });
+        assert_eq!(back.workspaces[0].id, "notes");
+        assert_eq!(back.workspaces[0].workspace_id, entry.workspace_id);
+        assert!(!back.workspaces[0].sync.enabled);
+        assert_eq!(
+            round_trip(&WorkspaceForgetParams { id: "notes".into() }).id,
+            "notes"
+        );
+        assert_eq!(WORKSPACE_LIST, "workspace.list");
+        assert_eq!(WORKSPACE_FORGET, "workspace.forget");
+        assert_eq!(API_VERSION, 2);
+    }
+
+    #[test]
     fn method_names_are_namespaced() {
         for name in [
             SEARCH,
@@ -289,6 +316,8 @@ mod tests {
             REINDEX,
             SUBSCRIBE,
             WORKSPACE_INIT,
+            WORKSPACE_LIST,
+            WORKSPACE_FORGET,
         ] {
             assert!(name.starts_with("workspace."), "{name}");
         }
@@ -337,4 +366,84 @@ pub struct SyncStatusResult {
     pub last_error: Option<String>,
     /// Whether the bridge is reachable. `false` does not mean the app server is down.
     pub bridge_available: bool,
+}
+
+/// List this application's workspaces on this host, with their sync state.
+pub const WORKSPACE_LIST: &str = "workspace.list";
+/// Drop a workspace from this host's list. Files stay; sync stops first.
+pub const WORKSPACE_FORGET: &str = "workspace.forget";
+
+/// Result of [`WORKSPACE_LIST`].
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct WorkspaceListResult {
+    /// One entry per workspace this server has on record, in the order they were added.
+    pub workspaces: Vec<WorkspaceListEntry>,
+}
+
+/// One row of [`WorkspaceListResult`].
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct WorkspaceListEntry {
+    /// The host registry's id for it.
+    pub id: String,
+    /// A display name, when one was given.
+    pub name: Option<String>,
+    /// Its root on this host.
+    pub root: PathBuf,
+    /// Whether the root still holds this application's marker directory.
+    pub reachable: bool,
+    /// Its identity across devices, when one has been minted. Read, never minted, by listing.
+    pub workspace_id: Option<grain_id::GrainId>,
+    /// Its replication state, as [`SYNC_STATUS`] reports it.
+    pub sync: SyncStatusResult,
+}
+
+/// Parameters of [`WORKSPACE_FORGET`].
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct WorkspaceForgetParams {
+    /// The host registry's id, as [`WorkspaceListEntry::id`] carries it.
+    pub id: String,
+}
+
+impl SyncStatusResult {
+    /// The state of a workspace nothing syncs.
+    pub fn not_synced() -> SyncStatusResult {
+        SyncStatusResult {
+            enabled: false,
+            workspace_id: None,
+            peers: 0,
+            paused: None,
+            last_error: None,
+            bridge_available: false,
+        }
+    }
+}
+
+/// The typed answer to a status question, shared by the CLI and the IPC `server.info`
+/// response (spec decision 4).
+///
+/// When a server answers, the CLI prints the framework's fields and then the
+/// application's [rows](StatusReport::app) as `name: value` lines; a GUI could read the
+/// same serialised shape from the IPC method instead. When nothing is listening, the
+/// report is [`StatusReport::running`] = `false` and the app rows are skipped.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatusReport {
+    /// Whether a server is answering at all.
+    pub running: bool,
+    /// The server's version, when it is running.
+    pub version: Option<String>,
+    /// Its pid, when it is running.
+    pub pid: Option<u32>,
+    /// How the running server was started, when it is running.
+    pub managed_by: Option<sapphire_ipc::ManagedBy>,
+    /// The application's own rows, rendered after the framework's.
+    pub app: Vec<StatusRow>,
+}
+
+/// One application-provided line of the status report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusRow {
+    /// The row's name, e.g. `sync`.
+    pub name: String,
+    /// The value shown beside it.
+    pub value: String,
 }

@@ -9,42 +9,13 @@ use sapphire_bridge_api::{
     BridgeClient, DeviceRetireParams, InviteParams, JoinParams, WorkgroupCreateParams,
 };
 use sapphire_framework_service::{Environment, ServiceCommand, SystemManager};
-use sapphire_ipc::{ClientInfo, Endpoint, ManagedBy};
+use sapphire_ipc::{ClientInfo, Endpoint};
 use sapphire_workspace::{AppContext, Workspace};
-use serde::{Deserialize, Serialize};
 
 use crate::AppServer;
 use crate::error::{Error, Result};
 
-/// The typed answer to a status question, shared by the CLI and the IPC `server.info`
-/// response (spec decision 4).
-///
-/// When a server answers, the CLI prints the framework's fields and then the
-/// application's [rows](StatusReport::app) as `name: value` lines; a GUI could read the
-/// same serialised shape from the IPC method instead. When nothing is listening, the
-/// report is [`StatusReport::running`] = `false` and the app rows are skipped.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StatusReport {
-    /// Whether a server is answering at all.
-    pub running: bool,
-    /// The server's version, when it is running.
-    pub version: Option<String>,
-    /// Its pid, when it is running.
-    pub pid: Option<u32>,
-    /// How the running server was started, when it is running.
-    pub managed_by: Option<ManagedBy>,
-    /// The application's own rows, rendered after the framework's.
-    pub app: Vec<StatusRow>,
-}
-
-/// One application-provided line of the status report.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StatusRow {
-    /// The row's name, e.g. `sync`.
-    pub name: String,
-    /// The value shown beside it.
-    pub value: String,
-}
+pub use sapphire_backend::protocol::{StatusReport, StatusRow};
 
 /// The framework's commands, flattened into an application's CLI (spec decision 2).
 ///
@@ -370,10 +341,7 @@ async fn workspace_init(
             .unwrap_or(proto::SyncStatusResult {
                 enabled: true,
                 workspace_id: Some(enabled.workspace_id),
-                peers: 0,
-                paused: None,
-                last_error: None,
-                bridge_available: false,
+                ..proto::SyncStatusResult::not_synced()
             });
         println!(
             "syncing as {} ({} peer{})",
@@ -741,7 +709,7 @@ mod status_tests {
             sapphire_ipc::ClientInfo {
                 kind: "test".into(),
                 version: "0.0.0".into(),
-                api: 1,
+                api: sapphire_backend::protocol::API_VERSION,
                 pid: std::process::id(),
             },
         )

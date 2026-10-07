@@ -372,7 +372,7 @@ fn client_info(kind: &str) -> ClientInfo {
     ClientInfo {
         kind: kind.to_owned(),
         version: VERSION.to_owned(),
-        api: 1,
+        api: sapphire_backend::protocol::API_VERSION,
         pid: std::process::id(),
     }
 }
