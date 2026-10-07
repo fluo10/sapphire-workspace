@@ -5300,8 +5300,18 @@ name = "sapphire-framework-gui"
 version = "0.14.0"
 dependencies = [
  "egui",
+ "grain-id",
  "rfd",
  "sapphire-framework-backend",
+ "sapphire-framework-bridge",
+ "sapphire-framework-bridge-api",
+ "sapphire-framework-ipc",
+ "sapphire-framework-server",
+ "sapphire-framework-workspace",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

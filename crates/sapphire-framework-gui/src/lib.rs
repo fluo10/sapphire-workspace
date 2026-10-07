@@ -8,6 +8,16 @@
 //!
 //! The component owns only transient UI state; the app owns the registry
 //! (passed `&mut`) and persists it after an action.
+//!
+//! The [`client`] module is the egui-free half: a background task that keeps a snapshot of
+//! the bridge and the app server current and carries out the commands the views (workspace,
+//! workgroup and device panels) send it.
+
+/// The egui this crate renders with. Apps should use this re-export so their egui is
+/// always the one the components were built against.
+pub use egui;
+
+pub mod client;
 
 use std::path::{Path, PathBuf};
 
