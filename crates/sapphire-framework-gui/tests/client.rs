@@ -57,6 +57,7 @@ fn config(f: &Fixture) -> ClientConfig {
         refresh: Duration::from_millis(100),
         fetch_timeout: Duration::from_secs(5),
         command_timeout: Duration::from_secs(30),
+        install_timeout: Duration::from_secs(300),
     }
 }
 

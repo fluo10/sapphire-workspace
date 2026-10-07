@@ -73,12 +73,17 @@ pub struct ClientConfig {
     /// How long one process may take to answer a refresh (connect, handshake and calls)
     /// before it reads as not answering.
     pub fetch_timeout: Duration,
-    /// How long a command may take; a join, which dials peers, gets three times this.
+    /// How long a command may take; a join, which dials peers, gets three times this, and
+    /// an install has [`install_timeout`](Self::install_timeout).
     pub command_timeout: Duration,
+    /// How long `service install` may take. Long, because it may wait on an elevation
+    /// (UAC) prompt a person has to answer.
+    pub install_timeout: Duration,
 }
 
 impl ClientConfig {
-    /// The defaults: built-in endpoints, sibling executables, a 2 s refresh.
+    /// The defaults: built-in endpoints, sibling executables, a 2 s refresh, 30 s per
+    /// command and 5 min for a service install.
     pub fn new(app: AppIdentity) -> std::io::Result<ClientConfig> {
         Ok(ClientConfig {
             endpoints: Endpoints::default_for(app.app_name).map_err(std::io::Error::other)?,
@@ -86,6 +91,7 @@ impl ClientConfig {
             refresh: Duration::from_secs(2),
             fetch_timeout: Duration::from_secs(5),
             command_timeout: Duration::from_secs(30),
+            install_timeout: Duration::from_secs(5 * 60),
             app,
         })
     }

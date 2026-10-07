@@ -6,16 +6,23 @@ use sapphire_bridge_api::{DeviceRetireParams, InviteParams, JoinParams, Workgrou
 use super::conn::{Connections, unanswered};
 use super::types::{ClientConfig, Command, CommandOutput, ServiceTarget};
 
+/// How long `command` may take.
+fn limit(cfg: &ClientConfig, command: &Command) -> std::time::Duration {
+    match command {
+        // An install may wait on an elevation prompt a person has to answer.
+        Command::ServiceInstall(_) => cfg.install_timeout,
+        // A join dials peers, so it may take far longer than any other command.
+        Command::WorkgroupJoin { .. } => cfg.command_timeout * 3,
+        _ => cfg.command_timeout,
+    }
+}
+
 pub(crate) async fn execute(
     cfg: &ClientConfig,
     conns: &mut Connections,
     command: Command,
 ) -> Result<CommandOutput, String> {
-    // A join dials peers, so it may take far longer than any other command.
-    let limit = match command {
-        Command::WorkgroupJoin { .. } => cfg.command_timeout * 3,
-        _ => cfg.command_timeout,
-    };
+    let limit = limit(cfg, &command);
     match command {
         Command::ServiceInstall(target) => {
             let name = match target {
@@ -211,6 +218,49 @@ fn install_failure(stderr: &str, stdout: &str, code: Option<i32>, manual: &str) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_install_gets_its_own_limit_and_a_join_three_times_the_command_limit() {
+        use std::time::Duration;
+        let app = super::super::AppIdentity {
+            app_name: "app",
+            version: "0",
+        };
+        let dir = std::path::PathBuf::from("/run");
+        let cfg = ClientConfig {
+            app,
+            endpoints: super::super::Endpoints {
+                bridge: sapphire_ipc::Endpoint::in_dir("b", dir.clone()),
+                app: sapphire_ipc::Endpoint::in_dir("a", dir),
+            },
+            service_exes: super::super::ServiceExes {
+                bridge: "/b".into(),
+                app: "/a".into(),
+            },
+            refresh: Duration::from_secs(2),
+            fetch_timeout: Duration::from_secs(5),
+            command_timeout: Duration::from_secs(30),
+            install_timeout: Duration::from_secs(300),
+        };
+        assert_eq!(
+            limit(&cfg, &Command::ServiceInstall(ServiceTarget::App)),
+            Duration::from_secs(300)
+        );
+        assert_eq!(
+            limit(
+                &cfg,
+                &Command::WorkgroupJoin {
+                    ticket: "t".into(),
+                    device_name: None
+                }
+            ),
+            Duration::from_secs(90)
+        );
+        assert_eq!(
+            limit(&cfg, &Command::SyncEnable { root: "/x".into() }),
+            Duration::from_secs(30)
+        );
+    }
 
     #[test]
     fn an_install_failure_prefers_stderr_then_stdout_then_the_status() {
