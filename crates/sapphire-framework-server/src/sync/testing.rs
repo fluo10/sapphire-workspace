@@ -124,7 +124,7 @@ impl StubBridge {
         tokio::spawn(async move {
             let info = ServerInfo {
                 version: "stub".into(),
-                api: 1,
+                api: sapphire_bridge_api::API_VERSION,
                 pid: std::process::id(),
                 managed_by: ManagedBy::Service,
             };
@@ -134,7 +134,7 @@ impl StubBridge {
         let info = ClientInfo {
             kind: "test".into(),
             version: "stub".into(),
-            api: 1,
+            api: sapphire_bridge_api::API_VERSION,
             pid: std::process::id(),
         };
         let (client, _) = sapphire_ipc::Client::handshake(client_conn, "bridge", info)
