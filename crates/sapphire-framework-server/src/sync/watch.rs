@@ -22,6 +22,7 @@ pub struct Watcher {
 impl Watcher {
     /// Start watching `roots`, reporting on `tx`.
     pub fn start(roots: Vec<PathBuf>, tx: mpsc::Sender<PathBuf>) -> Result<Watcher> {
+        tracing::debug!(?roots, "DIAG Watcher::start");
         let known = Arc::new(Mutex::new(roots.clone()));
         let pending: Arc<Mutex<HashMap<PathBuf, Instant>>> = Arc::new(Mutex::new(HashMap::new()));
 
@@ -39,6 +40,9 @@ impl Watcher {
                             .filter(|(_, last)| last.elapsed() >= DEBOUNCE)
                             .map(|(root, _)| root.clone())
                             .collect();
+                        if !ready.is_empty() {
+                            tracing::debug!(?ready, "DIAG debounce READY");
+                        }
                         for root in &ready {
                             pending.remove(root);
                         }
@@ -57,12 +61,14 @@ impl Watcher {
         let handler_pending = Arc::clone(&pending);
         let mut watcher =
             notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-                let Ok(event) = event else { return };
+                let event = match event { Ok(e) => e, Err(err) => { tracing::debug!("DIAG watch ERR {err}"); return; } };
+                tracing::debug!(kind = ?event.kind, paths = ?event.paths, "DIAG watch EVENT");
                 let roots = handler_roots.lock().expect("roots").clone();
                 for path in event.paths {
                     // Attribute the event to the root it happened under. Nothing is filtered
                     // by path here: what is synced is `SyncFilter`'s decision, made later on
                     // content — the marker directory holds sync-id and config, which sync.
+                    if !roots.iter().any(|r| path.starts_with(r)) { tracing::debug!(path = %path.display(), roots = ?roots, "DIAG watch UNATTRIBUTED"); }
                     if let Some(root) = roots.iter().find(|r| path.starts_with(r)) {
                         handler_pending
                             .lock()
@@ -89,6 +95,7 @@ impl Watcher {
 
     /// Start watching one more root.
     pub fn watch(&self, root: &Path) -> Result<()> {
+        tracing::debug!(root = %root.display(), "DIAG Watcher::watch");
         self.roots.lock().expect("roots").push(root.to_owned());
         self.inner
             .lock()
