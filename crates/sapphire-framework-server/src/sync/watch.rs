@@ -13,6 +13,65 @@ use crate::error::{Error, Result};
 /// How long events are coalesced before a root is reported.
 pub const DEBOUNCE: Duration = Duration::from_millis(300);
 
+/// The longest a root waits for quiet: one that keeps changing is reported this long
+/// after its first unreported event anyway.
+pub const MAX_DEBOUNCE: Duration = Duration::from_secs(1);
+
+/// The roots with unreported events, and when each one's events arrived.
+///
+/// Kept apart from the `notify` callback and the ticker so the decision — which events
+/// count, and when a root is due — can be tested with made-up events and instants.
+#[derive(Debug, Default)]
+struct Pending {
+    roots: HashMap<PathBuf, Window>,
+}
+
+/// When one root's unreported events began, and when the latest arrived.
+#[derive(Debug)]
+struct Window {
+    first: Instant,
+    last: Instant,
+}
+
+impl Pending {
+    /// Record an event of `kind` under `root` at `now`.
+    ///
+    /// Access events are dropped: opening or closing a file changes nothing, and inotify
+    /// reports every one — including the opens of the scan this report triggers, which
+    /// would otherwise schedule the next scan, and the next, for as long as the server
+    /// runs. A write shows up as `Create` or `Modify` regardless.
+    fn note(&mut self, root: &Path, kind: &notify::EventKind, now: Instant) {
+        if matches!(kind, notify::EventKind::Access(_)) {
+            return;
+        }
+        self.roots
+            .entry(root.to_owned())
+            .and_modify(|window| window.last = now)
+            .or_insert(Window {
+                first: now,
+                last: now,
+            });
+    }
+
+    /// Take every root that is due at `now`: quiet for [`DEBOUNCE`], or waiting
+    /// [`MAX_DEBOUNCE`] since its first event however busy it still is.
+    fn take_ready(&mut self, now: Instant) -> Vec<PathBuf> {
+        let ready: Vec<PathBuf> = self
+            .roots
+            .iter()
+            .filter(|(_, window)| {
+                now.duration_since(window.last) >= DEBOUNCE
+                    || now.duration_since(window.first) >= MAX_DEBOUNCE
+            })
+            .map(|(root, _)| root.clone())
+            .collect();
+        for root in &ready {
+            self.roots.remove(root);
+        }
+        ready
+    }
+}
+
 /// Watches workspace roots and reports which one changed.
 pub struct Watcher {
     inner: Mutex<notify::RecommendedWatcher>,
@@ -23,27 +82,16 @@ impl Watcher {
     /// Start watching `roots`, reporting on `tx`.
     pub fn start(roots: Vec<PathBuf>, tx: mpsc::Sender<PathBuf>) -> Result<Watcher> {
         let known = Arc::new(Mutex::new(roots.clone()));
-        let pending: Arc<Mutex<HashMap<PathBuf, Instant>>> = Arc::new(Mutex::new(HashMap::new()));
+        let pending: Arc<Mutex<Pending>> = Arc::new(Mutex::new(Pending::default()));
 
-        // The debounce timer: report a root once its last event is DEBOUNCE old.
+        // The debounce timer: report a root once it is due (see [`Pending::take_ready`]).
         {
             let pending = Arc::clone(&pending);
             tokio::spawn(async move {
                 let mut ticker = tokio::time::interval(DEBOUNCE / 3);
                 loop {
                     ticker.tick().await;
-                    let ready: Vec<PathBuf> = {
-                        let mut pending = pending.lock().expect("pending");
-                        let ready: Vec<PathBuf> = pending
-                            .iter()
-                            .filter(|(_, last)| last.elapsed() >= DEBOUNCE)
-                            .map(|(root, _)| root.clone())
-                            .collect();
-                        for root in &ready {
-                            pending.remove(root);
-                        }
-                        ready
-                    };
+                    let ready = pending.lock().expect("pending").take_ready(Instant::now());
                     for root in ready {
                         if tx.send(root).await.is_err() {
                             return;
@@ -64,10 +112,11 @@ impl Watcher {
                     // by path here: what is synced is `SyncFilter`'s decision, made later on
                     // content — the marker directory holds sync-id and config, which sync.
                     if let Some(root) = roots.iter().find(|r| path.starts_with(r)) {
-                        handler_pending
-                            .lock()
-                            .expect("pending")
-                            .insert(root.clone(), Instant::now());
+                        handler_pending.lock().expect("pending").note(
+                            root,
+                            &event.kind,
+                            Instant::now(),
+                        );
                     }
                 }
             })
@@ -113,6 +162,85 @@ mod tests {
             .await
             .ok()
             .flatten()
+    }
+
+    fn access() -> notify::EventKind {
+        notify::EventKind::Access(notify::event::AccessKind::Open(
+            notify::event::AccessMode::Any,
+        ))
+    }
+
+    fn modify() -> notify::EventKind {
+        notify::EventKind::Modify(notify::event::ModifyKind::Data(
+            notify::event::DataChange::Any,
+        ))
+    }
+
+    /// Opening a file is not a change. inotify reports every open, and a scan opens
+    /// every file: counting those made each scan schedule the next one, so an idle
+    /// workspace was rescanned forever (issue #179).
+    #[test]
+    fn an_access_event_does_not_make_a_root_due() {
+        let root = Path::new("/ws");
+        let t0 = Instant::now();
+        let mut pending = Pending::default();
+
+        pending.note(root, &access(), t0);
+
+        assert!(
+            pending.take_ready(t0 + DEBOUNCE * 10).is_empty(),
+            "a read must not be reported as an edit"
+        );
+    }
+
+    /// A steady stream of changes must not postpone the report for ever: the debounce
+    /// waits for quiet, but only up to a bound. Without one, a host receiving a peer's
+    /// files held back its own edit until the stream stopped (issue #179).
+    #[test]
+    fn a_steady_stream_of_changes_is_still_reported() {
+        let root = Path::new("/ws");
+        let t0 = Instant::now();
+        let mut pending = Pending::default();
+        let step = DEBOUNCE / 2;
+
+        let mut reported_at = None;
+        for n in 0..20 {
+            let now = t0 + step * n;
+            pending.note(root, &modify(), now);
+            if !pending.take_ready(now).is_empty() {
+                reported_at = Some(now - t0);
+                break;
+            }
+        }
+        let reported_at = reported_at.expect("the root was never reported");
+        // Checked once per `step`, so the first check at or past the bound may be up to
+        // one step late.
+        assert!(
+            reported_at <= MAX_DEBOUNCE + step,
+            "reported only after {reported_at:?}"
+        );
+    }
+
+    /// The real-filesystem half of [`an_access_event_does_not_make_a_root_due`]. Linux
+    /// only: inotify is the backend that reports opens; on Windows and macOS a read raises
+    /// no event at all, so the test could not fail there.
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reading_a_file_is_not_reported() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("ws");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("note.md"), "content").unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let _watcher = Watcher::start(vec![root.clone()], tx).unwrap();
+        // Anything the setup itself raised has been reported and drained.
+        tokio::time::sleep(DEBOUNCE * 2).await;
+        while rx.try_recv().is_ok() {}
+
+        let _ = std::fs::read_to_string(root.join("note.md")).unwrap();
+        let reported = tokio::time::timeout(DEBOUNCE * 3, rx.recv()).await;
+        assert!(reported.is_err(), "a read was reported: {reported:?}");
     }
 
     #[tokio::test(flavor = "multi_thread")]

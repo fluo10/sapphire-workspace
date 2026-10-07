@@ -207,6 +207,16 @@ impl WorkgroupReplica {
 
 // ── the driver ──────────────────────────────────────────────────────────────
 
+/// Whether an event of `kind` is a change worth a scan.
+///
+/// Access events are not: opening or closing a file changes nothing, and inotify reports
+/// every one — including the opens of the scan a change triggers, which would otherwise
+/// schedule another scan for as long as the bridge runs (sapphire-framework#179). A
+/// write shows up as `Create` or `Modify` regardless.
+fn is_change(kind: &notify::EventKind) -> bool {
+    !matches!(kind, notify::EventKind::Access(_))
+}
+
 /// Watches the workgroup root and reports when anything under it changed.
 ///
 /// The ledger and the workspace list are written by this host's own control plane
@@ -226,7 +236,7 @@ impl ChangeWatch {
         let (tx, rx) = mpsc::channel(64);
         let mut watcher =
             notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-                if event.is_ok() {
+                if event.is_ok_and(|e| is_change(&e.kind)) {
                     // Full is a coalescing miss, not a loss: a later event fires the scan.
                     let _ = tx.try_send(());
                 }
@@ -466,6 +476,20 @@ mod tests {
         let dir = BridgeDir::at(tmp.path().join("bridge")).unwrap();
         let wg = Workgroup::create(&dir, "test", name, node).unwrap();
         (tmp, dir, wg)
+    }
+
+    /// Opening a file is not a change: inotify reports the opens of the very scan a
+    /// change triggers, and counting them makes every scan schedule another
+    /// (sapphire-framework#179).
+    #[test]
+    fn an_access_event_is_not_a_change() {
+        use notify::event::{AccessKind, AccessMode, DataChange, ModifyKind};
+        assert!(!is_change(&notify::EventKind::Access(AccessKind::Open(
+            AccessMode::Any
+        ))));
+        assert!(is_change(&notify::EventKind::Modify(ModifyKind::Data(
+            DataChange::Any
+        ))));
     }
 
     #[tokio::test(flavor = "multi_thread")]
