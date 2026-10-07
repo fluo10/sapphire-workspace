@@ -95,10 +95,14 @@ impl InviteDialog {
         out
     }
 
-    /// Show the ticket, or the error.
+    /// Show the ticket, or the error. A ticket reopens the dialog if it was closed while
+    /// the invite was running: it is shown only once, so it must not arrive unseen.
     pub fn on_outcome(&mut self, result: &Result<CommandOutput, String>) {
         match result {
-            Ok(CommandOutput::Ticket(t)) => self.ticket = Some(t.clone()),
+            Ok(CommandOutput::Ticket(t)) => {
+                self.ticket = Some(t.clone());
+                self.open = true;
+            }
             Ok(CommandOutput::Done) => {}
             Err(e) => self.error = Some(e.clone()),
         }
@@ -145,7 +149,7 @@ impl DeviceList {
                     .up()
                     .is_some_and(|b| b.status.workgroup.is_some());
                 if ui
-                    .add_enabled(joined, egui::Button::new("Invite…"))
+                    .add_enabled(joined && !cx.busy, egui::Button::new("Invite…"))
                     .clicked()
                 {
                     self.invite.open();
@@ -252,7 +256,11 @@ impl DeviceList {
     /// Route the result: to the invite dialog or the retire confirmation, whichever sent it.
     pub fn on_outcome(&mut self, result: &Result<CommandOutput, String>) {
         match self.last.take() {
-            Some(Last::Invite) => self.invite.on_outcome(result),
+            // A failed invite whose dialog was closed meanwhile shows on the screen's line.
+            Some(Last::Invite) => match result {
+                Err(e) if !self.invite.open => self.error = Some(e.clone()),
+                _ => self.invite.on_outcome(result),
+            },
             Some(Last::Retire) => match (result, self.confirm.as_mut()) {
                 (Ok(_), _) => self.confirm = None,
                 (Err(e), Some(c)) => c.error = Some(e.clone()),
@@ -279,6 +287,30 @@ mod tests {
         list.on_outcome(&Ok(CommandOutput::Ticket("t".into())));
         assert_eq!(list.invite.ticket.as_deref(), Some("t"));
         assert!(list.last.is_none());
+    }
+
+    #[test]
+    fn a_ticket_that_arrives_after_the_dialog_closed_reopens_it() {
+        let mut list = DeviceList::default();
+        list.invite.open();
+        list.invite.invited = Some("laptop".into());
+        list.last = Some(Last::Invite);
+        // The user closes the dialog while the invite is still running.
+        list.invite.open = false;
+        list.on_outcome(&Ok(CommandOutput::Ticket("t".into())));
+        assert!(list.invite.open, "the ticket must be shown");
+        assert_eq!(list.invite.ticket.as_deref(), Some("t"));
+        assert_eq!(list.invite.invited.as_deref(), Some("laptop"));
+    }
+
+    #[test]
+    fn an_invite_failure_after_the_dialog_closed_goes_to_the_error_line() {
+        let mut list = DeviceList::default();
+        list.invite.open();
+        list.last = Some(Last::Invite);
+        list.invite.open = false;
+        list.on_outcome(&Err("boom".into()));
+        assert_eq!(list.error.as_deref(), Some("boom"));
     }
 
     #[test]
