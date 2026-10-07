@@ -287,6 +287,80 @@ async fn workspace_init_sync_toggle_and_forget() {
     .await;
 }
 
+/// A workgroup, a running server, and one synced workspace published into the ledger.
+/// Returns the client and the published workspace's id.
+async fn published_workspace(f: &Fixture) -> (FrameworkClient, grain_id::GrainId) {
+    let client = spawn(f);
+    wait(|| async { client.snapshot().bridge.up().is_some() }).await;
+    let id = client.send(Command::WorkgroupCreate {
+        name: "home".into(),
+        device_name: "desk".into(),
+    });
+    outcome(&client, id).await.unwrap();
+    wait(|| async { client.snapshot().server.up().is_some() }).await;
+
+    let dir = f.tmp.path().join("notes");
+    std::fs::create_dir_all(&dir).unwrap();
+    let id = client.send(Command::WorkspaceInit { dir, sync: true });
+    outcome(&client, id).await.unwrap();
+    wait(|| async {
+        client
+            .snapshot()
+            .bridge
+            .up()
+            .is_some_and(|b| b.ledger.iter().any(|w| w.app_name == APP.app_name))
+    })
+    .await;
+    let workspace_id = client.snapshot().bridge.up().unwrap().ledger[0].workspace_id;
+    (client, workspace_id)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn workspace_map_creates_the_folder_and_syncs_it_under_the_ledger_id() {
+    let f = fixture();
+    let _bridge = start_bridge(&f).await;
+    let _server = start_server(&f).await;
+    let (client, workspace_id) = published_workspace(&f).await;
+
+    // This host already has the workspace: stop syncing it and drop it from the list, so
+    // the ledger entry is one this host does not have — what "Bring to this host…" offers.
+    let row = client.snapshot().server.up().unwrap().workspaces[0].clone();
+    let id = client.send(Command::SyncDisable {
+        root: row.root.clone(),
+    });
+    outcome(&client, id).await.unwrap();
+    let id = client.send(Command::WorkspaceForget { id: row.id.clone() });
+    outcome(&client, id).await.unwrap();
+    wait(|| async {
+        client
+            .snapshot()
+            .server
+            .up()
+            .is_some_and(|s| s.workspaces.is_empty())
+    })
+    .await;
+
+    // A folder that does not exist yet, as `bring_target` makes it.
+    let dir = f.tmp.path().join("elsewhere").join("notes");
+    let id = client.send(Command::WorkspaceMap {
+        workspace_id,
+        dir: dir.clone(),
+    });
+    assert_eq!(outcome(&client, id).await, Ok(CommandOutput::Done));
+    assert!(
+        dir.join(format!(".{}", APP.app_name)).is_dir(),
+        "the marker"
+    );
+    wait(|| async {
+        client.snapshot().server.up().is_some_and(|s| {
+            s.workspaces
+                .iter()
+                .any(|w| w.sync.enabled && w.workspace_id == Some(workspace_id))
+        })
+    })
+    .await;
+}
+
 /// Accept connections on `endpoint` and never answer them.
 async fn hang(endpoint: &Endpoint) -> tokio::task::JoinHandle<()> {
     #[cfg(unix)]

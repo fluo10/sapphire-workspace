@@ -2,7 +2,7 @@ use egui::{Align, Color32, Layout};
 
 use crate::client::{Command, CommandOutput};
 
-use super::model::{Badge, badge, display_name, remote_only};
+use super::model::{Badge, badge, bring_target, display_name, new_target_ok, remote_only};
 use super::{ViewCtx, error_line, unavailable};
 
 /// The workspace screen: this host's workspaces, then the workgroup's that are not here.
@@ -35,10 +35,13 @@ impl WorkspaceList {
                     .add_enabled(server_up && !cx.busy, egui::Button::new("New…"))
                     .clicked()
                     && let Some(dir) = rfd::FileDialog::new()
-                        .set_title("Choose a folder for the new workspace")
+                        .set_title("Choose an empty folder for the new workspace")
                         .pick_folder()
                 {
-                    out = Some(Command::WorkspaceInit { dir, sync: true });
+                    match new_target_ok(&dir, cx.app_name) {
+                        Ok(()) => out = Some(Command::WorkspaceInit { dir, sync: true }),
+                        Err(e) => self.error = Some(e),
+                    }
                 }
             });
         });
@@ -136,12 +139,15 @@ impl WorkspaceList {
                                         )
                                         .clicked()
                                         && let Some(dir) = rfd::FileDialog::new()
-                                            .set_title(format!("Choose where {} goes", w.name))
+                                            .set_title(format!(
+                                                "Choose where to put {0} (a folder named {0} is created inside)",
+                                                w.name
+                                            ))
                                             .pick_folder()
                                     {
                                         out = Some(Command::WorkspaceMap {
                                             workspace_id: w.workspace_id,
-                                            dir,
+                                            dir: bring_target(&dir, &w.name, cx.app_name),
                                         });
                                     }
                                 });

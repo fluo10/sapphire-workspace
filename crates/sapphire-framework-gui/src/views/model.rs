@@ -1,5 +1,7 @@
 //! The decisions the views make, as plain functions, so they can be tested without egui.
 
+use std::path::{Path, PathBuf};
+
 use grain_id::GrainId;
 use sapphire_backend::protocol::WorkspaceListEntry;
 use sapphire_bridge_api::{PeerInfo, WorkgroupWorkspaceInfo};
@@ -91,6 +93,62 @@ pub fn default_device_name() -> String {
         .iter()
         .find_map(|v| std::env::var(v).ok().filter(|s| !s.is_empty()))
         .unwrap_or_else(|| "device".to_owned())
+}
+
+/// Whether `dir` is already a workspace of `app_name` (holds its `.{app_name}` marker).
+fn has_marker(dir: &Path, app_name: &str) -> bool {
+    dir.join(format!(".{app_name}")).is_dir()
+}
+
+/// `name` made safe as one folder name on every platform: path separators and the
+/// characters Windows forbids become `-`, leading and trailing dots and spaces go, and
+/// nothing left becomes `workspace`.
+fn folder_name(name: &str) -> String {
+    let replaced: String = name
+        .chars()
+        .map(|c| match c {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '-',
+            c if c.is_control() => '-',
+            c => c,
+        })
+        .collect();
+    let trimmed = replaced.trim_matches(|c| c == '.' || c == ' ');
+    if trimmed.is_empty() {
+        "workspace".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+/// Where "Bring to this host…" puts `workspace_name` when the user picked `picked`.
+///
+/// A picked folder that already is a workspace of `app_name` is used as it is; any other
+/// folder gets a new one inside it, named after the workspace — picking `~/Documents` must
+/// not turn all of `~/Documents` into a synced workspace.
+pub fn bring_target(picked: &Path, workspace_name: &str, app_name: &str) -> PathBuf {
+    if has_marker(picked, app_name) {
+        picked.to_owned()
+    } else {
+        picked.join(folder_name(workspace_name))
+    }
+}
+
+/// Whether "New…" may create a workspace in `picked`: it must already be a workspace of
+/// `app_name`, or be empty. The error is the message to show.
+pub fn new_target_ok(picked: &Path, app_name: &str) -> Result<(), String> {
+    if has_marker(picked, app_name) {
+        return Ok(());
+    }
+    let mut entries =
+        std::fs::read_dir(picked).map_err(|e| format!("{}: {e}", picked.display()))?;
+    if entries.next().is_none() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Choose an empty folder ({} is not empty)",
+            picked.display()
+        ))
+    }
 }
 
 /// The first eight characters of an id, for a compact column.
@@ -217,6 +275,50 @@ mod tests {
     fn names_are_trimmed_and_must_not_be_empty() {
         assert_eq!(valid_name("  home "), Some("home".into()));
         assert_eq!(valid_name("   "), None);
+    }
+
+    #[test]
+    fn bring_target_nests_a_folder_named_after_the_workspace() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(
+            bring_target(tmp.path(), "Notes", "app"),
+            tmp.path().join("Notes")
+        );
+        assert_eq!(
+            bring_target(tmp.path(), "a/b\\c:d*e?f\"g<h>i|j", "app"),
+            tmp.path().join("a-b-c-d-e-f-g-h-i-j")
+        );
+        assert_eq!(
+            bring_target(tmp.path(), " ..x.. ", "app"),
+            tmp.path().join("x")
+        );
+        assert_eq!(
+            bring_target(tmp.path(), " . ", "app"),
+            tmp.path().join("workspace")
+        );
+        assert_eq!(
+            bring_target(tmp.path(), "", "app"),
+            tmp.path().join("workspace")
+        );
+    }
+
+    #[test]
+    fn bring_target_uses_a_picked_workspace_folder_as_is() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join(".app")).unwrap();
+        assert_eq!(bring_target(tmp.path(), "Notes", "app"), tmp.path());
+    }
+
+    #[test]
+    fn a_new_workspace_needs_an_empty_folder_or_a_workspace() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(new_target_ok(tmp.path(), "app"), Ok(()));
+        std::fs::write(tmp.path().join("file.txt"), "x").unwrap();
+        let err = new_target_ok(tmp.path(), "app").unwrap_err();
+        assert!(err.starts_with("Choose an empty folder"), "{err}");
+        assert!(err.contains("is not empty"), "{err}");
+        std::fs::create_dir(tmp.path().join(".app")).unwrap();
+        assert_eq!(new_target_ok(tmp.path(), "app"), Ok(()));
     }
 
     #[test]

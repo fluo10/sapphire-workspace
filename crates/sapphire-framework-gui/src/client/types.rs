@@ -210,7 +210,8 @@ pub enum Command {
         /// The workspace root.
         root: PathBuf,
     },
-    /// Bring a workgroup workspace to `dir` (initialising it first if needed).
+    /// Bring a workgroup workspace to `dir`, creating the folder and initialising it as a
+    /// workspace first if needed.
     WorkspaceMap {
         /// The workgroup workspace to map.
         workspace_id: GrainId,

@@ -126,6 +126,14 @@ async fn app_command(
                     .await?;
             }
             Command::WorkspaceMap { workspace_id, dir } => {
+                // "Bring to this host…" names a folder inside the one picked, which does
+                // not exist yet. The GUI runs on the same host as the server, so it makes it.
+                std::fs::create_dir_all(&dir).map_err(|e| {
+                    sapphire_ipc::Error::Io(std::io::Error::new(
+                        e.kind(),
+                        format!("could not create {}: {e}", dir.display()),
+                    ))
+                })?;
                 if !dir.join(format!(".{app}")).is_dir() {
                     let _: proto::WorkspaceInitResult = c
                         .call(
