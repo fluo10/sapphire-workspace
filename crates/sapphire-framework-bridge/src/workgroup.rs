@@ -188,6 +188,23 @@ impl Workgroup {
         })
     }
 
+    /// Retire the device `selector` names, unless it is this host's own.
+    ///
+    /// Shared by the control plane and the bridge CLI's offline path. Retiring oneself would
+    /// lock this host out of its own workgroup at the next authorization, which no user means
+    /// to do from a device list.
+    pub fn retire_device(&self, selector: &str, this_node_id: &str) -> Result<Device> {
+        let mut devices = self.devices()?;
+        let target = devices.resolve(selector)?.clone();
+        if target.node_id.as_deref() == Some(this_node_id) {
+            return Err(Error::Config(format!(
+                "{} is this host's own device; retire it from another device",
+                target.name
+            )));
+        }
+        Ok(devices.retire(selector)?)
+    }
+
     /// Join the workgroup a ticket names, and write it into this bridge directory.
     ///
     /// Dials the ticket's address over the pairing protocol

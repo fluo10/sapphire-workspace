@@ -161,7 +161,7 @@ impl BridgeCommand {
             },
             BridgeCommand::Workgroup(command) => match command {
                 WorkgroupCommand::Create { name, device_name } => {
-                    workgroup_create(&name, &device_name)
+                    workgroup_create(version, &name, &device_name).await
                 }
                 WorkgroupCommand::List => workgroup_list(),
                 WorkgroupCommand::Join {
@@ -176,7 +176,7 @@ impl BridgeCommand {
                     ttl,
                     workgroup,
                 } => device_invite(version, name, ttl, workgroup).await,
-                DeviceCommand::Retire { selector } => device_retire(&selector),
+                DeviceCommand::Retire { selector } => device_retire(version, &selector).await,
             },
         }
     }
@@ -480,26 +480,46 @@ async fn workgroup_join(version: &str, ticket: String, device_name: Option<Strin
 
 /// Retire a device in the ledger.
 ///
-/// Works directly on the bridge directory: the control plane has no `retire` method, and the
-/// ledger is a directory this user already owns. Retirement takes effect at once because the
-/// bridge re-reads the ledger on every authorization.
-fn device_retire(selector: &str) -> Result<i32> {
+/// A running bridge does it over the control plane, so one process writes the ledger; a
+/// stopped one is edited directly, as before. Either way this host's own device is refused.
+async fn device_retire(version: &str, selector: &str) -> Result<i32> {
+    if let Some(client) = connect(version).await? {
+        let retired = client
+            .device_retire(sapphire_bridge_api::DeviceRetireParams {
+                selector: selector.to_owned(),
+            })
+            .await?;
+        println!("retired device {} ({})", retired.name, retired.device_id);
+        return Ok(0);
+    }
     let dir = BridgeDir::open()?;
     let Some(workgroup) = Workgroup::open(&dir)? else {
         println!("this host has not joined a workgroup");
         return Ok(1);
     };
-    let mut devices = workgroup.devices()?;
-    let device = devices.retire(selector)?;
+    let device = workgroup.retire_device(selector, &this_node_id(&dir)?)?;
     println!("retired device {} ({})", device.name, device.id);
     Ok(0)
 }
 
 /// Found a workgroup, recording this host as its first device.
 ///
-/// Works directly on the directory: nothing can be asked about a workgroup that does not
-/// exist yet.
-fn workgroup_create(name: &str, device_name: &str) -> Result<i32> {
+/// A running bridge does it over the control plane and serves the workgroup at once; a
+/// stopped one is written directly, as before.
+async fn workgroup_create(version: &str, name: &str, device_name: &str) -> Result<i32> {
+    if let Some(client) = connect(version).await? {
+        let created = client
+            .workgroup_create(sapphire_bridge_api::WorkgroupCreateParams {
+                name: name.to_owned(),
+                device_name: device_name.to_owned(),
+            })
+            .await?;
+        println!(
+            "created workgroup {} ({}); this device is {} ({})",
+            created.name, created.workgroup_id, device_name, created.device_id
+        );
+        return Ok(0);
+    }
     let dir = BridgeDir::open()?;
     // The directory is opened first, so a format we do not understand stops us before a new
     // identity is minted.

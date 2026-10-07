@@ -9,10 +9,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use sapphire_bridge_api::{
-    Ack, BRIDGE_NAME, INVITE, InviteParams, InviteResult, JOIN, JoinParams, JoinResult, PEERS,
-    PeerInfo, PeersResult, REGISTER, RegisterParams, RegisterResult, RouteStatus, STATUS,
-    StatusResult, UNREGISTER, UnregisterParams, WORKSPACES, WorkgroupStatus,
-    WorkgroupWorkspaceInfo, WorkspacesResult,
+    Ack, BRIDGE_NAME, DEVICE_RETIRE, DeviceRetireParams, DeviceRetireResult, INVITE, InviteParams,
+    InviteResult, JOIN, JoinParams, JoinResult, PEERS, PeerInfo, PeersResult, REGISTER,
+    RegisterParams, RegisterResult, RouteStatus, STATUS, StatusResult, UNREGISTER,
+    UnregisterParams, WORKGROUP_CREATE, WORKSPACES, WorkgroupCreateParams, WorkgroupCreateResult,
+    WorkgroupStatus, WorkgroupWorkspaceInfo, WorkspacesResult,
 };
 use sapphire_ipc::{
     Connection, Endpoint, PeerHandle, RequestCtx, Router, RpcError, ServerInfo, serve,
@@ -211,6 +212,24 @@ fn router(bridge: Arc<Bridge>, session: Arc<Session>) -> Router {
             move |ctx| {
                 let bridge = Arc::clone(&bridge);
                 async move { join(&bridge, ctx).await.map_err(failed).and_then(encode) }
+            }
+        })
+        .method(WORKGROUP_CREATE, {
+            let bridge = Arc::clone(&bridge);
+            move |ctx| {
+                let bridge = Arc::clone(&bridge);
+                async move {
+                    workgroup_create(&bridge, ctx)
+                        .map_err(failed)
+                        .and_then(encode)
+                }
+            }
+        })
+        .method(DEVICE_RETIRE, {
+            let bridge = Arc::clone(&bridge);
+            move |ctx| {
+                let bridge = Arc::clone(&bridge);
+                async move { device_retire(&bridge, ctx).map_err(failed).and_then(encode) }
             }
         })
         .method(WORKSPACES, {
@@ -443,6 +462,38 @@ async fn join(bridge: &Bridge, ctx: RequestCtx) -> Result<JoinResult> {
     Ok(result)
 }
 
+/// `bridge.workgroup_create` — found a workgroup on this host, as its first device.
+///
+/// The running bridge does it, so the process that will serve the workgroup is the one that
+/// wrote it, and it starts serving at once — the same `refresh_workgroup` a join ends with.
+fn workgroup_create(bridge: &Bridge, ctx: RequestCtx) -> Result<WorkgroupCreateResult> {
+    let params: WorkgroupCreateParams = serde_json::from_value(ctx.params)
+        .map_err(|e| Error::Config(format!("malformed workgroup_create: {e}")))?;
+    let node_id = bridge.transport().node_id();
+    let workgroup = Workgroup::create(&bridge.dir, &params.name, &params.device_name, &node_id)?;
+    let device_id = workgroup.this_device(&node_id)?.id;
+    bridge.refresh_workgroup()?;
+    Ok(WorkgroupCreateResult {
+        workgroup_id: workgroup.id,
+        name: workgroup.name,
+        device_id,
+    })
+}
+
+/// `bridge.device_retire` — retire a device of this host's workgroup.
+///
+/// Takes effect at once: the ledger is re-read on every authorization.
+fn device_retire(bridge: &Bridge, ctx: RequestCtx) -> Result<DeviceRetireResult> {
+    let params: DeviceRetireParams = serde_json::from_value(ctx.params)
+        .map_err(|e| Error::Config(format!("malformed device_retire: {e}")))?;
+    let workgroup = bridge.workgroup()?.ok_or(Error::NoWorkgroup)?;
+    let device = workgroup.retire_device(&params.selector, &bridge.transport().node_id())?;
+    Ok(DeviceRetireResult {
+        device_id: device.id,
+        name: device.name,
+    })
+}
+
 /// `bridge.workspaces` — what the workgroup holds.
 ///
 /// The bridge is the app server of the workgroup's own workspace, so this is the list it
@@ -512,6 +563,97 @@ mod tests {
             .unwrap()
             .net(NetConfig::default()),
         )
+    }
+
+    /// A bridge over a fresh directory with no workgroup yet.
+    fn bare_bridge(tmp: &tempfile::TempDir) -> Arc<Bridge> {
+        let dir = BridgeDir::at(tmp.path().join("bridge")).unwrap();
+        Arc::new(
+            Bridge::new(
+                dir,
+                Arc::new(LoopbackNetwork::new().transport("aaaa")),
+                "0.0.0",
+            )
+            .unwrap()
+            .net(NetConfig::default()),
+        )
+    }
+
+    #[tokio::test]
+    async fn workgroup_create_founds_one_and_status_shows_it_at_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bridge = bare_bridge(&tmp);
+        let (client, _serving) = connect(&bridge).await;
+
+        let created: sapphire_bridge_api::WorkgroupCreateResult = serde_json::from_value(
+            call(
+                &client,
+                sapphire_bridge_api::WORKGROUP_CREATE,
+                serde_json::json!({ "name": "home", "device_name": "desk" }),
+            )
+            .await,
+        )
+        .unwrap();
+        assert_eq!(created.name, "home");
+
+        let reported: StatusResult =
+            serde_json::from_value(call(&client, STATUS, serde_json::json!({})).await).unwrap();
+        let wg = reported.workgroup.expect("the new workgroup");
+        assert_eq!(wg.workgroup_id, created.workgroup_id);
+        assert_eq!(wg.devices, 1);
+
+        let err = client
+            .call::<_, Value>(
+                sapphire_bridge_api::WORKGROUP_CREATE,
+                serde_json::json!({ "name": "again", "device_name": "desk" }),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("already belongs"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn device_retire_refuses_this_hosts_own_device() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bridge = bridge(&tmp); // founded as "host-a" with node "aaaa"
+        let (client, _serving) = connect(&bridge).await;
+        let err = client
+            .call::<_, Value>(
+                sapphire_bridge_api::DEVICE_RETIRE,
+                serde_json::json!({ "selector": "host-a" }),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("own device"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn device_retire_takes_another_device_out_of_peers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bridge = bridge(&tmp);
+        bridge
+            .workgroup()
+            .unwrap()
+            .unwrap()
+            .devices()
+            .unwrap()
+            .add("laptop", Some("bbbb".into()), None)
+            .unwrap();
+        let (client, _serving) = connect(&bridge).await;
+
+        let retired: sapphire_bridge_api::DeviceRetireResult = serde_json::from_value(
+            call(
+                &client,
+                sapphire_bridge_api::DEVICE_RETIRE,
+                serde_json::json!({ "selector": "laptop" }),
+            )
+            .await,
+        )
+        .unwrap();
+        assert_eq!(retired.name, "laptop");
+        let peers: PeersResult =
+            serde_json::from_value(call(&client, PEERS, serde_json::json!({})).await).unwrap();
+        assert!(peers.peers.iter().all(|p| p.name != "laptop"));
     }
 
     fn registration(ws: grain_id::GrainId) -> RegisterParams {
