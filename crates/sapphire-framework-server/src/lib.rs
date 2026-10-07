@@ -44,6 +44,7 @@ mod error;
 mod events;
 mod handlers;
 mod host;
+mod registry;
 pub mod sync;
 #[cfg(test)]
 mod test_support;
@@ -55,6 +56,7 @@ pub use error::{Error, Result};
 pub use events::subscribe_method;
 pub use handlers::{workspace_router, workspace_router_with_sync};
 pub use host::{DEFAULT_IDLE, DEFAULT_MAX_OPEN, WorkspaceHost};
+pub use registry::{HostEntry, HostRegistry};
 pub use sync::{SyncRuntime, SyncStatus, sync_router};
 
 /// An application's server.
@@ -476,7 +478,7 @@ fn init_workspace(ctx: &'static AppContext, dir: &Path) -> Result<proto::Workspa
     // `--workspace` selectors. The registry lives in the marker, so it travels with the
     // workspace when it syncs.
     let workspace = Workspace::from_root(ctx, &root)?;
-    let id = workspace_id_for(&root);
+    let id = registry::slug(&root);
     let config_path = workspace.config_path();
     let registry = read_registry(&config_path)?;
     if registry.get(&id).is_none() {
@@ -490,29 +492,6 @@ fn init_workspace(ctx: &'static AppContext, dir: &Path) -> Result<proto::Workspa
         workspace_id: id,
         created,
     })
-}
-
-/// The registry id a workspace root carries: its directory name, slugified.
-///
-/// Uniqueness comes from the directory itself — a second `init` of one directory is the
-/// idempotent path — so the slug is not uniquified against the rest of the registry the
-/// way the GUI's manager is.
-fn workspace_id_for(root: &Path) -> String {
-    let base: String = root
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "workspace".to_owned())
-        .trim()
-        .to_lowercase()
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect();
-    let base = base.trim_matches('-').to_owned();
-    if base.is_empty() {
-        "workspace".to_owned()
-    } else {
-        base
-    }
 }
 
 /// The registry as the marker's `config.toml` holds it, or an empty one.

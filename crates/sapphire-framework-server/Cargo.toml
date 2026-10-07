@@ -30,6 +30,7 @@ sapphire-sync = { package = "sapphire-framework-sync", version = "0.14.0", path 
 sapphire-workspace = { package = "sapphire-framework-workspace", version = "0.14.0", path = "../sapphire-framework-workspace", default-features = false }
 clap.workspace = true
 grain-id.workspace = true
+indexmap.workspace = true
 notify = "8"
 serde.workspace = true
 serde_json.workspace = true
