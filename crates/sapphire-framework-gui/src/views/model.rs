@@ -83,7 +83,9 @@ pub fn valid_name(input: &str) -> Option<String> {
 pub const TTL_CHOICES: [(&str, u64); 3] =
     [("1 hour", 3_600), ("24 hours", 86_400), ("7 days", 604_800)];
 
-/// This host's name, as the bridge's join defaults it.
+/// This host's name: the device-name default when founding a workgroup.
+///
+/// Not for joining — a join must repeat the name the invite was issued for.
 pub fn default_device_name() -> String {
     ["HOSTNAME", "COMPUTERNAME"]
         .iter()

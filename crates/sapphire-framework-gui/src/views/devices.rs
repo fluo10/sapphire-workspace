@@ -12,6 +12,8 @@ pub struct InviteDialog {
     name: String,
     ttl: usize,
     ticket: Option<String>,
+    /// The name the last ticket was requested for: the joiner must type exactly this.
+    invited: Option<String>,
     error: Option<String>,
 }
 
@@ -41,6 +43,12 @@ impl InviteDialog {
                 ui.set_min_width(380.0);
                 if let Some(ticket) = &self.ticket {
                     ui.label("Give this ticket to the new device. It works once.");
+                    if let Some(name) = &self.invited {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("On the new device, join as");
+                            ui.strong(format!("«{name}»"));
+                        });
+                    }
                     ui.add(
                         egui::TextEdit::multiline(&mut ticket.as_str())
                             .font(egui::TextStyle::Monospace)
@@ -70,6 +78,7 @@ impl InviteDialog {
                         .clicked()
                         && let Some(name) = name
                     {
+                        self.invited = Some(name.clone());
                         out = Some(Command::DeviceInvite {
                             name,
                             ttl_secs: Some(TTL_CHOICES[self.ttl].1),
@@ -306,7 +315,8 @@ mod tests {
         d.open();
         d.on_outcome(&Ok(CommandOutput::Ticket("old".into())));
         d.on_outcome(&Err("bad".into()));
+        d.invited = Some("laptop".into());
         d.open();
-        assert!(d.open && d.ticket.is_none() && d.error.is_none());
+        assert!(d.open && d.ticket.is_none() && d.error.is_none() && d.invited.is_none());
     }
 }

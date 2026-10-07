@@ -5,27 +5,31 @@ use crate::client::{Command, CommandOutput};
 use super::model::{default_device_name, is_this_device, valid_name};
 use super::{ViewCtx, error_line, unavailable};
 
-/// Join with a ticket: the ticket and this device's name.
+/// Join with a ticket: the ticket and the name this device was invited as.
+///
+/// The name starts empty on purpose: the inviting device fixed it when it issued the ticket,
+/// and the bridge refuses any other. The invite dialog shows the inviter which name to pass on.
+#[derive(Default)]
 pub struct JoinDialog {
     ticket: String,
     device_name: String,
     error: Option<String>,
 }
 
-impl Default for JoinDialog {
-    fn default() -> Self {
-        JoinDialog {
-            ticket: String::new(),
-            device_name: default_device_name(),
-            error: None,
-        }
-    }
-}
-
 impl JoinDialog {
     /// Reset the form.
     pub fn open(&mut self) {
         *self = JoinDialog::default();
+    }
+
+    /// The join to send, once both the ticket and the name are filled in.
+    fn submission(&self) -> Option<Command> {
+        let ticket = valid_name(&self.ticket)?;
+        let device_name = valid_name(&self.device_name)?;
+        Some(Command::WorkgroupJoin {
+            ticket,
+            device_name: Some(device_name),
+        })
     }
 
     /// Render the form inline. Returns [`Command::WorkgroupJoin`] on submit.
@@ -37,17 +41,14 @@ impl JoinDialog {
                 .desired_rows(3)
                 .desired_width(f32::INFINITY),
         );
-        ui.label("This device's name");
+        ui.label("The name this device was invited as");
         ui.text_edit_singleline(&mut self.device_name);
-        let ticket = self.ticket.trim().to_owned();
+        let submission = self.submission();
         if ui
-            .add_enabled(!cx.busy && !ticket.is_empty(), egui::Button::new("Join"))
+            .add_enabled(!cx.busy && submission.is_some(), egui::Button::new("Join"))
             .clicked()
         {
-            out = Some(Command::WorkgroupJoin {
-                ticket,
-                device_name: valid_name(&self.device_name),
-            });
+            out = submission;
         }
         if cx.busy {
             ui.spinner();
@@ -175,6 +176,29 @@ impl WorkgroupView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn join_starts_with_an_empty_name_and_needs_both_fields() {
+        let mut d = JoinDialog::default();
+        assert!(d.device_name.is_empty(), "the name must not be pre-filled");
+        d.ticket = "  sapphire:abc \n".into();
+        assert!(d.submission().is_none(), "no name yet");
+        d.device_name = "   ".into();
+        assert!(d.submission().is_none(), "a blank name is no name");
+        d.device_name = " laptop ".into();
+        match d.submission() {
+            Some(Command::WorkgroupJoin {
+                ticket,
+                device_name,
+            }) => {
+                assert_eq!(ticket, "sapphire:abc");
+                assert_eq!(device_name.as_deref(), Some("laptop"));
+            }
+            other => panic!("expected a join, got {other:?}"),
+        }
+        d.ticket.clear();
+        assert!(d.submission().is_none(), "no ticket");
+    }
 
     #[test]
     fn a_join_failure_goes_to_the_join_dialog() {

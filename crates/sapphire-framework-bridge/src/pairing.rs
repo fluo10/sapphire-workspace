@@ -115,8 +115,8 @@ where
 /// before any replication — the first session between them is then an ordinary delta
 /// exchange, not a search for someone to dial.
 ///
-/// In this order, and no other: redeem the secret (constant time, single use, expiry
-/// checked — [`Invites::redeem`]), then write the device record with the joiner's node id
+/// In this order, and no other: redeem the secret for the name the invite was issued for
+/// (constant time, single use, expiry checked — [`Invites::redeem_as`]), then write the device record with the joiner's node id
 /// as a **local write** to the workgroup workspace, then reply. Writing the record before
 /// replying is what makes the admission durable if the reply is lost: the joiner can retry
 /// the *sync*, which is idempotent, rather than the *pairing*, which is not — the invite is
@@ -166,23 +166,13 @@ where
 
     // The secret is the whole gate: constant time, single use, expiry checked. Anything it
     // refuses writes nothing to the ledger and answers with the reason.
-    let invite = match invites.redeem(&request.secret) {
-        Ok(invite) => invite,
-        Err(err) => return reject(&mut stream, err.to_string()).await,
-    };
-
+    //
     // The invite named the device; the joiner repeats the name it is asking for. Taking the
     // joiner's word would let one ticket name a device the inviter never saw — the point of
-    // asking for a name at invite time is that the inviter knows what will appear.
-    if request.device_name != invite.device_name {
-        return reject(
-            &mut stream,
-            format!(
-                "this invite is for a device named {:?}, not {:?}",
-                invite.device_name, request.device_name
-            ),
-        )
-        .await;
+    // asking for a name at invite time is that the inviter knows what will appear. The name
+    // is checked before the invite is spent, so a mistyped name can be corrected and retried.
+    if let Err(err) = invites.redeem_as(&request.secret, &request.device_name) {
+        return reject(&mut stream, err.to_string()).await;
     }
 
     let mut devices = workgroup.devices()?;
@@ -341,6 +331,30 @@ mod tests {
         let (second, _) = pair(&dir, &wg, secret, "intruder", &third_node).await;
         assert!(matches!(second.unwrap(), JoinResponse::Rejected(_)));
         assert!(wg.devices().unwrap().by_node_id(&third_node).is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_mistyped_name_does_not_spend_the_invite() {
+        let (_tmp, dir, wg) = inviter();
+        let (_invite, secret) = Invites::load(&dir.root.join("invites.toml"))
+            .unwrap()
+            .create("phone", DEFAULT_TTL)
+            .unwrap();
+
+        let (wrong, admitted) = pair(&dir, &wg, secret, "my-phone", NODE_B).await;
+        assert!(
+            matches!(wrong.unwrap(), JoinResponse::Rejected(ref why) if why.contains("\"phone\"")),
+            "the refusal must name the device the invite is for"
+        );
+        assert!(admitted.unwrap().is_none());
+        assert!(wg.devices().unwrap().by_node_id(NODE_B).is_none());
+
+        let (right, admitted) = pair(&dir, &wg, secret, "phone", NODE_B).await;
+        assert!(
+            matches!(right.unwrap(), JoinResponse::Admitted { .. }),
+            "the invite must still be usable after a wrong-name attempt"
+        );
+        assert!(admitted.unwrap().is_some());
     }
 
     #[tokio::test(flavor = "multi_thread")]
