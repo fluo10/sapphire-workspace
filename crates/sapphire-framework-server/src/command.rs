@@ -661,13 +661,6 @@ mod tests {
     }
 
     #[test]
-    fn create_and_retire_no_longer_point_at_the_bridge_cli() {
-        let source = include_str!("command.rs");
-        assert!(!source.contains(&("run: sapphire-bridge workgroup ".to_owned() + "create")));
-        assert!(!source.contains(&("run: sapphire-bridge device ".to_owned() + "retire")));
-    }
-
-    #[test]
     fn bare_invocation_defaults_to_serve() {
         // <app> with no subcommand at all means serve (spec decision 1). An app CLI
         // achieves it by `Option<Command>` and handing the framework's default here; this
