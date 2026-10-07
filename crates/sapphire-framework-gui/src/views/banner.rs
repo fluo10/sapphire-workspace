@@ -54,6 +54,16 @@ impl ServiceStatusBanner {
             ui.spinner();
         }
         error_line(ui, &mut self.error);
+        if let Some(command) = self.error.as_deref().and_then(manual_command) {
+            let command = command.to_owned();
+            ui.horizontal(|ui| {
+                ui.small("To install by hand:");
+                ui.monospace(&command);
+                if ui.small_button("Copy").clicked() {
+                    ui.ctx().copy_text(command.clone());
+                }
+            });
+        }
         out
     }
 
@@ -69,5 +79,52 @@ fn describe<T>(conn: &Conn<T>, up: impl Fn(&T) -> String) -> String {
         Conn::Incompatible(msg) => format!("incompatible: {msg}"),
         Conn::Error(msg) => format!("error: {msg}"),
         Conn::Up(t) => format!("running {}", up(t)),
+    }
+}
+
+/// The command an install failure says to run by hand: whatever follows its last `run: `.
+fn manual_command(message: &str) -> Option<&str> {
+    let (_, command) = message.rsplit_once("run: ")?;
+    let command = command.trim();
+    (!command.is_empty()).then_some(command)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_manual_command_is_what_follows_run() {
+        assert_eq!(
+            manual_command(r"access denied; run: C:\x\sapphire-bridge.exe service install"),
+            Some(r"C:\x\sapphire-bridge.exe service install")
+        );
+        assert_eq!(
+            manual_command("/a/b was not found; run: /a/b service install\n"),
+            Some("/a/b service install")
+        );
+        assert_eq!(manual_command("closed"), None);
+        assert_eq!(manual_command("run: "), None);
+    }
+
+    #[test]
+    fn an_install_failure_renders_with_its_copy_row() {
+        let mut banner = ServiceStatusBanner::default();
+        banner.on_outcome(&Err("exit status 1; run: /a/b service install".into()));
+        let snapshot = crate::client::Snapshot {
+            fetched: true,
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let cx = ViewCtx {
+                snapshot: &snapshot,
+                app_name: "app",
+                busy: false,
+            };
+            assert!(banner.ui(ui, &cx).is_none());
+        });
+        output.textures_delta.clear();
+        assert!(banner.error.is_some());
     }
 }
