@@ -84,27 +84,42 @@ impl Drop for BridgeProcess {
 
 /// A bridge with no workgroup, on the fixture's endpoints.
 async fn start_bridge(f: &Fixture) -> BridgeProcess {
+    start_bridge_as(
+        f,
+        &LoopbackNetwork::new(),
+        NODE,
+        "bridge",
+        &f.endpoints.bridge,
+    )
+    .await
+}
+
+/// A bridge with no workgroup: node `node` on `net`, its directory `<tmp>/<name>`, its
+/// control plane on `control`.
+async fn start_bridge_as(
+    f: &Fixture,
+    net: &LoopbackNetwork,
+    node: &str,
+    name: &str,
+    control: &Endpoint,
+) -> BridgeProcess {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
         .build()
         .unwrap();
     let guard = rt.enter();
-    let dir = BridgeDir::at(f.tmp.path().join("bridge")).unwrap();
-    let data = Endpoint::in_dir("bridge-data", f.endpoints.bridge.dir.clone());
-    let bridge = Bridge::new(
-        dir,
-        Arc::new(LoopbackNetwork::new().transport(NODE)),
-        "0.0.0",
-    )
-    .unwrap()
-    .control_endpoint(f.endpoints.bridge.clone())
-    .data_endpoint(data);
+    let dir = BridgeDir::at(f.tmp.path().join(name)).unwrap();
+    let data = Endpoint::in_dir(format!("{name}-data"), control.dir.clone());
+    let bridge = Bridge::new(dir, Arc::new(net.transport(node)), "0.0.0")
+        .unwrap()
+        .control_endpoint(control.clone())
+        .data_endpoint(data);
     drop(guard);
     rt.spawn(async move {
         let _ = Arc::new(bridge).run_shared(NetConfig::default()).await;
     });
-    wait(|| async { sapphire_ipc::probe(&f.endpoints.bridge).await.unwrap() }).await;
+    wait(|| async { sapphire_ipc::probe(control).await.unwrap() }).await;
     BridgeProcess(Some(rt))
 }
 
@@ -357,6 +372,66 @@ async fn workspace_map_creates_the_folder_and_syncs_it_under_the_ledger_id() {
                 .iter()
                 .any(|w| w.sync.enabled && w.workspace_id == Some(workspace_id))
         })
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn service_install_with_a_missing_binary_says_what_to_run() {
+    let f = fixture();
+    let mut cfg = config(&f);
+    let missing = f.tmp.path().join("no-such-dir").join("sapphire-bridge");
+    cfg.service_exes.bridge = missing.clone();
+    let client = FrameworkClient::spawn(&tokio::runtime::Handle::current(), cfg, Arc::new(|| {}));
+    let id = client.send(Command::ServiceInstall(ServiceTarget::Bridge));
+    let err = outcome(&client, id).await.unwrap_err();
+    assert!(err.contains("run: "), "{err}");
+    assert!(err.contains(&missing.display().to_string()), "{err}");
+    assert!(err.contains("service install"), "{err}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn workgroup_join_pairs_with_another_bridge() {
+    const NODE_B: &str = "b1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
+    let f = fixture();
+    let net = LoopbackNetwork::new();
+    // A, the inviter, on an endpoint of its own; B, the joiner, where `config` points.
+    let control_a = Endpoint::in_dir("bridge-a", f.endpoints.bridge.dir.clone());
+    let _a = start_bridge_as(&f, &net, NODE, "bridge-a", &control_a).await;
+    let _b = start_bridge_as(&f, &net, NODE_B, "bridge", &f.endpoints.bridge).await;
+
+    let mut cfg_a = config(&f);
+    cfg_a.endpoints.bridge = control_a;
+    let client_a =
+        FrameworkClient::spawn(&tokio::runtime::Handle::current(), cfg_a, Arc::new(|| {}));
+    wait(|| async { client_a.snapshot().bridge.up().is_some() }).await;
+    let id = client_a.send(Command::WorkgroupCreate {
+        name: "home".into(),
+        device_name: "a".into(),
+    });
+    outcome(&client_a, id).await.unwrap();
+    let id = client_a.send(Command::DeviceInvite {
+        name: "b".into(),
+        ttl_secs: Some(3600),
+    });
+    let Ok(CommandOutput::Ticket(ticket)) = outcome(&client_a, id).await else {
+        panic!("expected a ticket");
+    };
+
+    let client_b = spawn(&f);
+    wait(|| async { client_b.snapshot().bridge.up().is_some() }).await;
+    let id = client_b.send(Command::WorkgroupJoin {
+        ticket,
+        device_name: Some("b".into()),
+    });
+    assert_eq!(outcome(&client_b, id).await, Ok(CommandOutput::Done));
+    wait(|| async {
+        client_b
+            .snapshot()
+            .bridge
+            .up()
+            .and_then(|b| b.status.workgroup.as_ref())
+            .is_some_and(|w| w.name == "home")
     })
     .await;
 }
