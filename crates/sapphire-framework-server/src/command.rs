@@ -5,7 +5,9 @@ use std::path::PathBuf;
 
 use sapphire_backend::WorkspaceRegistry;
 use sapphire_backend::protocol as proto;
-use sapphire_bridge_api::{BridgeClient, InviteParams, JoinParams};
+use sapphire_bridge_api::{
+    BridgeClient, DeviceRetireParams, InviteParams, JoinParams, WorkgroupCreateParams,
+};
 use sapphire_framework_service::{Environment, ServiceCommand, SystemManager};
 use sapphire_ipc::{ClientInfo, Endpoint, ManagedBy};
 use sapphire_workspace::{AppContext, Workspace};
@@ -143,9 +145,7 @@ impl WorkspaceCommand {
 /// The `workgroup` subcommands.
 ///
 /// The workgroup's ledger is the bridge's business end to end, so these go to the bridge's
-/// endpoint directly — except `create`, which the bridge's control plane has no method
-/// for: it works on the bridge's directory in the bridge's own CLI, and this command
-/// prints that CLI's name instead of pulling the bridge crate in here.
+/// endpoint directly, including `create`, which goes through the running bridge.
 #[derive(Debug, clap::Subcommand)]
 pub enum WorkgroupCommand {
     /// Found a workgroup on this host.
@@ -173,10 +173,15 @@ impl WorkgroupCommand {
     pub async fn dispatch(self, version: &'static str) -> Result<i32> {
         match self {
             WorkgroupCommand::Create { name, device_name } => {
+                let client = connect_running(version).await?;
+                let created = client
+                    .workgroup_create(WorkgroupCreateParams { name, device_name })
+                    .await?;
                 println!(
-                    "run: sapphire-bridge workgroup create --device-name {device_name} {name}"
+                    "created workgroup {} ({}); this device is {}",
+                    created.name, created.workgroup_id, created.device_id
                 );
-                Ok(1)
+                Ok(0)
             }
             WorkgroupCommand::List => {
                 let client = connect_running(version).await?;
@@ -215,9 +220,8 @@ impl WorkgroupCommand {
 /// The `device` subcommands.
 ///
 /// The ledger's word for taking a device out is `retire` — a device id is written into
-/// synced content and must keep resolving, so its record stays as a tombstone — and the
-/// bridge's control plane has no method for retiring one, so this command prints the
-/// bridge CLI's line instead.
+/// synced content and must keep resolving, so its record stays as a tombstone — and this
+/// command goes through the running bridge to retire a device.
 #[derive(Debug, clap::Subcommand)]
 pub enum DeviceCommand {
     /// List the workgroup's devices, and which are reachable.
@@ -281,8 +285,12 @@ impl DeviceCommand {
                 Ok(0)
             }
             DeviceCommand::Retire { selector } => {
-                println!("run: sapphire-bridge device retire {selector}");
-                Ok(1)
+                let client = connect_running(version).await?;
+                let retired = client
+                    .device_retire(DeviceRetireParams { selector })
+                    .await?;
+                println!("retired device {} ({})", retired.name, retired.device_id);
+                Ok(0)
             }
         }
     }
@@ -650,6 +658,13 @@ mod tests {
         ] {
             assert!(Probe::try_parse_from(&args).is_ok(), "{args:?}");
         }
+    }
+
+    #[test]
+    fn create_and_retire_no_longer_point_at_the_bridge_cli() {
+        let source = include_str!("command.rs");
+        assert!(!source.contains(&("run: sapphire-bridge workgroup ".to_owned() + "create")));
+        assert!(!source.contains(&("run: sapphire-bridge device ".to_owned() + "retire")));
     }
 
     #[test]
