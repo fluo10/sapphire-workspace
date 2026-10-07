@@ -116,8 +116,9 @@ where
 /// exchange, not a search for someone to dial.
 ///
 /// In this order, and no other: redeem the secret for the name the invite was issued for
-/// (constant time, single use, expiry checked — [`Invites::redeem_as`]), then write the device record with the joiner's node id
-/// as a **local write** to the workgroup workspace, then reply. Writing the record before
+/// (constant time, single use, expiry checked — [`Invites::redeem_as`]), then write the
+/// device record with the joiner's node id as a **local write** to the workgroup
+/// workspace, then reply. Writing the record before
 /// replying is what makes the admission durable if the reply is lost: the joiner can retry
 /// the *sync*, which is idempotent, rather than the *pairing*, which is not — the invite is
 /// spent the moment it redeems.
