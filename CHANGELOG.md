@@ -12,7 +12,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 - `bridge.workgroup_create` and `bridge.device_retire` on the bridge control plane; the framework and bridge CLIs use them when the bridge runs.
 - App server: a host workspace registry (`<config dir>/workspaces.toml`), `workspace.list` and `workspace.forget` (which also tears down sync for a workspace whose root no longer exists); `serve` restores synced workspaces on start.
-- `sapphire-framework-gui`: `client::FrameworkClient`, `views::*` and `SyncPanel` for workgroup, device and workspace management; every refresh is time-boxed to 5 s and every command to 30 s (join 90 s), configurable via `ClientConfig::{fetch_timeout, command_timeout}`; `fonts::{system_cjk_font, add_system_cjk_fallback, install_system_cjk_fallback}` (a CJK system font on Windows / macOS / Linux, no bundled assets); `pub use egui`.
+- `sapphire-framework-gui`: `client::FrameworkClient`, `views::*` and `SyncPanel` for workgroup, device and workspace management; every refresh is time-boxed to 5 s and every command to 30 s (join 90 s, service install 5 min), configurable via `ClientConfig::{fetch_timeout, command_timeout, install_timeout}`; `fonts::{system_cjk_font, add_system_cjk_fallback, install_system_cjk_fallback}` (a CJK system font on Windows / macOS / Linux, no bundled assets); `pub use egui`.
 
 ### Changed
 
@@ -23,13 +23,12 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ### Breaking
 
 - Backend `API_VERSION` 2 and bridge-api 2.0.0 (`API_VERSION` 2): replace and restart every CLI, server and bridge on a host together.
-
-### Changed (breaking)
-
+- Upgrade note: workspaces initialised before this release are not in the new host workspace registry, so `workspace list` and the GUI do not show them. Re-add each one once — "Add existing…" in the GUI, or `workspace init` in its folder (re-enabling sync records it too) — and it appears in `workspace list` and the GUI from then on.
 - `sapphire-framework-session`: `run_session` now takes `&tokio::sync::Mutex<Replica>` instead of `&mut Replica`. It locks the replica itself, only from after the peer's `Hello` is in through to the end of the exchange — not while waiting for it — so a caller that used to pre-lock a `Mutex<Replica>` around the whole call should pass the mutex itself instead: pre-locking defeats the fix, pinning the replica against a concurrent scan or another session for as long as a slow-to-speak peer is waited on (issue #163).
 
 ### Fixed
 
+- `sapphire-framework-bridge`: a join whose device name differs from the one the invite was issued for is refused before the invite is spent (`Invites::redeem_as`), so the joiner can retry with the right name instead of needing a new ticket.
 - `sapphire-framework-bridge`: an inbound stream for the workgroup's own workspace no longer blocks the accept loop — and with it every other peer's stream, for any other workspace — until its replication session finishes or times out. The session now runs on its own task; the replica's own lock still serialises these sessions one at a time, so nothing runs more concurrently than before, but the accept loop itself is free to move on (#164).
 - `sapphire-framework-sync`: a scan's "known content → settle, don't record" short-circuit (added for #157) matched a local write against *any* sibling version at the path, not just the current winner. A write that changed which content was at a path, but happened to land on bytes already present as a *losing* conflict sibling, was discarded instead of recorded — destroying the previous winner's only copy (the file) with nothing recording that it was superseded, and no conflict copy to fall back on (conflict copies exist for losers, never for the winner). Now matched against the winner specifically, which is also what the branch's own premise (disk already holds the version the store knows, only the bookkeeping is stale) actually describes (#161).
 - `sapphire-framework-bridge`: the data plane's relay now ends as soon as either direction ends, instead of waiting for both. A peer stream the far bridge has no route for — the state two hosts pass through whenever one enables a workspace before the other — left the relay open on the near side for ever, because the app-server-to-peer direction only ends when the app server closes and the app server was the one waiting for a `Hello`. The dialling app server therefore waited on a peer that was already gone, holding its replica's lock while it did: on a transport with no half-close to fall back on (Windows named pipes) for ever, and elsewhere as a bare `expected Hello, got None`. The inbound loop also logs the inbound streams it hangs up on, which is what explains the retry traffic that follows (#159).
