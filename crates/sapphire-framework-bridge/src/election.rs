@@ -107,6 +107,10 @@ impl Elector {
     /// While a workspace is younger than the wait, this host is left out of its election
     /// entirely, so it can neither claim nor be reported as holding a role it has not
     /// announced — the peers' existing claims get `wait` to arrive first.
+    ///
+    /// The roles reported for a workspace are `Roles::default()` (mesh) until this host has
+    /// seen a designated claim in it, its own included. Claims are made and published all
+    /// the same.
     pub(crate) fn step(
         &mut self,
         now: Instant,
@@ -156,7 +160,21 @@ impl Elector {
                 );
                 set(&mut self.backup, *ws, elected.backup == Some(self.me));
             }
-            roles.insert(*ws, elected);
+            // This host's own claim counts as seen at once.
+            if self.designated.contains(ws) {
+                self.seen_designated.insert(*ws);
+            }
+            // No star before a designated claim: until then each waiting host leaves itself
+            // out of its own election, so hosts elect different hubs, and a star on those
+            // would close working sessions and could strand a host. Once a claim exists,
+            // every host agrees on the designated device, and every non-hub keeps a path
+            // through it.
+            let reported = if self.seen_designated.contains(ws) {
+                elected
+            } else {
+                Roles::default()
+            };
+            roles.insert(*ws, reported);
         }
 
         let hello = Hello {
@@ -303,6 +321,137 @@ mod tests {
     }
 
     #[test]
+    fn no_star_is_reported_before_a_designated_claim_is_seen() {
+        let id = ids(2);
+        let (me, peer) = (id[0], id[1]);
+        let ws = GrainId::random();
+        let t0 = Instant::now();
+        let mut elector = Elector::new(me, Duration::from_secs(40));
+        let own = Own {
+            priority: 1,
+            availability: None,
+            hosting: vec![ws],
+        };
+        let unclaimed = hello(peer, 1, ws);
+
+        let (_, roles) = elector.step(t0, &own, std::slice::from_ref(&unclaimed));
+        assert_eq!(roles[&ws], Roles::default(), "mesh while waiting");
+
+        let (out, roles) = elector.step(t0 + Duration::from_secs(41), &own, &[unclaimed]);
+        assert_eq!(
+            roles[&ws],
+            Roles::default(),
+            "mesh after the wait too, while nobody claims designated"
+        );
+        assert_eq!(
+            out.backup,
+            vec![ws],
+            "the claim is still made and published"
+        );
+        assert!(out.designated.is_empty());
+    }
+
+    /// Four hosts at the default priority start out of phase. Each steps every interval with
+    /// the others' latest Hellos, and `wait` = DEAD, as a real bridge does.
+    ///
+    /// This pins the simpler property, not full pairwise liveness:
+    /// - until a host has seen a designated claim, it reports no star (mesh);
+    /// - every host that reports a star names the same designated device, and that device
+    ///   has itself claimed the role;
+    /// - a host that reports a star and holds no role has a hub, by its own report, that
+    ///   either considers itself a hub or reports mesh, so it links to everyone;
+    /// - in the end every host reports the same designated device, and exactly one claims it.
+    #[test]
+    fn a_cold_start_never_strands_a_host() {
+        const DEAD: Duration = Duration::from_secs(40);
+        const INTERVAL: Duration = Duration::from_secs(10);
+        let orders: Vec<[usize; 4]> = (0..256usize)
+            .map(|n| [n % 4, n / 4 % 4, n / 16 % 4, n / 64])
+            .filter(|o| (0..4).all(|i| o.contains(&i)))
+            .collect();
+        assert_eq!(orders.len(), 24);
+
+        for order in orders {
+            let id = ids(4);
+            let ws = GrainId::random();
+            let own = Own {
+                priority: 1,
+                availability: None,
+                hosting: vec![ws],
+            };
+            let t0 = Instant::now();
+            let mut electors: Vec<Elector> = id.iter().map(|i| Elector::new(*i, DEAD)).collect();
+            // Host `order[k]` starts k * 3 s after t0.
+            let mut events: Vec<(Instant, usize)> = Vec::new();
+            for (k, &host) in order.iter().enumerate() {
+                let start = t0 + Duration::from_secs(3 * k as u64);
+                for n in 0..20u32 {
+                    events.push((start + INTERVAL * n, host));
+                }
+            }
+            events.sort();
+
+            let mut latest: Vec<Option<Hello>> = vec![None; 4];
+            let mut reports: Vec<Option<Roles>> = vec![None; 4];
+            let mut seen_claim = [false; 4];
+            let index = |d: GrainId| id.iter().position(|i| *i == d).unwrap();
+            for (now, h) in events {
+                let peers: Vec<Hello> = (0..4)
+                    .filter(|&p| p != h)
+                    .filter_map(|p| latest[p].clone())
+                    .collect();
+                let (out, roles) = electors[h].step(now, &own, &peers);
+                seen_claim[h] |= peers.iter().any(|p| p.designated.contains(&ws))
+                    || out.designated.contains(&ws);
+                latest[h] = Some(out);
+                let r = roles[&ws];
+                if !seen_claim[h] {
+                    assert_eq!(r, Roles::default(), "{order:?}: a star before any claim");
+                }
+                reports[h] = Some(r);
+
+                let stars: Vec<(usize, Roles)> = reports
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(x, r)| r.filter(|r| r.designated.is_some()).map(|r| (x, r)))
+                    .collect();
+                for (x, r) in &stars {
+                    let d = r.designated.unwrap();
+                    assert_eq!(r.designated, stars[0].1.designated, "{order:?}: two stars");
+                    assert!(
+                        latest[index(d)].as_ref().unwrap().designated.contains(&ws),
+                        "{order:?}: a star around a device that has not claimed"
+                    );
+                    let me = id[*x];
+                    if r.designated != Some(me) && r.backup != Some(me) {
+                        let linked = [r.designated, r.backup].into_iter().flatten().any(|hub| {
+                            reports[index(hub)].is_some_and(|hr| {
+                                hr == Roles::default()
+                                    || hr.designated == Some(hub)
+                                    || hr.backup == Some(hub)
+                            })
+                        });
+                        assert!(linked, "{order:?}: host {x} has no hub that links to it");
+                    }
+                }
+            }
+
+            let designated: Vec<Option<GrainId>> =
+                reports.iter().map(|r| r.unwrap().designated).collect();
+            assert!(designated[0].is_some(), "{order:?}: no star in the end");
+            assert!(
+                designated.iter().all(|d| *d == designated[0]),
+                "{order:?}: hosts disagree in the end"
+            );
+            let claimants = latest
+                .iter()
+                .filter(|h| h.as_ref().unwrap().designated.contains(&ws))
+                .count();
+            assert_eq!(claimants, 1, "{order:?}");
+        }
+    }
+
+    #[test]
     fn a_lone_host_claims_designated_after_the_wait() {
         let id = ids(1);
         let ws = GrainId::random();
@@ -385,11 +534,10 @@ mod tests {
         let mut b_hello = None;
         for _ in 0..2 {
             let (h, roles) = b.step(t0, &own_b, std::slice::from_ref(&a_unclaimed));
-            assert_ne!(
-                roles[&ws].designated,
-                Some(b_id),
-                "B must not promote itself"
-            );
+            // The reported roles are mesh before any designated claim, so the gate shows in
+            // the claims B publishes, not in what it reports.
+            assert!(h.designated.is_empty(), "B must not promote itself");
+            assert_eq!(roles[&ws], Roles::default(), "no star before a claim");
             b_hello = Some(h);
         }
         let b_hello = b_hello.unwrap();

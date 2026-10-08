@@ -127,6 +127,14 @@ struct Roles { designated: Option<GrainId>, backup: Option<GrainId> }
   claims nothing for `DEAD_INTERVAL`, and while it waits it is left out of its own election
   entirely (it still hears its peers). This gives existing claims time to arrive, so a
   device that wakes up does not seize a role that is already held.
+- **No star before a claim:** until this `Elector` has seen a designated claim in a
+  workspace (its own claim included), it reports `Roles::default()` for that workspace,
+  which means mesh. It still runs the election and publishes its claims as usual. On a cold
+  start no one has claimed yet, and each waiting host leaves itself out of its own election,
+  so hosts elect different hubs. A star built on those views would close working sessions,
+  and with four hosts at the default priority it could leave one host with no session at all
+  for about `DEAD_INTERVAL`. Once a designated claim exists, every host agrees on the
+  designated device, so every non-hub keeps a path through it.
 
 Each bridge then publishes its own claims in its next Hello. Two bridges with different
 views can transiently disagree. The claim rule makes them converge in one Hello round once
@@ -174,7 +182,9 @@ fn link(me: GrainId, peer: GrainId, roles: &Roles) -> Link
 
 - A star requires a `designated` device. Roles with only `backup` set, or with nothing set,
   mean mesh, and the existing rule applies: `Dial` only if `me < peer`, otherwise `Await`
-  the peer's dial.
+  the peer's dial. The bridge reports no roles for a workspace until it has seen a
+  designated claim there (see Election), so the star forms only around a device that has
+  claimed the role, and a cold start stays a mesh until then.
 - In a star, if this host is the designated or backup device, the same id rule applies to
   every peer. They therefore stay linked to everyone, and to each other.
 - Otherwise (this host is neither), a peer that is neither designated nor backup is `Skip`.
