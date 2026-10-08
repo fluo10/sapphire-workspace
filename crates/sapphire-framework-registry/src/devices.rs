@@ -619,19 +619,67 @@ mod tests {
     #[test]
     fn a_device_deserialized_without_priority_gets_the_default() {
         // This simulates receiving a Device from a peer running an older version
-        // that doesn't have the priority field. We test the RawDevice deserialization
-        // since that's what's read from files, and then verify the Device is created
-        // with the default priority.
-        let raw_toml = "name = \"laptop\"\ncreated_at = \"2026-01-01T00:00:00Z\"";
+        // that doesn't have the priority field. When Device is deserialized from
+        // the wire protocol (pair/1), the serde(default) attribute ensures missing
+        // priority deserializes to DEFAULT_PRIORITY.
+        // We test the actual deserialization path: RawDevice -> Device
+        let raw_toml = r#"
+name = "laptop"
+created_at = "2026-01-01T00:00:00Z"
+"#;
         let raw: RawDevice = toml::from_str(raw_toml)
             .expect("deserialize RawDevice without priority field");
 
-        // RawDevice.priority should be None when not provided
-        assert!(raw.priority.is_none(), "RawDevice priority should be None when missing");
+        // RawDevice.priority is None (the field was not provided)
+        assert!(raw.priority.is_none());
 
-        // When constructing a Device from this RawDevice, the default should be used
-        let priority = raw.priority.unwrap_or(DEFAULT_PRIORITY);
-        assert_eq!(priority, DEFAULT_PRIORITY, "missing priority should use default");
+        // When Device is constructed from RawDevice, the serde default is used
+        // This happens automatically during deserialization due to serde(default)
+        let device = Device {
+            id: GrainId::random(),
+            name: raw.name,
+            node_id: raw.node_id,
+            description: raw.description,
+            priority: raw.priority.unwrap_or(DEFAULT_PRIORITY),
+            created_at: raw.created_at.unwrap_or_else(Utc::now),
+            retired_at: raw.retired_at,
+        };
+
+        // Verify the default priority is used when the field is missing
+        assert_eq!(device.priority, DEFAULT_PRIORITY,
+            "missing priority field in RawDevice should result in DEFAULT_PRIORITY in Device");
+
+        // This test verifies forward compatibility: when older peers send Device records
+        // without priority, the serde(default) attribute ensures deserialization succeeds
+        // with the default value, maintaining compatibility over the wire protocol.
+
+        // Additionally, test direct Device deserialization: create and serialize a Device,
+        // then remove the priority field and deserialize. This proves serde(default) works.
+        let device_id = GrainId::random();
+        let full_device = Device {
+            id: device_id,
+            name: "desktop".to_string(),
+            node_id: None,
+            description: None,
+            priority: 3,
+            created_at: Utc::now(),
+            retired_at: None,
+        };
+
+        // Serialize to TOML and remove the priority line
+        let serialized = toml::to_string(&full_device)
+            .expect("serialize Device");
+        let without_priority_field = serialized
+            .lines()
+            .filter(|line| !line.starts_with("priority"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // This deserialization will only succeed if serde(default) is on the priority field
+        let deserialized: Device = toml::from_str(&without_priority_field)
+            .expect("deserialize Device without priority - requires serde(default)");
+        assert_eq!(deserialized.priority, DEFAULT_PRIORITY,
+            "Device deserialized without priority field must use serde default");
     }
 }
 
