@@ -58,6 +58,9 @@ pub enum Inbound {
     /// connection that arrives **before** membership exists, so it is gated by the invite
     /// secret instead of by the ledger; see [`crate::pairing`].
     Pairing(String, BoxedStream),
+    /// A Hello stream, on its own ALPN: the caller's node id and the stream. Authorized with
+    /// the ledger like a workspace stream; see [`crate::hello`].
+    Hello(String, BoxedStream),
 }
 
 /// Reaching other devices.
@@ -73,6 +76,16 @@ pub trait PeerTransport: Send + Sync + 'static {
     /// interface free of any one transport's types: a loopback test writes its node id
     /// there and gets a stream to the transport of that name.
     async fn open_pairing(&self, node_addr: &[u8]) -> Result<BoxedStream>;
+
+    /// Open a Hello stream to `node_id`.
+    ///
+    /// Defaults to an error, so a transport written before the Hello protocol still
+    /// compiles. Its bridge then simply hears nobody, and nobody's election counts it.
+    async fn open_hello(&self, node_id: &str) -> Result<BoxedStream> {
+        Err(crate::error::Error::Peer(format!(
+            "this transport cannot open a hello stream to {node_id}"
+        )))
+    }
 
     /// Wait for an inbound stream, reporting which protocol it arrived to speak.
     ///
@@ -94,7 +107,7 @@ pub trait PeerTransport: Send + Sync + 'static {
         loop {
             match self.accept().await? {
                 Inbound::Pairing(from, stream) => return Ok((from, stream)),
-                Inbound::Workspace(..) => continue,
+                Inbound::Workspace(..) | Inbound::Hello(..) => continue,
             }
         }
     }
@@ -114,7 +127,7 @@ pub trait PeerTransport: Send + Sync + 'static {
                 Inbound::Workspace(from, workspace_id, stream) => {
                     return Ok((from, workspace_id, stream));
                 }
-                Inbound::Pairing(_, stream) => drop(stream),
+                Inbound::Pairing(_, stream) | Inbound::Hello(_, stream) => drop(stream),
             }
         }
     }
@@ -168,6 +181,8 @@ pub struct LoopbackNetwork {
     nodes: Arc<Mutex<HashMap<String, Inbox>>>,
     /// The pairing protocol has its own channel per node, as iroh has its own ALPN.
     pairing: Arc<Mutex<HashMap<String, PairingInbox>>>,
+    /// Hello streams likewise.
+    hello: Arc<Mutex<HashMap<String, PairingInbox>>>,
     /// Writes charged to each node, so a test can watch who is still talking.
     frames: Arc<Mutex<HashMap<String, Arc<AtomicU64>>>>,
     /// When set, only these pairs of node ids may open each other; `None` is a network
@@ -197,6 +212,7 @@ impl LoopbackNetwork {
         LoopbackNetwork {
             nodes: Arc::default(),
             pairing: Arc::default(),
+            hello: Arc::default(),
             frames: Arc::default(),
             edges: Some(Arc::new(edges)),
         }
@@ -206,6 +222,7 @@ impl LoopbackNetwork {
     pub fn transport(&self, node_id: &str) -> LoopbackTransport {
         let (tx, rx) = mpsc::unbounded_channel();
         let (pairing_tx, pairing_rx) = mpsc::unbounded_channel();
+        let (hello_tx, hello_rx) = mpsc::unbounded_channel();
         let frames = Arc::new(AtomicU64::new(0));
         self.nodes
             .lock()
@@ -215,6 +232,10 @@ impl LoopbackNetwork {
             .lock()
             .expect("loopback network")
             .insert(node_id.to_owned(), pairing_tx);
+        self.hello
+            .lock()
+            .expect("loopback network")
+            .insert(node_id.to_owned(), hello_tx);
         self.frames
             .lock()
             .expect("loopback network")
@@ -225,6 +246,8 @@ impl LoopbackNetwork {
             inbox: tokio::sync::Mutex::new(rx),
             pairing_nodes: Arc::clone(&self.pairing),
             pairing_inbox: tokio::sync::Mutex::new(pairing_rx),
+            hello_nodes: Arc::clone(&self.hello),
+            hello_inbox: tokio::sync::Mutex::new(hello_rx),
             frames,
             edges: self.edges.clone(),
         }
@@ -253,6 +276,8 @@ pub struct LoopbackTransport {
     inbox: tokio::sync::Mutex<mpsc::UnboundedReceiver<(String, GrainId, tokio::io::DuplexStream)>>,
     pairing_nodes: Arc<Mutex<HashMap<String, PairingInbox>>>,
     pairing_inbox: tokio::sync::Mutex<mpsc::UnboundedReceiver<(String, tokio::io::DuplexStream)>>,
+    hello_nodes: Arc<Mutex<HashMap<String, PairingInbox>>>,
+    hello_inbox: tokio::sync::Mutex<mpsc::UnboundedReceiver<(String, tokio::io::DuplexStream)>>,
     /// This node's own write counter, charged by every stream it hands out.
     frames: Arc<AtomicU64>,
     /// Who this node may open; `None` is everybody.
@@ -336,12 +361,40 @@ impl PeerTransport for LoopbackTransport {
         }))
     }
 
+    async fn open_hello(&self, node_id: &str) -> Result<BoxedStream> {
+        if !self.reachable(node_id) {
+            return Err(Error::Peer(format!(
+                "no such node on the loopback network: {node_id}"
+            )));
+        }
+        let inbox = {
+            self.hello_nodes
+                .lock()
+                .expect("loopback network")
+                .get(node_id)
+                .cloned()
+        };
+        let Some(inbox) = inbox else {
+            return Err(Error::Peer(format!(
+                "no such node on the loopback network: {node_id}"
+            )));
+        };
+        let (mine, theirs) = tokio::io::duplex(LOOPBACK_BUFFER);
+        inbox
+            .send((self.node_id.clone(), theirs))
+            .map_err(|_| Error::Peer(format!("{node_id} is no longer listening")))?;
+        // Not a `CountingStream`: Hellos are a steady background, and the frame counters
+        // exist for tests asking whether *sync* has gone quiet.
+        Ok(Box::new(mine))
+    }
+
     async fn accept(&self) -> Result<Inbound> {
         // One `select` over both inboxes is what "the same endpoint with a second ALPN"
         // means here: either kind of caller is answered, whichever dials first.
         tokio::select! {
             item = next_workspace(&self.inbox, Arc::clone(&self.frames)) => item,
             item = next_pairing(&self.pairing_inbox, Arc::clone(&self.frames)) => item,
+            item = next_hello(&self.hello_inbox) => item,
         }
     }
 
@@ -380,6 +433,18 @@ async fn next_workspace(
                 frames,
             }),
         )),
+        None => Err(Error::Peer("the loopback network is gone".to_owned())),
+    }
+}
+
+#[cfg(any(test, feature = "test-util"))]
+/// The next Hello stream, from the Hello inbox. Uncounted, like `open_hello`'s end.
+async fn next_hello(
+    inbox: &tokio::sync::Mutex<mpsc::UnboundedReceiver<(String, tokio::io::DuplexStream)>>,
+) -> Result<Inbound> {
+    let mut inbox = inbox.lock().await;
+    match inbox.recv().await {
+        Some((from, stream)) => Ok(Inbound::Hello(from, Box::new(stream))),
         None => Err(Error::Peer("the loopback network is gone".to_owned())),
     }
 }
@@ -483,6 +548,7 @@ mod tests {
         let accepted = match accept.await.unwrap().unwrap() {
             Inbound::Workspace(from, asked, stream) => (from, asked, stream),
             Inbound::Pairing(..) => panic!("a workspace open arrived as a pairing stream"),
+            Inbound::Hello(..) => panic!("a workspace open arrived as a hello stream"),
         };
         let (from, asked, mut accepted) = accepted;
         assert_eq!(from, "node-a");
@@ -519,6 +585,7 @@ mod tests {
         let (from, mut accepted) = match accept.await.unwrap().unwrap() {
             Inbound::Pairing(from, stream) => (from, stream),
             Inbound::Workspace(..) => panic!("a pairing open arrived as a workspace stream"),
+            Inbound::Hello(..) => panic!("a pairing open arrived as a hello stream"),
         };
         assert_eq!(from, "node-a");
 
@@ -568,6 +635,7 @@ mod tests {
         let mut accepted = match accept.await.unwrap().unwrap() {
             Inbound::Workspace(_, _, stream) => stream,
             Inbound::Pairing(..) => panic!("a workspace open arrived as a pairing stream"),
+            Inbound::Hello(..) => panic!("a workspace open arrived as a hello stream"),
         };
 
         drop(opened);
@@ -628,6 +696,7 @@ mod tests {
         let accepted = match s.accept().await.unwrap() {
             Inbound::Workspace(_, _, stream) => stream,
             Inbound::Pairing(..) => panic!("a workspace open arrived as a pairing stream"),
+            Inbound::Hello(..) => panic!("a workspace open arrived as a hello stream"),
         };
         drop((opened, accepted));
 
@@ -655,6 +724,7 @@ mod tests {
         let mut accepted = match accept.await.unwrap().unwrap() {
             Inbound::Workspace(_, _, stream) => stream,
             Inbound::Pairing(..) => panic!("a workspace open arrived as a pairing stream"),
+            Inbound::Hello(..) => panic!("a workspace open arrived as a hello stream"),
         };
         opened.write_all(b"there").await.unwrap();
         let mut buf = [0u8; 5];
@@ -674,6 +744,7 @@ mod tests {
         let mut accepted = match accept.await.unwrap().unwrap() {
             Inbound::Workspace(_, _, stream) => stream,
             Inbound::Pairing(..) => panic!("a workspace open arrived as a pairing stream"),
+            Inbound::Hello(..) => panic!("a workspace open arrived as a hello stream"),
         };
 
         opened.write_all(b"hello").await.unwrap();

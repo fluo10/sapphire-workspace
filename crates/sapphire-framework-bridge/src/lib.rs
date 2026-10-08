@@ -43,6 +43,7 @@ pub use command::{BridgeCommand, bridge_service_spec};
 // crate alone and the whole command surface sits in one place.
 pub use dir::{BRIDGE_DIR_ENV, BRIDGE_FORMAT_VERSION, BridgeDir, InstanceLock};
 pub use error::{Error, Result};
+pub use hello::{HELLO_ALPN, HelloTiming};
 pub use invite::{DEFAULT_TTL, Invite, Invites, TICKET_PREFIX, Ticket};
 #[cfg(feature = "node")]
 pub use iroh::{IrohTransport, NodeAddr};

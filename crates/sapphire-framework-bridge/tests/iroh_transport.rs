@@ -151,6 +151,7 @@ async fn two_endpoints_exchange_bytes() {
     let (from, asked, mut accepted) = match inbound {
         Inbound::Workspace(from, asked, stream) => (from, asked, stream),
         Inbound::Pairing(..) => panic!("a workspace open arrived as a pairing stream"),
+        Inbound::Hello(..) => panic!("a workspace open arrived as a hello stream"),
     };
     assert_eq!(from, a_node_id, "the far side must learn who called");
     assert_eq!(asked, ws, "the far side must learn what was asked for");

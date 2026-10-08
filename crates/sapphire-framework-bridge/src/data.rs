@@ -375,6 +375,11 @@ pub(crate) async fn inbound(bridge: Arc<Bridge>, net: NetConfig) -> Result<()> {
                 continue;
             }
             Inbound::Workspace(from, workspace_id, stream) => (from, workspace_id, stream),
+            // Task 5 routes Hello streams to the exchange; until then they are hung up on.
+            Inbound::Hello(_from, stream) => {
+                drop(stream);
+                continue;
+            }
         };
 
         // 1. Authorize before anything else knows a stranger called.

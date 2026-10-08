@@ -393,6 +393,9 @@ pub async fn sync_workgroup(host: &Host, joiner: &BridgeDir, net: &LoopbackNetwo
             sapphire_framework_bridge::Inbound::Pairing(..) => {
                 panic!("the inviter dialed a pairing, not the workgroup workspace")
             }
+            sapphire_framework_bridge::Inbound::Hello(..) => {
+                panic!("the inviter dialed a hello stream, not the workgroup workspace")
+            }
         };
         replica.session(stream).await
     });
