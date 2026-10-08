@@ -27,10 +27,15 @@ const HEADER: &str = "\
 # node_id     optional. The device's iroh node id: 64 lowercase hex digits.
 #             Filled in when the device pairs. Unique within the ledger.
 # description optional. A note for you; the system never reads it.
+# priority    optional, 0-255, default 1. Higher is preferred as the designated
+#             device. 0: never designated or backup.
 # created_at  optional. Filled in when the record is written.
 # retired_at  optional. Set by `device retire`. The record stays, because
 #             synced content refers to this device's id forever.
 ";
+
+/// The priority a record has when it names none: every device takes part in the election.
+pub const DEFAULT_PRIORITY: u8 = 1;
 
 /// One device.
 ///
@@ -51,6 +56,9 @@ pub struct Device {
     pub node_id: Option<String>,
     /// A note for the user; the system never reads it.
     pub description: Option<String>,
+    /// How strongly this device is preferred as a workspace's designated device. `0` opts
+    /// it out of the election entirely.
+    pub priority: u8,
     /// When the record was created. A hand-written record without it is stamped
     /// with the moment it was first loaded.
     pub created_at: DateTime<Utc>,
@@ -81,6 +89,8 @@ struct RawDevice {
     node_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    priority: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     created_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -141,6 +151,7 @@ impl Devices {
                         name: raw.name,
                         node_id: raw.node_id,
                         description: raw.description,
+                        priority: raw.priority.unwrap_or(DEFAULT_PRIORITY),
                         created_at: raw.created_at.unwrap_or_else(Utc::now),
                         retired_at: raw.retired_at,
                     });
@@ -208,6 +219,7 @@ impl Devices {
             name: name.to_owned(),
             node_id,
             description,
+            priority: DEFAULT_PRIORITY,
             created_at: Utc::now(),
             retired_at: None,
         };
@@ -300,6 +312,25 @@ impl Devices {
         Ok(updated)
     }
 
+    /// Set a device's priority. A retired device has no say in anything, so it is refused.
+    pub fn set_priority(&mut self, selector: &str, priority: u8) -> Result<Device> {
+        let i = self.index_of(selector)?;
+        if self.entries[i].is_retired() {
+            return Err(Error::File(format!(
+                "the device {:?} is retired",
+                self.entries[i].name
+            )));
+        }
+        if self.entries[i].priority == priority {
+            return Ok(self.entries[i].clone());
+        }
+        let mut updated = self.entries[i].clone();
+        updated.priority = priority;
+        self.save_one(&updated)?;
+        self.entries[i] = updated.clone();
+        Ok(updated)
+    }
+
     /// Really delete a device. Past `updated_by` references stop resolving.
     pub fn purge(&mut self, selector: &str) -> Result<Device> {
         let i = self.index_of(selector)?;
@@ -328,6 +359,7 @@ impl Devices {
             name: device.name.clone(),
             node_id: device.node_id.clone(),
             description: device.description.clone(),
+            priority: (device.priority != DEFAULT_PRIORITY).then_some(device.priority),
             created_at: Some(device.created_at),
             retired_at: device.retired_at,
         };
@@ -535,6 +567,42 @@ mod tests {
         // There is no way to reach `first` by id, only by another route — that is
         // this trade-off. "device1" does find it.
         assert_eq!(devices.resolve("device1").unwrap(), &first);
+    }
+
+    #[test]
+    fn a_record_without_priority_reads_as_the_default() {
+        let (_d, path) = hand_written("abcdefg", "name = \"pendant\"\n");
+
+        let devices = Devices::open(&path).unwrap();
+
+        assert_eq!(devices.entries()[0].priority, DEFAULT_PRIORITY);
+    }
+
+    #[test]
+    fn set_priority_round_trips_and_leaves_the_default_unwritten() {
+        let (_d, path) = tmp();
+        let mut devices = Devices::open(&path).unwrap();
+        let added = devices.add("desk", None, None).unwrap();
+        let text = std::fs::read_to_string(path.join(added.file_name())).unwrap();
+        assert!(!text.contains("priority ="), "the default is not written: {text}");
+
+        let updated = devices.set_priority("desk", 0).unwrap();
+
+        assert_eq!(updated.priority, 0);
+        let reloaded = Devices::open(&path).unwrap();
+        assert_eq!(reloaded.entries()[0].priority, 0);
+    }
+
+    #[test]
+    fn set_priority_refuses_a_retired_device() {
+        let (_d, path) = tmp();
+        let mut devices = Devices::open(&path).unwrap();
+        devices.add("gone", None, None).unwrap();
+        devices.retire("gone").unwrap();
+
+        let err = devices.set_priority("gone", 5).unwrap_err();
+
+        assert!(err.to_string().contains("retired"), "{err}");
     }
 }
 
