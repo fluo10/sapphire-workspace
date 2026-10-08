@@ -144,8 +144,18 @@ pub enum WorkspaceCommand {
 impl BridgeCommand {
     /// Carry out the command, returning the process exit code.
     pub async fn dispatch(self, version: &'static str) -> Result<i32> {
+        self.dispatch_with(version, None).await
+    }
+
+    /// As [`BridgeCommand::dispatch`], with a factory for the embedding provider that
+    /// `serve` installs once the bridge directory is open.
+    pub async fn dispatch_with(
+        self,
+        version: &'static str,
+        embed: Option<crate::EmbedFactory>,
+    ) -> Result<i32> {
         match self {
-            BridgeCommand::Serve => run(version).await,
+            BridgeCommand::Serve => run(version, embed).await,
             BridgeCommand::Status => status(version).await,
             BridgeCommand::Log { follow, lines } => log_command(follow, lines),
             // The service manager's own words, not the bridge's: `Environment::detect` reads
@@ -189,7 +199,7 @@ impl BridgeCommand {
 /// The bare invocation is the same thing as `serve`; the enum's default is [`BridgeCommand::Serve`].
 /// A second start is a normal thing to do by accident, so "already running" is a reported
 /// outcome, not an error.
-async fn run(version: &'static str) -> Result<i32> {
+async fn run(version: &'static str, embed: Option<crate::EmbedFactory>) -> Result<i32> {
     let dir = BridgeDir::open()?;
     // Held for as long as the bridge runs; dropping it frees the next start. The lock is
     // taken before anything reads `net.toml` or `node.key`, so a directory of a newer format
@@ -215,7 +225,11 @@ async fn run(version: &'static str) -> Result<i32> {
         "sapphire-bridge {version} starting (pid {})",
         std::process::id()
     );
-    let bridge = build_bridge(dir, version).await?;
+    let provider = embed.and_then(|factory| factory(&dir));
+    let mut bridge = build_bridge(dir, version).await?;
+    if let Some(provider) = provider {
+        bridge = bridge.embed_provider(provider);
+    }
     bridge.run().await?;
     Ok(0)
 }

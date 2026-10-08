@@ -13,6 +13,7 @@ mod command;
 mod control;
 mod data;
 mod dir;
+mod embed;
 mod error;
 mod invite;
 #[cfg(feature = "node")]
@@ -40,6 +41,7 @@ pub use command::{BridgeCommand, bridge_service_spec};
 // The CLI's `service install | uninstall | status`: re-exported so the binary needs this
 // crate alone and the whole command surface sits in one place.
 pub use dir::{BRIDGE_DIR_ENV, BRIDGE_FORMAT_VERSION, BridgeDir, InstanceLock};
+pub use embed::{EmbedFactory, EmbedProvider};
 pub use error::{Error, Result};
 pub use invite::{DEFAULT_TTL, Invite, Invites, TICKET_PREFIX, Ticket};
 #[cfg(feature = "node")]
@@ -103,6 +105,8 @@ pub struct Bridge {
     /// The task driving the workgroup's own workspace — scanning its root and dialing its
     /// peers — while a replica is open. Aborted and replaced when the replica is.
     workgroup_driver: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Answers `embed.*`; `None` when this host has no embedding.
+    embed: Option<Arc<dyn EmbedProvider>>,
 }
 
 impl Bridge {
@@ -130,6 +134,7 @@ impl Bridge {
             wakes: Wakes::default(),
             workgroup_replica: Mutex::new(None),
             workgroup_driver: Mutex::new(None),
+            embed: None,
         })
     }
 
@@ -149,6 +154,16 @@ impl Bridge {
     pub fn net(mut self, net: NetConfig) -> Bridge {
         self.net = Some(net);
         self
+    }
+
+    /// Answer `embed.info` and `embed.embed` with this provider.
+    pub fn embed_provider(mut self, provider: Arc<dyn EmbedProvider>) -> Bridge {
+        self.embed = Some(provider);
+        self
+    }
+
+    pub(crate) fn embedder(&self) -> Option<&Arc<dyn EmbedProvider>> {
+        self.embed.as_ref()
     }
 
     /// The endpoints this bridge serves on: the control plane first, the data plane second.
