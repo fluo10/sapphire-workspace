@@ -78,6 +78,9 @@ pub fn build_embedder(config: &EmbedderConfig) -> Result<Box<dyn Embedder + Send
 
 // ── REST embedder (OpenAI / Ollama) ───────────────────────────────────────────
 
+/// One REST request: the provider-specific call for a group of (capped) inputs.
+type SendRequest = fn(&EmbedderConfig, &[&str]) -> Result<Vec<Vec<f32>>>;
+
 struct RestEmbedder {
     config: EmbedderConfig,
 }
@@ -87,12 +90,11 @@ impl Embedder for RestEmbedder {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
-        let send: fn(&EmbedderConfig, &[&str]) -> Result<Vec<Vec<f32>>> =
-            match self.config.provider.as_str() {
-                "openai" => embed_openai,
-                "ollama" => embed_ollama,
-                other => return Err(Error::Embed(format!("unknown REST provider `{other}`"))),
-            };
+        let send: SendRequest = match self.config.provider.as_str() {
+            "openai" => embed_openai,
+            "ollama" => embed_ollama,
+            other => return Err(Error::Embed(format!("unknown REST provider `{other}`"))),
+        };
         let capped: Vec<&str> = texts
             .iter()
             .map(|t| cap_chars(t, MAX_REST_EMBED_CHARS))
