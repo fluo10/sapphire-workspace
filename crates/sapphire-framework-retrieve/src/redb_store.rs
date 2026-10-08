@@ -204,7 +204,16 @@ impl RedbStore {
         // wipe clears the index along with the records.
         let db = match read_meta_u32(&db, "schema_version")? {
             Some(SCHEMA_VERSION) => db,
-            _ if is_empty(&db)? => db,
+            _ if is_empty(&db)? => {
+                // Fresh, or an older store with no documents: keep the records
+                // (and `embedding_dim`), but drop any index an older build created,
+                // whose tantivy schema would no longer match.
+                match std::fs::remove_dir_all(dir.join("tantivy")) {
+                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+                    _ => {}
+                }
+                db
+            }
             _ => {
                 // A cache written in an older shape: start over, as for UpgradeRequired.
                 drop(db);
@@ -784,6 +793,31 @@ mod tests {
             again.document_count().unwrap(),
             1,
             "a current store is not wiped again"
+        );
+    }
+
+    #[test]
+    fn an_empty_store_from_the_previous_schema_still_opens() {
+        // The previous build created its tantivy index (with a `line_start`
+        // field) on first open, even when no document was ever indexed.
+        let dir = tempfile::tempdir().unwrap();
+        let tantivy_dir = dir.path().join("tantivy");
+        std::fs::create_dir_all(&tantivy_dir).unwrap();
+        let mut sb = Schema::builder();
+        sb.add_i64_field("doc_id", INDEXED | STORED);
+        sb.add_u64_field("line_start", STORED);
+        sb.add_text_field("text", TextOptions::default());
+        Index::create_in_dir(&tantivy_dir, sb.build()).unwrap();
+
+        let store = RedbStore::open(dir.path(), None).unwrap();
+        store.upsert_document(&doc(1, "/w/a.md", "hello")).unwrap();
+        store.rebuild_fts().unwrap();
+        assert_eq!(
+            store
+                .search_fts(&FtsQuery::new("hello").limit(5))
+                .unwrap()
+                .len(),
+            1
         );
     }
 
