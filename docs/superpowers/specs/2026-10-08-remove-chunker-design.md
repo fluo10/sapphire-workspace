@@ -62,8 +62,8 @@ pub struct Document {
 pub struct FileSearchResult {
     pub id: i64,
     pub path: String,
-    /// FTS: BM25-derived rank (lower is better). Vector: L2 distance (lower is better).
-    /// Hybrid: RRF score (higher is better). Same conventions as before.
+    /// FTS: BM25 score (higher is better). Vector: L2 distance (lower is better).
+    /// Hybrid: RRF score (higher is better).
     pub score: f64,
     /// A short excerpt of the file, at most `SNIPPET_CHARS` characters (see below).
     pub snippet: String,
@@ -106,10 +106,15 @@ pub struct FileSearchResult {
 
 ## Input cap for REST embedders
 
-`const MAX_REST_EMBED_CHARS: usize = 8_000;`. The OpenAI-compatible and Ollama paths
+`const MAX_REST_EMBED_CHARS: usize = 4_000;`. The OpenAI-compatible and Ollama paths
 truncate each input to this many characters, on a `char` boundary, before sending. It is a
-safety net, deliberately conservative for CJK text, where one character is about one
-token. #185 replaces it with token-level truncation.
+safety net for the 8,191-token input limit: in cl100k a Japanese kanji is often 2–3
+tokens, so 4,000 characters leaves a margin even for dense CJK text. #185 replaces it with
+token-level truncation.
+
+A batch is sent in sub-requests of at most 200,000 characters in total
+(`MAX_REST_REQUEST_CHARS`), and the results are concatenated in input order, so the
+`Embedder` contract (one vector per input, in order) holds.
 
 ## Workspace (`sapphire-framework-workspace`)
 
@@ -137,6 +142,10 @@ refuse each other at the handshake instead of failing to decode.
 - **sapphire-journal:** the CLI prints path and score only and is unaffected. The MCP
   search tool serializes the results, so its JSON shape changes: `snippet` replaces
   `chunks`.
+  - `crates/sapphire-journal-core/src/cache.rs` builds `Document { …, chunks: None }`.
+    That no longer compiles: drop the `chunks` field.
+  - `cli/src/commands/cache.rs` prints "embedding chunks". This is wording only: it
+    should say "embedding documents" (or similar).
 
 Each is a small change in its own repository, made when that repository moves to this
 framework revision.
@@ -145,7 +154,7 @@ framework revision.
 
 - A store whose schema version cannot be read (corrupt meta) is treated like an old
   version: it is wiped and rebuilt.
-- Embedding failures behave as before: the document stays pending.
+- Embedding failures behave as before: the document stays pending. A failed batch is retried one document at a time, so one rejected input does not hold back the rest; `embed_pending` returns the number embedded, and an error only when nothing could be embedded.
 
 ## Testing
 

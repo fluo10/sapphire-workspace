@@ -153,7 +153,7 @@ processes:
 | Extension | Indexing |
 |---|---|
 | `md`, `markdown`, `txt`, `rst`, `org` | Indexed as one document per file |
-| `json` | Message/element extraction; indexed as one document per file |
+| `toml` | Indexed as one document per file |
 | `jsonl` | Indexed as one document per file |
 
 ## License
