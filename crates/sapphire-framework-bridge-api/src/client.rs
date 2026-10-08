@@ -7,10 +7,11 @@ use tokio::sync::broadcast;
 
 use crate::{
     Ack, BRIDGE_DATA_NAME, BRIDGE_NAME, DEVICE_RETIRE, DataHeader, DeviceRetireParams,
-    DeviceRetireResult, GrainId, INVITE, IncomingParams, InviteParams, InviteResult, JOIN,
-    JoinParams, JoinResult, PEERS, PeersResult, REGISTER, RegisterParams, RegisterResult, STATUS,
-    StatusResult, UNREGISTER, UnregisterParams, WORKGROUP_CREATE, WORKSPACES,
-    WorkgroupCreateParams, WorkgroupCreateResult, WorkspacesResult,
+    DeviceRetireResult, EMBED, EMBED_INFO, EmbedInfoResult, EmbedParams, EmbedResult, GrainId,
+    INVITE, IncomingParams, InviteParams, InviteResult, JOIN, JoinParams, JoinResult, PEERS,
+    PeersResult, REGISTER, RegisterParams, RegisterResult, STATUS, StatusResult, UNREGISTER,
+    UnregisterParams, WORKGROUP_CREATE, WORKSPACES, WorkgroupCreateParams, WorkgroupCreateResult,
+    WorkspacesResult,
 };
 
 /// How many pending incoming announcements a subscriber may fall behind by.
@@ -154,6 +155,16 @@ impl BridgeClient {
     /// What the bridge knows about itself.
     pub async fn status(&self) -> sapphire_ipc::Result<StatusResult> {
         self.client.call(STATUS, serde_json::json!({})).await
+    }
+
+    /// Which embedding model the bridge serves, if any.
+    pub async fn embed_info(&self) -> sapphire_ipc::Result<EmbedInfoResult> {
+        self.client.call(EMBED_INFO, serde_json::json!({})).await
+    }
+
+    /// Embed `texts` with the bridge's model; one vector per text, in order.
+    pub async fn embed(&self, texts: Vec<String>) -> sapphire_ipc::Result<EmbedResult> {
+        self.client.call(EMBED, EmbedParams { texts }).await
     }
 
     /// Ask the bridge to create an invite, and get the ticket back.

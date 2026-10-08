@@ -5322,7 +5322,7 @@ dependencies = [
 
 [[package]]
 name = "sapphire-framework-bridge-api"
-version = "2.0.0"
+version = "2.2.0"
 dependencies = [
  "grain-id",
  "sapphire-framework-ipc",

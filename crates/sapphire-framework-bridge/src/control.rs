@@ -361,6 +361,7 @@ fn status(bridge: &Bridge) -> Result<StatusResult> {
         version: bridge.version().to_owned(),
         node_id: bridge.transport().node_id(),
         workgroup: workgroup.as_ref().map(workgroup_status).transpose()?,
+        embedding: None,
         routes: route_statuses(bridge),
     })
 }

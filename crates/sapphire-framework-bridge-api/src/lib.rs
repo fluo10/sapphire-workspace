@@ -64,6 +64,10 @@ pub const WORKSPACES: &str = "bridge.workspaces";
 pub const WORKGROUP_CREATE: &str = "bridge.workgroup_create";
 /// Retire a device of this host's workgroup.
 pub const DEVICE_RETIRE: &str = "bridge.device_retire";
+/// Ask the bridge which embedding model it serves, if any.
+pub const EMBED_INFO: &str = "embed.info";
+/// Embed texts with the bridge's embedding model.
+pub const EMBED: &str = "embed.embed";
 
 /// Parameters of [`INVITE`].
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -248,6 +252,48 @@ pub struct WorkgroupStatus {
     pub devices: usize,
 }
 
+/// The embedding model a bridge serves.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct EmbedModelInfo {
+    /// The model's name.
+    pub model: String,
+    /// Its vector dimension.
+    pub dimension: u32,
+    /// The version of the text template applied before embedding.
+    pub template_version: u32,
+}
+
+/// Result of [`EMBED_INFO`].
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct EmbedInfoResult {
+    /// Whether this bridge embeds at all.
+    pub enabled: bool,
+    /// The model, when enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<EmbedModelInfo>,
+    /// Whether the model is in memory right now (local provider); always true for REST.
+    #[serde(default)]
+    pub loaded: bool,
+}
+
+/// Parameters of [`EMBED`].
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct EmbedParams {
+    /// The texts to embed.
+    pub texts: Vec<String>,
+}
+
+/// Result of [`EMBED`].
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct EmbedResult {
+    /// The model that produced the vectors.
+    pub model: String,
+    /// Their dimension.
+    pub dimension: u32,
+    /// One vector per input text, in order.
+    pub vectors: Vec<Vec<f32>>,
+}
+
 /// Result of [`STATUS`].
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct StatusResult {
@@ -259,6 +305,9 @@ pub struct StatusResult {
     pub workgroup: Option<WorkgroupStatus>,
     /// Every registered workspace.
     pub routes: Vec<RouteStatus>,
+    /// The embedding service, when this bridge reports one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding: Option<EmbedInfoResult>,
 }
 
 /// Parameters of the [`INCOMING`] notification.
@@ -340,6 +389,48 @@ mod tests {
 
     fn id() -> GrainId {
         GrainId::random()
+    }
+
+    #[test]
+    fn embed_info_round_trips() {
+        let info = EmbedInfoResult {
+            enabled: true,
+            model: Some(EmbedModelInfo {
+                model: "m".into(),
+                dimension: 384,
+                template_version: 1,
+            }),
+            loaded: true,
+        };
+        let back = round_trip(&info);
+        assert!(back.enabled && back.loaded);
+        assert_eq!(back.model, info.model);
+        let off = serde_json::to_value(EmbedInfoResult::default()).unwrap();
+        assert_eq!(off, serde_json::json!({"enabled": false, "loaded": false}));
+    }
+
+    #[test]
+    fn status_without_embedding_deserializes() {
+        let json = serde_json::json!({
+            "version": "1", "node_id": "n", "workgroup": null, "routes": []
+        });
+        let status: StatusResult = serde_json::from_value(json).unwrap();
+        assert!(status.embedding.is_none());
+    }
+
+    #[test]
+    fn embed_params_wire_shape() {
+        let v = serde_json::to_value(EmbedParams {
+            texts: vec!["a".into()],
+        })
+        .unwrap();
+        assert_eq!(v, serde_json::json!({"texts": ["a"]}));
+        let r = round_trip(&EmbedResult {
+            model: "m".into(),
+            dimension: 2,
+            vectors: vec![vec![1.0, 2.0]],
+        });
+        assert_eq!(r.vectors, vec![vec![1.0, 2.0]]);
     }
 
     #[test]

@@ -366,6 +366,7 @@ fn read_status_report() -> Result<Option<StatusReport>> {
                 node_id: snapshot.node_id,
                 workgroup: snapshot.workgroup,
                 routes: snapshot.routes,
+                embedding: None,
             },
             stale: true,
         })),
