@@ -5,7 +5,9 @@ use grain_id::GrainId;
 
 use crate::client::{Command, CommandOutput};
 
-use super::model::{TTL_CHOICES, is_this_device, role_badges, short_id, valid_name};
+use super::model::{
+    TTL_CHOICES, is_this_device, prune_edits, record_edit, role_badges, short_id, valid_name,
+};
 use super::{ViewCtx, error_line, unavailable};
 
 /// Issue an invite: a name and a lifetime in, a ticket out.
@@ -171,13 +173,10 @@ impl DeviceList {
             ui.label("This host has not joined a workgroup yet. See the Workgroup screen.");
             return None;
         }
-        // Follow changes made elsewhere: an edit the bridge now agrees with is no longer an edit.
-        self.priority_edit.retain(|id, p| {
-            bridge
-                .peers
-                .iter()
-                .any(|x| x.device_id == *id && x.priority != *p)
-        });
+        // Follow changes made elsewhere: only a value the user dialled in that differs from
+        // the bridge's is kept, so an untouched row shows the bridge's priority, and an edit
+        // the bridge now agrees with is no longer an edit.
+        prune_edits(&mut self.priority_edit, &bridge.peers);
         egui::ScrollArea::vertical().show(ui, |ui| {
             for peer in &bridge.peers {
                 egui::Frame::group(ui.style()).show(ui, |ui| {
@@ -231,7 +230,7 @@ impl DeviceList {
                                     .range(0..=255)
                                     .prefix("priority "),
                             );
-                            self.priority_edit.insert(peer.device_id, p);
+                            record_edit(&mut self.priority_edit, peer, p);
                         });
                     });
                 });

@@ -1,5 +1,6 @@
 //! The decisions the views make, as plain functions, so they can be tested without egui.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use grain_id::GrainId;
@@ -72,6 +73,21 @@ pub fn remote_only<'a>(
         .filter(|w| w.app_name == app_name)
         .filter(|w| !local.iter().any(|l| l.workspace_id == Some(w.workspace_id)))
         .collect()
+}
+
+/// Keep `value`, the priority shown in `peer`'s row, as an edit only while it differs from
+/// the bridge's priority. An unchanged row then follows changes made elsewhere.
+pub fn record_edit(edits: &mut HashMap<GrainId, u8>, peer: &PeerInfo, value: u8) {
+    if value == peer.priority {
+        edits.remove(&peer.device_id);
+    } else {
+        edits.insert(peer.device_id, value);
+    }
+}
+
+/// Drop the edits the bridge now agrees with, and those for devices no longer listed.
+pub fn prune_edits(edits: &mut HashMap<GrainId, u8>, peers: &[PeerInfo]) {
+    edits.retain(|id, p| peers.iter().any(|x| x.device_id == *id && x.priority != *p));
 }
 
 /// Whether `peer` is this host. An empty node id never matches.
@@ -289,6 +305,64 @@ mod tests {
         let left = remote_only(&ledger, &local, "app");
         assert_eq!(left.len(), 1);
         assert_eq!(left[0].workspace_id, other);
+    }
+
+    fn peer(id: GrainId, priority: u8) -> PeerInfo {
+        PeerInfo {
+            device_id: id,
+            name: "desk".into(),
+            node_id: "aaaa".into(),
+            connected: true,
+            priority,
+            availability: None,
+        }
+    }
+
+    /// One frame of the device row, as the view runs it: prune, show, record. `typed` is what
+    /// the user dials in this frame, if anything. Returns the value shown.
+    fn frame(edits: &mut HashMap<GrainId, u8>, p: &PeerInfo, typed: Option<u8>) -> u8 {
+        prune_edits(edits, std::slice::from_ref(p));
+        let shown = typed.unwrap_or(edits.get(&p.device_id).copied().unwrap_or(p.priority));
+        record_edit(edits, p, shown);
+        shown
+    }
+
+    #[test]
+    fn a_change_made_elsewhere_shows_in_an_untouched_row() {
+        let id = GrainId::random();
+        let mut edits = HashMap::new();
+        assert_eq!(frame(&mut edits, &peer(id, 1), None), 1);
+        assert_eq!(frame(&mut edits, &peer(id, 3), None), 3, "the row follows");
+        assert!(edits.is_empty(), "nothing to Set");
+    }
+
+    #[test]
+    fn a_pending_edit_survives_until_set() {
+        let id = GrainId::random();
+        let mut edits = HashMap::new();
+        frame(&mut edits, &peer(id, 1), Some(5));
+        assert_eq!(frame(&mut edits, &peer(id, 1), None), 5);
+        assert_eq!(
+            frame(&mut edits, &peer(id, 3), None),
+            5,
+            "outlives other changes"
+        );
+        assert_eq!(edits.get(&id), Some(&5));
+        // Once the bridge agrees, the edit is done.
+        assert_eq!(frame(&mut edits, &peer(id, 5), None), 5);
+        assert!(edits.is_empty());
+        // Dialling back to the bridge's value is no edit either.
+        frame(&mut edits, &peer(id, 5), Some(7));
+        frame(&mut edits, &peer(id, 5), Some(5));
+        assert!(edits.is_empty());
+    }
+
+    #[test]
+    fn an_edit_for_a_vanished_device_is_dropped() {
+        let (gone, kept) = (GrainId::random(), GrainId::random());
+        let mut edits = HashMap::from([(gone, 4), (kept, 4)]);
+        prune_edits(&mut edits, &[peer(kept, 1)]);
+        assert_eq!(edits, HashMap::from([(kept, 4)]));
     }
 
     #[test]
