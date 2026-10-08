@@ -8,6 +8,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+
+- `sapphire-framework-workspace`: a shared `logging` module — the app log, lifted from the bridge's own `logging` onto the foundation every app server builds on. `AppContext::init` now installs the process's `tracing` subscriber (console on stdout, so journald keeps seeing a service-managed server's output), and `AppServer::run` routes the file layer at `<data dir>/logs/app.log`: the framework's and the app's own targets at info, appending across restarts, rotating at 10 MiB with three rotated files kept. An app server that logged nothing before — no subscriber, so `tracing` silently dropped every event — now logs by building its context, with no wiring of its own. `tail`/`follow` read the file back in the manner of `tail -f`.
+
 ### Changed (breaking)
 
 - `sapphire-framework-session`: `run_session` now takes `&tokio::sync::Mutex<Replica>` instead of `&mut Replica`. It locks the replica itself, only from after the peer's `Hello` is in through to the end of the exchange — not while waiting for it — so a caller that used to pre-lock a `Mutex<Replica>` around the whole call should pass the mutex itself instead: pre-locking defeats the fix, pinning the replica against a concurrent scan or another session for as long as a slow-to-speak peer is waited on (issue #163).
