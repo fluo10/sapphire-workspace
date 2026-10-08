@@ -477,7 +477,10 @@ async fn device_priority(version: &str, selector: &str, priority: Option<u8>) ->
                 return Ok(1);
             };
             let device = workgroup.set_priority(selector, priority)?;
-            println!("{} ({}) priority {}", device.name, device.id, device.priority);
+            println!(
+                "{} ({}) priority {}",
+                device.name, device.id, device.priority
+            );
             Ok(0)
         }
         None => {
@@ -488,7 +491,10 @@ async fn device_priority(version: &str, selector: &str, priority: Option<u8>) ->
             };
             let devices = workgroup.devices()?;
             let device = devices.resolve(selector)?;
-            println!("{} ({}) priority {}", device.name, device.id, device.priority);
+            println!(
+                "{} ({}) priority {}",
+                device.name, device.id, device.priority
+            );
             Ok(0)
         }
     }

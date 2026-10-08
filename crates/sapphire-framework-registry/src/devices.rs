@@ -589,7 +589,10 @@ mod tests {
         let mut devices = Devices::open(&path).unwrap();
         let added = devices.add("desk", None, None).unwrap();
         let text = std::fs::read_to_string(path.join(added.file_name())).unwrap();
-        assert!(!text.contains("priority ="), "the default is not written: {text}");
+        assert!(
+            !text.contains("priority ="),
+            "the default is not written: {text}"
+        );
 
         let updated = devices.set_priority("desk", 0).unwrap();
 
@@ -601,7 +604,10 @@ mod tests {
         let back_to_default = devices.set_priority("desk", DEFAULT_PRIORITY).unwrap();
         assert_eq!(back_to_default.priority, DEFAULT_PRIORITY);
         let text_after = std::fs::read_to_string(path.join(back_to_default.file_name())).unwrap();
-        assert!(!text_after.contains("priority ="), "the default should not be written again: {text_after}");
+        assert!(
+            !text_after.contains("priority ="),
+            "the default should not be written again: {text_after}"
+        );
     }
 
     #[test]
@@ -627,8 +633,8 @@ mod tests {
 name = "laptop"
 created_at = "2026-01-01T00:00:00Z"
 "#;
-        let raw: RawDevice = toml::from_str(raw_toml)
-            .expect("deserialize RawDevice without priority field");
+        let raw: RawDevice =
+            toml::from_str(raw_toml).expect("deserialize RawDevice without priority field");
 
         // RawDevice.priority is None (the field was not provided)
         assert!(raw.priority.is_none());
@@ -646,8 +652,10 @@ created_at = "2026-01-01T00:00:00Z"
         };
 
         // Verify the default priority is used when the field is missing
-        assert_eq!(device.priority, DEFAULT_PRIORITY,
-            "missing priority field in RawDevice should result in DEFAULT_PRIORITY in Device");
+        assert_eq!(
+            device.priority, DEFAULT_PRIORITY,
+            "missing priority field in RawDevice should result in DEFAULT_PRIORITY in Device"
+        );
 
         // This test verifies forward compatibility: when older peers send Device records
         // without priority, the serde(default) attribute ensures deserialization succeeds
@@ -667,8 +675,7 @@ created_at = "2026-01-01T00:00:00Z"
         };
 
         // Serialize to TOML and remove the priority line
-        let serialized = toml::to_string(&full_device)
-            .expect("serialize Device");
+        let serialized = toml::to_string(&full_device).expect("serialize Device");
         let without_priority_field = serialized
             .lines()
             .filter(|line| !line.starts_with("priority"))
@@ -678,8 +685,10 @@ created_at = "2026-01-01T00:00:00Z"
         // This deserialization will only succeed if serde(default) is on the priority field
         let deserialized: Device = toml::from_str(&without_priority_field)
             .expect("deserialize Device without priority - requires serde(default)");
-        assert_eq!(deserialized.priority, DEFAULT_PRIORITY,
-            "Device deserialized without priority field must use serde default");
+        assert_eq!(
+            deserialized.priority, DEFAULT_PRIORITY,
+            "Device deserialized without priority field must use serde default"
+        );
     }
 }
 

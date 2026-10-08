@@ -5,7 +5,8 @@ use std::path::PathBuf;
 
 use sapphire_backend::protocol as proto;
 use sapphire_bridge_api::{
-    BridgeClient, DevicePrioritySetParams, DeviceRetireParams, InviteParams, JoinParams, WorkgroupCreateParams,
+    BridgeClient, DevicePrioritySetParams, DeviceRetireParams, InviteParams, JoinParams,
+    WorkgroupCreateParams,
 };
 use sapphire_framework_service::{Environment, ServiceCommand, SystemManager};
 use sapphire_ipc::{ClientInfo, Endpoint};

@@ -557,7 +557,11 @@ mod tests {
         let d = GrainId::random();
         let result = PeersResult {
             peers: Vec::new(),
-            roles: vec![WorkspaceRoles { workspace_id: ws, designated: Some(d), backup: None }],
+            roles: vec![WorkspaceRoles {
+                workspace_id: ws,
+                designated: Some(d),
+                backup: None,
+            }],
         };
 
         assert_eq!(result.roles_for(ws).unwrap().designated, Some(d));
@@ -565,7 +569,10 @@ mod tests {
 
     #[test]
     fn device_priority_set_params_are_selector_and_priority() {
-        let p = DevicePrioritySetParams { selector: "desk".into(), priority: 0 };
+        let p = DevicePrioritySetParams {
+            selector: "desk".into(),
+            priority: 0,
+        };
         assert_eq!(
             serde_json::to_value(&p).unwrap(),
             serde_json::json!({ "selector": "desk", "priority": 0 })

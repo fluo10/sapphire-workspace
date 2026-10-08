@@ -54,7 +54,13 @@ fn best(pool: &[&Candidate], pick: impl Fn(&Candidate) -> bool) -> Option<GrainI
 pub(crate) fn elect(candidates: &[Candidate], promote: bool) -> Roles {
     let eligible: Vec<&Candidate> = candidates.iter().filter(|c| c.priority > 0).collect();
     let designated = best(&eligible, |c| c.claims_designated)
-        .or_else(|| if promote { best(&eligible, |c| c.claims_backup) } else { None })
+        .or_else(|| {
+            if promote {
+                best(&eligible, |c| c.claims_backup)
+            } else {
+                None
+            }
+        })
         .or_else(|| best(&eligible, |_| true));
     let rest: Vec<&Candidate> = eligible
         .iter()
@@ -85,7 +91,14 @@ pub(crate) struct Elector {
 
 impl Elector {
     pub(crate) fn new(me: GrainId, wait: Duration) -> Elector {
-        Elector { me, wait, since: BTreeMap::new(), designated: BTreeSet::new(), seen_designated: BTreeSet::new(), backup: BTreeSet::new() }
+        Elector {
+            me,
+            wait,
+            since: BTreeMap::new(),
+            designated: BTreeSet::new(),
+            seen_designated: BTreeSet::new(),
+            backup: BTreeSet::new(),
+        }
     }
 
     /// Run one round: elect every hosted workspace, update this host's claims, and return
@@ -136,7 +149,11 @@ impl Elector {
             }
             let elected = elect(&candidates, self.seen_designated.contains(ws));
             if waited {
-                set(&mut self.designated, *ws, elected.designated == Some(self.me));
+                set(
+                    &mut self.designated,
+                    *ws,
+                    elected.designated == Some(self.me),
+                );
                 set(&mut self.backup, *ws, elected.backup == Some(self.me));
             }
             roles.insert(*ws, elected);
@@ -173,7 +190,13 @@ mod tests {
     }
 
     fn cand(id: GrainId, priority: u8) -> Candidate {
-        Candidate { device_id: id, priority, availability: None, claims_designated: false, claims_backup: false }
+        Candidate {
+            device_id: id,
+            priority,
+            availability: None,
+            claims_designated: false,
+            claims_backup: false,
+        }
     }
 
     #[test]
@@ -231,7 +254,14 @@ mod tests {
     }
 
     fn hello(id: GrainId, priority: u8, ws: GrainId) -> Hello {
-        Hello { device_id: id, priority, availability: None, hosting: vec![ws], designated: vec![], backup: vec![] }
+        Hello {
+            device_id: id,
+            priority,
+            availability: None,
+            hosting: vec![ws],
+            designated: vec![],
+            backup: vec![],
+        }
     }
 
     #[test]
@@ -240,17 +270,35 @@ mod tests {
         let ws = GrainId::random();
         let t0 = Instant::now();
         let mut elector = Elector::new(id[1], Duration::from_secs(40));
-        let own = Own { priority: 9, availability: None, hosting: vec![ws] };
+        let own = Own {
+            priority: 9,
+            availability: None,
+            hosting: vec![ws],
+        };
         let mut peer = hello(id[0], 1, ws);
         peer.designated = vec![ws];
 
         let (out, roles) = elector.step(t0, &own, &[peer.clone()]);
-        assert!(out.designated.is_empty() && out.backup.is_empty(), "no claims while waiting");
-        assert_eq!(roles[&ws].designated, Some(id[0]), "the peer's claim stands");
-        assert_eq!(roles[&ws].backup, None, "this host is not a candidate while waiting");
+        assert!(
+            out.designated.is_empty() && out.backup.is_empty(),
+            "no claims while waiting"
+        );
+        assert_eq!(
+            roles[&ws].designated,
+            Some(id[0]),
+            "the peer's claim stands"
+        );
+        assert_eq!(
+            roles[&ws].backup, None,
+            "this host is not a candidate while waiting"
+        );
 
         let (out, roles) = elector.step(t0 + Duration::from_secs(41), &own, &[peer]);
-        assert_eq!(roles[&ws].designated, Some(id[0]), "no preemption after the wait either");
+        assert_eq!(
+            roles[&ws].designated,
+            Some(id[0]),
+            "no preemption after the wait either"
+        );
         assert_eq!(out.backup, vec![ws], "it takes the free backup role");
     }
 
@@ -260,7 +308,11 @@ mod tests {
         let ws = GrainId::random();
         let t0 = Instant::now();
         let mut elector = Elector::new(id[0], Duration::from_secs(40));
-        let own = Own { priority: 1, availability: None, hosting: vec![ws] };
+        let own = Own {
+            priority: 1,
+            availability: None,
+            hosting: vec![ws],
+        };
         elector.step(t0, &own, &[]);
         let (out, roles) = elector.step(t0 + Duration::from_secs(41), &own, &[]);
         assert_eq!(roles[&ws].designated, Some(id[0]));
@@ -274,7 +326,11 @@ mod tests {
         let other = GrainId::random();
         let t0 = Instant::now();
         let mut elector = Elector::new(id[0], Duration::ZERO);
-        let own = Own { priority: 0, availability: None, hosting: vec![ws] };
+        let own = Own {
+            priority: 0,
+            availability: None,
+            hosting: vec![ws],
+        };
         let (_, roles) = elector.step(t0, &own, &[hello(id[1], 5, other)]);
         assert_eq!(roles[&ws], Roles::default());
     }
@@ -285,8 +341,24 @@ mod tests {
         let ws = GrainId::random();
         let t0 = Instant::now();
         let mut elector = Elector::new(id[0], Duration::ZERO);
-        elector.step(t0, &Own { priority: 1, availability: None, hosting: vec![ws] }, &[]);
-        let (out, roles) = elector.step(t0, &Own { priority: 1, availability: None, hosting: vec![] }, &[]);
+        elector.step(
+            t0,
+            &Own {
+                priority: 1,
+                availability: None,
+                hosting: vec![ws],
+            },
+            &[],
+        );
+        let (out, roles) = elector.step(
+            t0,
+            &Own {
+                priority: 1,
+                availability: None,
+                hosting: vec![],
+            },
+            &[],
+        );
         assert!(out.designated.is_empty());
         assert!(roles.is_empty());
     }
@@ -299,13 +371,25 @@ mod tests {
         let t0 = Instant::now();
         let mut a = Elector::new(a_id, Duration::ZERO);
         let mut b = Elector::new(b_id, Duration::ZERO);
-        let own_a = Own { priority: 9, availability: None, hosting: vec![ws] };
-        let own_b = Own { priority: 1, availability: None, hosting: vec![ws] };
+        let own_a = Own {
+            priority: 9,
+            availability: None,
+            hosting: vec![ws],
+        };
+        let own_b = Own {
+            priority: 1,
+            availability: None,
+            hosting: vec![ws],
+        };
         let a_unclaimed = hello(a_id, 9, ws);
         let mut b_hello = None;
         for _ in 0..2 {
             let (h, roles) = b.step(t0, &own_b, &[a_unclaimed.clone()]);
-            assert_ne!(roles[&ws].designated, Some(b_id), "B must not promote itself");
+            assert_ne!(
+                roles[&ws].designated,
+                Some(b_id),
+                "B must not promote itself"
+            );
             b_hello = Some(h);
         }
         let b_hello = b_hello.unwrap();
@@ -327,7 +411,11 @@ mod tests {
         let mut a = Elector::new(a_id, Duration::ZERO);
         let mut b = Elector::new(b_id, Duration::ZERO);
         let mut c = Elector::new(c_id, Duration::ZERO);
-        let own = |priority| Own { priority, availability: None, hosting: vec![ws] };
+        let own = |priority| Own {
+            priority,
+            availability: None,
+            hosting: vec![ws],
+        };
         let (own_a, own_b, own_c) = (own(9), own(1), own(5));
 
         // A and B converge first: A designated, B backup.
