@@ -2,7 +2,7 @@
 name = "sapphire-framework-gui"
 version.workspace = true
 edition.workspace = true
-description = "Shared egui components for sapphire-framework apps (workspace management)"
+description = "Shared egui components for sapphire-framework apps (workspace, workgroup and device management)"
 license.workspace = true
 repository.workspace = true
 keywords = ["gui", "egui", "workspace", "local-first"]
@@ -12,5 +12,20 @@ categories = ["gui"]
 # egui context. All consuming apps must use the same egui major version.
 [dependencies]
 sapphire-backend = { package = "sapphire-framework-backend", version = "0.14.0", path = "../sapphire-framework-backend", default-features = false }
+sapphire-bridge-api = { package = "sapphire-framework-bridge-api", version = "2", path = "../sapphire-framework-bridge-api" }
+sapphire-ipc = { package = "sapphire-framework-ipc", version = "0.14.0", path = "../sapphire-framework-ipc" }
 egui = "0.36"
+fontdb = "0.23"
+ttf-parser = "0.25"
 rfd = "0.17"
+grain-id.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros", "process"] }
+tracing.workspace = true
+
+[dev-dependencies]
+sapphire-framework-bridge = { path = "../sapphire-framework-bridge", features = ["test-util"] }
+sapphire-framework-server = { path = "../sapphire-framework-server", features = ["test-util"] }
+sapphire-workspace = { package = "sapphire-framework-workspace", path = "../sapphire-framework-workspace", default-features = false }
+tempfile = "3"
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

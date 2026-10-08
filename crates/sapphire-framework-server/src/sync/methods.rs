@@ -57,17 +57,23 @@ pub fn sync_router(runtime: Arc<SyncRuntime>, router: Router) -> Router {
                 // Never fails on account of the bridge: a status call that errored when the
                 // bridge was down would read as an outage of the app server itself.
                 let status = runtime.status(&p.ws).await;
-                serde_json::to_value(proto::SyncStatusResult {
-                    enabled: status.enabled,
-                    workspace_id: status.workspace_id,
-                    peers: status.peers,
-                    paused: status.paused,
-                    last_error: status.last_error,
-                    bridge_available: status.bridge_available,
-                })
-                .map_err(|e| RpcError::internal(e.to_string()))
+                serde_json::to_value(proto::SyncStatusResult::from(status))
+                    .map_err(|e| RpcError::internal(e.to_string()))
             }
         })
+}
+
+impl From<crate::sync::SyncStatus> for proto::SyncStatusResult {
+    fn from(status: crate::sync::SyncStatus) -> Self {
+        proto::SyncStatusResult {
+            enabled: status.enabled,
+            workspace_id: status.workspace_id,
+            peers: status.peers,
+            paused: status.paused,
+            last_error: status.last_error,
+            bridge_available: status.bridge_available,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -158,7 +164,7 @@ mod tests {
         tokio::spawn(async move {
             let info = ServerInfo {
                 version: "0.0.0".into(),
-                api: 1,
+                api: sapphire_backend::protocol::API_VERSION,
                 pid: std::process::id(),
                 managed_by: ManagedBy::Service,
             };
@@ -167,7 +173,7 @@ mod tests {
         let info = ClientInfo {
             kind: "cli".into(),
             version: "0.0.0".into(),
-            api: 1,
+            api: sapphire_backend::protocol::API_VERSION,
             pid: std::process::id(),
         };
         let (client, _) = Client::handshake(client_conn, "sapphire-syncmethods", info)
@@ -338,7 +344,7 @@ mod map_tests {
         tokio::spawn(async move {
             let info = ServerInfo {
                 version: "0.0.0".into(),
-                api: 1,
+                api: sapphire_backend::protocol::API_VERSION,
                 pid: std::process::id(),
                 managed_by: ManagedBy::Service,
             };
@@ -347,7 +353,7 @@ mod map_tests {
         let info = ClientInfo {
             kind: "cli".into(),
             version: "0.0.0".into(),
-            api: 1,
+            api: sapphire_backend::protocol::API_VERSION,
             pid: std::process::id(),
         };
         let (client, _) = Client::handshake(client_conn, "sapphire-syncmap", info)

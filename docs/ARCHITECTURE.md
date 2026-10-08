@@ -93,14 +93,14 @@ Cargo workspace（モノレポ）。削除済みの crate も削除線で残す 
 | `sapphire-framework-session` | 2 つのレプリカ間のセッション（フレーミング・vv 交換・差分と内容の転送） |
 | `sapphire-framework-ipc` | ローカル IPC（UDS / 名前付きパイプ / プロセス内チャネル上の NDJSON JSON-RPC、ルータ、`connect` / `probe`） |
 | `sapphire-framework-server` | アプリサーバ骨格（`workspace.*` 名前空間・多重管理・`FrameworkCommand` — `serve` / `status` / `service` / `workspace` / `workgroup` / `device` フラット語彙・同期ランタイム） |
-| `sapphire-framework-bridge-api` | bridge 制御プレーンのプロトコルとクライアント（serde のみ・iroh 非依存） |
+| `sapphire-framework-bridge-api` | bridge 制御プレーンのプロトコルとクライアント（serde のみ・iroh 非依存）。**単独でバージョン管理**（2.0.0 — メジャー == 制御面 `API_VERSION`。`version.workspace` ではない） |
 | `sapphire-framework-bridge` | ホスト常駐デーモン本体（デバイス同一性・workgroup 認可・ペアリング・交換台・iroh） |
 | `apps/sapphire-bridge` | 上記のバイナリと CLI（`serve` / `status` / `log` / `service` / `workspace` / `workgroup` / `device`） |
 | `sapphire-framework-registry` | デバイス台帳（`<dir>/<grain-id>.toml` を 1 デバイス 1 ファイル。`node_id` を保持。users は撤去） |
 | `sapphire-framework-keys` | `KeyStore` / `AuthConfig` / `protect`。**非同期 HTTP エンドポイント**の認証用 |
 | `sapphire-framework-service` | OS のサービスマネージャへの登録（`ServiceSpec`・systemd user unit・LaunchAgent・タスクスケジューラ） |
 | `sapphire-framework-backend` | GUI 向け**非同期** `WorkspaceBackend` + `IpcBackend` / `LocalBackend`、`BackendEvent` |
-| `sapphire-framework-gui` | app 非依存の egui `WorkspaceManager` / `WorkspaceRegistry` |
+| `sapphire-framework-gui` | app 非依存の egui `WorkspaceManager` / `WorkspaceRegistry` と同期 GUI 部品（下記「GUI 部品」） |
 | ~~`sapphire-framework-rpc`~~ / ~~`-remote-client`~~ / ~~`-remote-server`~~ / ~~`-blob`~~ | **削除**（HTTP 同期スタック。表面テスト `tests/surface.rs` で存在を封じる。内容はファイル原本から直接供給される — sync 仕様 §2.3） |
 
 **`-sync` と `-session` は `-workspace` / `-retrieve` に依存しない**（転送非依存の中核として。
@@ -111,6 +111,24 @@ Cargo workspace（モノレポ）。削除済みの crate も削除線で残す 
 > `<bridge dir>/logs/node.log`（10 MiB × 3 でローテーション）。書き手は単一インスタンスロックが
 > 保証する 1 プロセスのみなので、ログは再起動をまたいで連続する。`sapphire-bridge status` は
 > 稼働中の bridge に問い合わせ、応答が無ければ `status.json` を読む。
+
+## GUI 部品（`sapphire-framework-gui`）
+
+デスクトップの同期 GUI が共有する部品。2 層に分かれる。GUI は**サーバも bridge も自プロセス内で
+起動しない** — 不在はエラーではなく「表示される状態」。
+
+- **データ層（egui 非依存）**: `client::FrameworkClient` が app server と bridge に非同期で問い合わせ、
+  1 回の更新で現況のスナップショット（サーバ・bridge・workgroup・デバイス・ワークスペース）を作る。
+  コマンド（workgroup 作成・invite・参加・デバイス退避・ワークスペースの有効化/無効化/忘却）も
+  同じクライアントが発行する。更新は 5 秒、コマンドは 30 秒（参加のみ 90 秒）で打ち切る
+  （`ClientConfig::{fetch_timeout, command_timeout}` で変更可）— 相手が応答しなくても UI は固まらない。
+  `views::*` はスナップショットから表示用の行・文言を作る**純関数**で、egui なしでテストできる。
+- **表示層**: `SyncPanel` が上記を egui で描く（workgroup / デバイス / ワークスペースの管理）。
+  invite チケットは画面にのみ出し、`tracing` には渡さない。`pub use egui` で利用側は egui の版を
+  合わせられる。
+- **フォント**: `fonts::system_cjk_font()` / `add_system_cjk_fallback(&mut FontDefinitions)` /
+  `install_system_cjk_fallback(&egui::Context)` が OS 付属の CJK フォント（Windows / macOS / Linux）を
+  フォールバックに足す。フォントファイルは同梱しない。
 
 ## GUI 向け 非同期 Backend trait
 
@@ -168,7 +186,11 @@ CLI は全アプリ共通のフラット語彙 `serve` / `status` / `service` / 
 `device` を `FrameworkCommand` として自分のサブコマンドの隣に flatten する（issue #142）。
 制御面の路由は所有権に従う: `workspace` コマンドはアプリのサーバへ、`workgroup` / `device`
 コマンドは bridge へ直接。`status` の報告書は CLI と IPC `server.info` が同じ
-`StatusReport` 型を共有する。詳細はプロセス構成仕様 §2, §4。
+`StatusReport` 型を共有する（`backend::protocol` にあり、サーバ crate からも re-export）。
+サーバは**ホストのワークスペース台帳**（`<config dir>/workspaces.toml`）を持ち、`workspace.list` が
+それを返す（CLI の `workspace list` は稼働中のサーバに聞く）。`workspace.forget` は台帳から外して
+同期も止める — ルートが既に無いワークスペースでも停止する。`serve` は起動時に台帳から同期中の
+ワークスペースを復元する（再起動後に手動で有効化し直さなくてよい）。詳細はプロセス構成仕様 §2, §4。
 
 ### bridge はホスト常駐の交換台（`apps/sapphire-bridge`）
 
@@ -194,7 +216,8 @@ workgroup のメタ（デバイス台帳・ワークスペース一覧）はそ�
 CLI は `sapphire-bridge`（`serve` / `status` / `service` / `workspace` / `workgroup` /
 `device`）。この CLI もアプリ側と同じフラット語彙を話す — bridge 独自の `BridgeCommand`
 （共有語彙を bridge 側で実行するもの）として、bridge 固有の `log` と並べて構成される。
-`workgroup create` と `device retire` は bridge ディレクトリに直接書き込むため、
+`workgroup create` と `device retire` は、bridge 稼働中は制御面の `bridge.workgroup_create` /
+`bridge.device_retire`（GUI も同じ口）を使い、停止中は bridge ディレクトリに直接書き込むため、
 アプリ CLI 側の Phase 1 の同名ディレクティブも実在するコマンドを指すようになった。
 `workspace` は読み取り専用の `list` のみ — ワークスペースを workgroup に置くのは
 それを所有するアプリの仕事だからである（仕様 §1）。

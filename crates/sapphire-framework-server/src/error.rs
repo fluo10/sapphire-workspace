@@ -62,6 +62,10 @@ pub enum Error {
     #[error(transparent)]
     Session(#[from] sapphire_framework_session::Error),
 
+    /// A configuration file that could not be read or written as expected.
+    #[error("{0}")]
+    Config(String),
+
     /// Installing, removing or reporting this application's service failed.
     ///
     /// Carries the service crate's own message, which already says what to do about the

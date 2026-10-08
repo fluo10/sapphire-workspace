@@ -196,15 +196,22 @@ impl SyncRuntime {
         if let Err(err) = self.sync_now(&key).await {
             tracing::warn!(root = %key.display(), "the first session after enabling failed: {err}");
         }
+
+        // Remembered for the next start: restart restore re-enables what this flag says.
+        if let Err(err) =
+            crate::registry::HostRegistry::for_app(self.ctx).set_synced(&key, true, true)
+        {
+            tracing::warn!(root = %key.display(), "could not record the workspace as synced: {err}");
+        }
         Ok(workspace_id)
     }
 
     /// Stop syncing `root`. Files and the sync id stay, so re-enabling rejoins the same
     /// workspace rather than creating a second one.
     pub async fn disable(&self, root: &Path) -> Result<()> {
-        let Ok(key) = root.canonicalize() else {
-            return Ok(());
-        };
+        // A root that no longer exists cannot be canonicalized, but the keys of `synced` are
+        // canonical already, so the path as given (a registry root) still names the entry.
+        let key = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
         let removed = self.synced.lock().await.remove(&key);
         if removed.is_some()
             && let Some(watcher) = self.watcher.get()
@@ -222,6 +229,11 @@ impl SyncRuntime {
                 .await
                 .map_err(|e| Error::Bridge(e.to_string()))?;
             self.reregister().await?;
+        }
+        if let Err(err) =
+            crate::registry::HostRegistry::for_app(self.ctx).set_synced(&key, false, false)
+        {
+            tracing::warn!(root = %key.display(), "could not record the workspace as not synced: {err}");
         }
         Ok(())
     }
@@ -1270,7 +1282,7 @@ mod tests {
         tokio::spawn(async move {
             let info = sapphire_ipc::ServerInfo {
                 version: "0.0.0".into(),
-                api: 1,
+                api: sapphire_backend::protocol::API_VERSION,
                 pid: std::process::id(),
                 managed_by: ManagedBy::Spawned,
             };
@@ -1279,7 +1291,7 @@ mod tests {
         let info = sapphire_ipc::ClientInfo {
             kind: "test".into(),
             version: "0.0.0".into(),
-            api: 1,
+            api: sapphire_backend::protocol::API_VERSION,
             pid: std::process::id(),
         };
         let (client, _) = sapphire_ipc::Client::handshake(client_conn, "sapphire-synctest", info)

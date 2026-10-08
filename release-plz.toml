@@ -56,6 +56,11 @@ version_group = "framework"
 name = "sapphire-framework-gui"
 version_group = "framework"
 
+# The bridge's control-plane protocol carries its own version: its major is the wire
+# API_VERSION (derived in src/lib.rs), so it must not move with version_group "framework".
+[[package]]
+name = "sapphire-framework-bridge-api"
+
 # 単一依存ファサード（#95）。
 [[package]]
 name = "sapphire-framework"

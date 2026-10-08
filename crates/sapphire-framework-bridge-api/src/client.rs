@@ -6,10 +6,11 @@ use sapphire_ipc::{Client, ClientInfo, Endpoint, connect_or_absent};
 use tokio::sync::broadcast;
 
 use crate::{
-    Ack, BRIDGE_DATA_NAME, BRIDGE_NAME, DataHeader, GrainId, INVITE, IncomingParams, InviteParams,
-    InviteResult, JOIN, JoinParams, JoinResult, PEERS, PeersResult, REGISTER, RegisterParams,
-    RegisterResult, STATUS, StatusResult, UNREGISTER, UnregisterParams, WORKSPACES,
-    WorkspacesResult,
+    Ack, BRIDGE_DATA_NAME, BRIDGE_NAME, DEVICE_RETIRE, DataHeader, DeviceRetireParams,
+    DeviceRetireResult, GrainId, INVITE, IncomingParams, InviteParams, InviteResult, JOIN,
+    JoinParams, JoinResult, PEERS, PeersResult, REGISTER, RegisterParams, RegisterResult, STATUS,
+    StatusResult, UNREGISTER, UnregisterParams, WORKGROUP_CREATE, WORKSPACES,
+    WorkgroupCreateParams, WorkgroupCreateResult, WorkspacesResult,
 };
 
 /// How many pending incoming announcements a subscriber may fall behind by.
@@ -45,6 +46,27 @@ impl BridgeClient {
                 )
             })?;
         Ok(BridgeClient::from_client(Arc::new(client), runtime_dir))
+    }
+
+    /// Connect to the bridge listening at `endpoint`, or `None` when nothing listens there.
+    ///
+    /// For a caller that must not touch the default runtime directory — a GUI under test, or
+    /// one pointed at another directory. The data plane is looked up beside the control
+    /// endpoint, as the bridge places it.
+    pub async fn connect_at(
+        endpoint: &Endpoint,
+        kind: &str,
+        version: &str,
+    ) -> sapphire_ipc::Result<Option<BridgeClient>> {
+        let info = ClientInfo {
+            kind: kind.to_owned(),
+            version: version.to_owned(),
+            api: crate::API_VERSION,
+            pid: std::process::id(),
+        };
+        Ok(connect_or_absent(endpoint, BRIDGE_NAME, info)
+            .await?
+            .map(|(client, _)| BridgeClient::from_client(Arc::new(client), endpoint.dir.clone())))
     }
 
     /// Connect to the running bridge, or fail naming it.
@@ -97,6 +119,22 @@ impl BridgeClient {
     /// Announce the workspaces this app server owns.
     pub async fn register(&self, params: RegisterParams) -> sapphire_ipc::Result<RegisterResult> {
         self.client.call(REGISTER, params).await
+    }
+
+    /// Found a workgroup on this host.
+    pub async fn workgroup_create(
+        &self,
+        params: WorkgroupCreateParams,
+    ) -> sapphire_ipc::Result<WorkgroupCreateResult> {
+        self.client.call(WORKGROUP_CREATE, params).await
+    }
+
+    /// Retire a device of this host's workgroup.
+    pub async fn device_retire(
+        &self,
+        params: DeviceRetireParams,
+    ) -> sapphire_ipc::Result<DeviceRetireResult> {
+        self.client.call(DEVICE_RETIRE, params).await
     }
 
     /// Stop owning one workspace.

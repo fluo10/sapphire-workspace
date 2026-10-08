@@ -44,17 +44,21 @@ mod error;
 mod events;
 mod handlers;
 mod host;
+mod listing;
+mod registry;
 pub mod sync;
 #[cfg(test)]
 mod test_support;
 
 pub use command::{
     DeviceCommand, FrameworkCommand, StatusReport, StatusRow, WorkgroupCommand, WorkspaceCommand,
+    render_workspace_list,
 };
 pub use error::{Error, Result};
 pub use events::subscribe_method;
 pub use handlers::{workspace_router, workspace_router_with_sync};
 pub use host::{DEFAULT_IDLE, DEFAULT_MAX_OPEN, WorkspaceHost};
+pub use registry::{HOST_REGISTRY_FILE, HostEntry, HostRegistry};
 pub use sync::{SyncRuntime, SyncStatus, sync_router};
 
 /// An application's server.
@@ -258,6 +262,7 @@ impl AppServer {
             // `workspace.*` namespace is complete.
             router = sync_router(Arc::clone(runtime), router);
         }
+        router = listing::listing_methods(ctx, sync.clone(), router);
         // `server.info` answers the typed [`StatusReport`] — the same shape the CLI's
         // `status` renders — so the CLI and a future GUI read one record. The rows come
         // from the application's builder, called once per report.
@@ -339,7 +344,9 @@ impl AppServer {
                         tracing::warn!("the live dial loop ended: {err}");
                     }
                 });
-                Some((announcements, watching, dialling))
+                // What the registry says was synced comes back on every start.
+                let restoring = tokio::spawn(listing::restore(ctx, Arc::clone(runtime)));
+                Some((announcements, watching, dialling, restoring))
             }
             None => None,
         };
@@ -388,7 +395,8 @@ impl AppServer {
         }
 
         ticker.abort();
-        if let Some((announcements, watching, dialling)) = _sync_tasks {
+        if let Some((announcements, watching, dialling, restoring)) = _sync_tasks {
+            restoring.abort();
             announcements.abort();
             watching.abort();
             dialling.abort();
@@ -482,7 +490,7 @@ fn init_workspace(ctx: &'static AppContext, dir: &Path) -> Result<proto::Workspa
     // `--workspace` selectors. The registry lives in the marker, so it travels with the
     // workspace when it syncs.
     let workspace = Workspace::from_root(ctx, &root)?;
-    let id = workspace_id_for(&root);
+    let id = registry::slug(&root);
     let config_path = workspace.config_path();
     let registry = read_registry(&config_path)?;
     if registry.get(&id).is_none() {
@@ -490,35 +498,14 @@ fn init_workspace(ctx: &'static AppContext, dir: &Path) -> Result<proto::Workspa
         registry.insert(id.clone(), WorkspaceEntry::local(&root));
         write_registry(&config_path, &registry)?;
     }
+    // The host-wide list of workspaces, which `workspace.list` reads. `root` is canonical.
+    registry::HostRegistry::for_app(ctx).upsert(&root)?;
 
     Ok(proto::WorkspaceInitResult {
         root,
         workspace_id: id,
         created,
     })
-}
-
-/// The registry id a workspace root carries: its directory name, slugified.
-///
-/// Uniqueness comes from the directory itself — a second `init` of one directory is the
-/// idempotent path — so the slug is not uniquified against the rest of the registry the
-/// way the GUI's manager is.
-fn workspace_id_for(root: &Path) -> String {
-    let base: String = root
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "workspace".to_owned())
-        .trim()
-        .to_lowercase()
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect();
-    let base = base.trim_matches('-').to_owned();
-    if base.is_empty() {
-        "workspace".to_owned()
-    } else {
-        base
-    }
 }
 
 /// The registry as the marker's `config.toml` holds it, or an empty one.
@@ -586,7 +573,7 @@ mod tests {
         ClientInfo {
             kind: "test".into(),
             version: "0.0.0".into(),
-            api: 1,
+            api: sapphire_backend::protocol::API_VERSION,
             pid: std::process::id(),
         }
     }

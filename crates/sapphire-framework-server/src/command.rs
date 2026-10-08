@@ -3,46 +3,17 @@
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
-use sapphire_backend::WorkspaceRegistry;
 use sapphire_backend::protocol as proto;
-use sapphire_bridge_api::{BridgeClient, InviteParams, JoinParams};
+use sapphire_bridge_api::{
+    BridgeClient, DeviceRetireParams, InviteParams, JoinParams, WorkgroupCreateParams,
+};
 use sapphire_framework_service::{Environment, ServiceCommand, SystemManager};
-use sapphire_ipc::{ClientInfo, Endpoint, ManagedBy};
-use sapphire_workspace::{AppContext, Workspace};
-use serde::{Deserialize, Serialize};
+use sapphire_ipc::{ClientInfo, Endpoint};
 
 use crate::AppServer;
 use crate::error::{Error, Result};
 
-/// The typed answer to a status question, shared by the CLI and the IPC `server.info`
-/// response (spec decision 4).
-///
-/// When a server answers, the CLI prints the framework's fields and then the
-/// application's [rows](StatusReport::app) as `name: value` lines; a GUI could read the
-/// same serialised shape from the IPC method instead. When nothing is listening, the
-/// report is [`StatusReport::running`] = `false` and the app rows are skipped.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StatusReport {
-    /// Whether a server is answering at all.
-    pub running: bool,
-    /// The server's version, when it is running.
-    pub version: Option<String>,
-    /// Its pid, when it is running.
-    pub pid: Option<u32>,
-    /// How the running server was started, when it is running.
-    pub managed_by: Option<ManagedBy>,
-    /// The application's own rows, rendered after the framework's.
-    pub app: Vec<StatusRow>,
-}
-
-/// One application-provided line of the status report.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StatusRow {
-    /// The row's name, e.g. `sync`.
-    pub name: String,
-    /// The value shown beside it.
-    pub value: String,
-}
+pub use sapphire_backend::protocol::{StatusReport, StatusRow};
 
 /// The framework's commands, flattened into an application's CLI (spec decision 2).
 ///
@@ -100,8 +71,8 @@ impl FrameworkCommand {
 /// The `workspace` subcommands (spec decisions 1/6/7).
 ///
 /// `init` and `map`'s write go to the app's server over IPC, because the server owns the
-/// marker directories, the registries and the sync ids; `list` reads the local registry
-/// the same way the server does and then asks the bridge for the workgroup's ledger;
+/// marker directories, the registries and the sync ids; `list` asks the server for this
+/// host's workspaces and then the bridge for the workgroup's ledger;
 /// `map`'s selector resolution is the workgroup's word, so it goes to the bridge first.
 #[derive(Debug, clap::Subcommand)]
 pub enum WorkspaceCommand {
@@ -113,7 +84,7 @@ pub enum WorkspaceCommand {
         #[arg(long)]
         sync: bool,
     },
-    /// List this app's workspaces: local rows first, then the workgroup's.
+    /// List this host's workspaces (from the server), then the workgroup's.
     List,
     /// Tie a local directory to a workspace the workgroup knows.
     Map {
@@ -143,9 +114,7 @@ impl WorkspaceCommand {
 /// The `workgroup` subcommands.
 ///
 /// The workgroup's ledger is the bridge's business end to end, so these go to the bridge's
-/// endpoint directly — except `create`, which the bridge's control plane has no method
-/// for: it works on the bridge's directory in the bridge's own CLI, and this command
-/// prints that CLI's name instead of pulling the bridge crate in here.
+/// endpoint directly, including `create`, which goes through the running bridge.
 #[derive(Debug, clap::Subcommand)]
 pub enum WorkgroupCommand {
     /// Found a workgroup on this host.
@@ -173,10 +142,15 @@ impl WorkgroupCommand {
     pub async fn dispatch(self, version: &'static str) -> Result<i32> {
         match self {
             WorkgroupCommand::Create { name, device_name } => {
+                let client = connect_running(version).await?;
+                let created = client
+                    .workgroup_create(WorkgroupCreateParams { name, device_name })
+                    .await?;
                 println!(
-                    "run: sapphire-bridge workgroup create --device-name {device_name} {name}"
+                    "created workgroup {} ({}); this device is {}",
+                    created.name, created.workgroup_id, created.device_id
                 );
-                Ok(1)
+                Ok(0)
             }
             WorkgroupCommand::List => {
                 let client = connect_running(version).await?;
@@ -215,9 +189,8 @@ impl WorkgroupCommand {
 /// The `device` subcommands.
 ///
 /// The ledger's word for taking a device out is `retire` — a device id is written into
-/// synced content and must keep resolving, so its record stays as a tombstone — and the
-/// bridge's control plane has no method for retiring one, so this command prints the
-/// bridge CLI's line instead.
+/// synced content and must keep resolving, so its record stays as a tombstone — and this
+/// command goes through the running bridge to retire a device.
 #[derive(Debug, clap::Subcommand)]
 pub enum DeviceCommand {
     /// List the workgroup's devices, and which are reachable.
@@ -281,8 +254,12 @@ impl DeviceCommand {
                 Ok(0)
             }
             DeviceCommand::Retire { selector } => {
-                println!("run: sapphire-bridge device retire {selector}");
-                Ok(1)
+                let client = connect_running(version).await?;
+                let retired = client
+                    .device_retire(DeviceRetireParams { selector })
+                    .await?;
+                println!("retired device {} ({})", retired.name, retired.device_id);
+                Ok(0)
             }
         }
     }
@@ -362,10 +339,7 @@ async fn workspace_init(
             .unwrap_or(proto::SyncStatusResult {
                 enabled: true,
                 workspace_id: Some(enabled.workspace_id),
-                peers: 0,
-                paused: None,
-                last_error: None,
-                bridge_available: false,
+                ..proto::SyncStatusResult::not_synced()
             });
         println!(
             "syncing as {} ({} peer{})",
@@ -377,38 +351,57 @@ async fn workspace_init(
     Ok(0)
 }
 
-/// `workspace list`: local rows from the registry, then the workgroup's ledger.
+/// Render the server's `workspace.list` as the CLI prints it: `id root state`.
 ///
-/// The registry lives in the workspace's marker `config.toml`, and the CLI is inside a
-/// workspace when it runs — the same upward walk `find_from` does. Rows print in the
-/// registry's order, as `id path`. The workgroup's ledger is the bridge's to answer, and
-/// the bridge being down is not the local half's failure: local rows still print, the
-/// ledger's absence is one line, and the exit is 0.
-async fn workspace_list(app: &'static str, version: &'static str) -> Result<i32> {
-    let _ = version;
-    // `Workspace` holds its context for `'static`, so the one-off context leaks — one
-    // small struct per `workspace list` run, and the process is about to exit anyway.
-    let ctx: &'static AppContext = Box::leak(Box::new(AppContext::new(app)));
-    let workspace = match Workspace::find(ctx) {
-        Ok(workspace) => workspace,
-        Err(_) => {
-            println!("no {app} workspace contains the current directory");
-            return Ok(0);
-        }
-    };
-    let registry = workspace_registry(&workspace.config_path());
-    if registry.ids().next().is_none() {
-        println!(
-            "no workspaces are registered in {}",
-            workspace.config_path().display()
-        );
+/// Public so the integration tests can capture it; the `workspace list` verb writes it to
+/// standard output.
+pub async fn render_workspace_list(client: &sapphire_ipc::Client, out: &mut String) -> Result<i32> {
+    let list: proto::WorkspaceListResult = client
+        .call(proto::WORKSPACE_LIST, serde_json::json!({}))
+        .await?;
+    if list.workspaces.is_empty() {
+        writeln!(out, "no workspaces on this host").expect("writing to a String cannot fail");
     }
-    for id in registry.ids() {
-        let entry = registry.get(id);
-        let path = entry
-            .and_then(|e| e.path.clone())
-            .unwrap_or_else(|| "-".into());
-        println!("{id} {}", path.display());
+    for row in list.workspaces {
+        let state = if !row.reachable {
+            "unreachable"
+        } else if row.sync.enabled {
+            "synced"
+        } else {
+            "not synced"
+        };
+        writeln!(out, "{} {} {state}", row.id, row.root.display())
+            .expect("writing to a String cannot fail");
+    }
+    Ok(0)
+}
+
+/// `workspace list`: this host's workspaces from the server, then the workgroup's ledger.
+///
+/// The server owns the host registry, so the first half is its `workspace.list`; nothing
+/// listening → the one line and exit 1, like `init`. The workgroup's ledger is the bridge's
+/// to answer, and the bridge being down is not the server half's failure: the ledger's
+/// absence is one line, and the exit is 0.
+async fn workspace_list(app: &'static str, version: &'static str) -> Result<i32> {
+    let endpoint = Endpoint::for_app(app)?;
+    let client_info = ClientInfo {
+        kind: "cli".to_owned(),
+        version: version.to_owned(),
+        api: proto::API_VERSION,
+        pid: std::process::id(),
+    };
+    let Some((client, _)) = sapphire_ipc::connect_or_absent(&endpoint, app, client_info).await?
+    else {
+        println!("no {app} server is running");
+        return Ok(1);
+    };
+    let mut out = String::new();
+    let code = render_workspace_list(&client, &mut out).await?;
+    for line in out.lines() {
+        println!("{line}");
+    }
+    if code != 0 {
+        return Ok(code);
     }
 
     let Some(client) = BridgeClient::connect_running("cli", version).await.ok() else {
@@ -426,26 +419,6 @@ async fn workspace_list(app: &'static str, version: &'static str) -> Result<i32>
         }
     }
     Ok(0)
-}
-
-/// The registry a marker's `config.toml` holds, or an empty one.
-///
-/// The same read-modify-write-free read the server's `init` handler does; a config of
-/// another shape is an empty registry, because the marker is the app's own file.
-fn workspace_registry(path: &std::path::Path) -> WorkspaceRegistry {
-    #[derive(serde::Deserialize, Default)]
-    struct Config {
-        #[serde(default)]
-        workspace: WorkspaceRegistry,
-    }
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|text| {
-            toml::from_str::<Config>(&text)
-                .map(|config| config.workspace)
-                .ok()
-        })
-        .unwrap_or_default()
 }
 
 /// `workspace map`: the bridge resolves the selector, the server takes the write.
@@ -733,7 +706,7 @@ mod status_tests {
             sapphire_ipc::ClientInfo {
                 kind: "test".into(),
                 version: "0.0.0".into(),
-                api: 1,
+                api: sapphire_backend::protocol::API_VERSION,
                 pid: std::process::id(),
             },
         )

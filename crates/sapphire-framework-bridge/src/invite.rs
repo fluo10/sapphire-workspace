@@ -138,6 +138,20 @@ impl Invites {
     /// Re-reads the file first: any process may have issued the invite, and the one
     /// answering the pairing is not necessarily the one that created it.
     pub fn redeem(&mut self, secret: &[u8; 32]) -> Result<Invite> {
+        self.take(secret, None)
+    }
+
+    /// Use an invite up, but only for the device it was issued for.
+    ///
+    /// The name is checked before the invite is marked used, so a joiner who mistyped the
+    /// name it was invited as is refused without spending the ticket and can try again. A
+    /// wrong secret, or a used or expired invite, is refused exactly as by
+    /// [`redeem`](Self::redeem).
+    pub fn redeem_as(&mut self, secret: &[u8; 32], device_name: &str) -> Result<Invite> {
+        self.take(secret, Some(device_name))
+    }
+
+    fn take(&mut self, secret: &[u8; 32], device_name: Option<&str>) -> Result<Invite> {
         self.reload()?;
         let offered = secret
             .iter()
@@ -167,6 +181,14 @@ impl Invites {
         }
         if self.entries[i].expires_at <= Utc::now() {
             return Err(Error::Unauthorized("this invite has expired".to_owned()));
+        }
+        if let Some(name) = device_name
+            && name != self.entries[i].device_name
+        {
+            return Err(Error::Unauthorized(format!(
+                "this invite is for a device named {:?}, not {:?}",
+                self.entries[i].device_name, name
+            )));
         }
 
         let mut next = self.entries.clone();
@@ -269,6 +291,21 @@ mod tests {
         assert!(invites.redeem(&secret).is_ok());
         let err = invites.redeem(&secret).unwrap_err();
         assert!(err.to_string().contains("already used"), "{err}");
+    }
+
+    #[test]
+    fn redeeming_for_the_wrong_name_leaves_the_invite_live() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut invites = invites(tmp.path());
+        let (_invite, secret) = invites.create("phone", DEFAULT_TTL).unwrap();
+
+        let err = invites.redeem_as(&secret, "tablet").unwrap_err();
+        assert!(err.to_string().contains("\"phone\""), "{err}");
+        assert!(invites.entries()[0].used_at.is_none());
+        assert_eq!(
+            invites.redeem_as(&secret, "phone").unwrap().device_name,
+            "phone"
+        );
     }
 
     #[test]
