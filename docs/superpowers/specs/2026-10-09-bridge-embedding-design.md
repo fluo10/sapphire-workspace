@@ -59,7 +59,9 @@ The fix is to move embedding into the bridge, which is the one per-host daemon:
 
 ## `sapphire-framework-bridge-embed` (a bridge component)
 
-The crate is used only by the bridge. Its dependencies:
+This crate is a component of the bridge, and nothing else depends on it. Its name follows the
+other bridge crates (`sapphire-framework-bridge`, `sapphire-framework-bridge-api`), under the
+project rule that every crate carries the `sapphire-framework-` prefix. Its dependencies:
 
 - fastembed (`default-features = false`, features `qwen3`, `hf-hub-native-tls`,
   `ort-load-dynamic`) behind the feature `local`, which is on by default;
