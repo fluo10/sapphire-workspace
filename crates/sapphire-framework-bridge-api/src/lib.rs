@@ -65,6 +65,37 @@ pub const WORKGROUP_CREATE: &str = "bridge.workgroup_create";
 /// Retire a device of this host's workgroup.
 pub const DEVICE_RETIRE: &str = "bridge.device_retire";
 
+/// Set a device's election priority.
+pub const DEVICE_PRIORITY_SET: &str = "bridge.device_priority_set";
+
+/// A device's priority when its record names none. Mirrors the registry's own constant;
+/// this crate does not depend on the registry.
+pub const DEFAULT_PRIORITY: u8 = 1;
+
+fn default_priority() -> u8 {
+    DEFAULT_PRIORITY
+}
+
+/// Parameters of [`DEVICE_PRIORITY_SET`].
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct DevicePrioritySetParams {
+    /// The device's name or id.
+    pub selector: String,
+    /// `0..=255`. `0` takes the device out of the election.
+    pub priority: u8,
+}
+
+/// Result of [`DEVICE_PRIORITY_SET`].
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct DevicePrioritySetResult {
+    /// The device's id.
+    pub device_id: GrainId,
+    /// Its name.
+    pub name: String,
+    /// Its priority now.
+    pub priority: u8,
+}
+
 /// Parameters of [`INVITE`].
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct InviteParams {
@@ -204,6 +235,19 @@ pub struct UnregisterParams {
     pub workspace_id: GrainId,
 }
 
+/// Who the bridge elected for one workspace this host's app servers own.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct WorkspaceRoles {
+    /// The workspace.
+    pub workspace_id: GrainId,
+    /// The designated device, if any candidate exists.
+    #[serde(default)]
+    pub designated: Option<GrainId>,
+    /// The backup device, if a second candidate exists.
+    #[serde(default)]
+    pub backup: Option<GrainId>,
+}
+
 /// One device of the workgroup.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct PeerInfo {
@@ -215,6 +259,12 @@ pub struct PeerInfo {
     pub node_id: String,
     /// Whether the bridge currently holds a connection to it.
     pub connected: bool,
+    /// Its election priority, as its ledger record says.
+    #[serde(default = "default_priority")]
+    pub priority: u8,
+    /// Its availability tier, as its own Hello reports it (#190). `None` until measured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub availability: Option<u8>,
 }
 
 /// Result of [`PEERS`].
@@ -222,6 +272,17 @@ pub struct PeerInfo {
 pub struct PeersResult {
     /// Every non-retired device of the workgroup, this host included.
     pub peers: Vec<PeerInfo>,
+    /// The elected roles of every workspace this host's app servers own. Empty from a
+    /// bridge older than 2.1, which means a full mesh.
+    #[serde(default)]
+    pub roles: Vec<WorkspaceRoles>,
+}
+
+impl PeersResult {
+    /// The roles for `workspace_id`, if the bridge elected any.
+    pub fn roles_for(&self, workspace_id: GrainId) -> Option<&WorkspaceRoles> {
+        self.roles.iter().find(|r| r.workspace_id == workspace_id)
+    }
 }
 
 /// One row of the routing table.
@@ -473,5 +534,41 @@ mod tests {
         assert_eq!(round_trip(&r).name, "home");
         assert_eq!(WORKGROUP_CREATE, "bridge.workgroup_create");
         assert_eq!(DEVICE_RETIRE, "bridge.device_retire");
+    }
+
+    #[test]
+    fn a_2_0_peers_answer_reads_with_no_roles_and_default_priority() {
+        let id = GrainId::random();
+        let old = serde_json::json!({
+            "peers": [{ "device_id": id, "name": "desk", "node_id": "", "connected": true }]
+        });
+
+        let read: PeersResult = serde_json::from_value(old).unwrap();
+
+        assert!(read.roles.is_empty());
+        assert_eq!(read.peers[0].priority, DEFAULT_PRIORITY);
+        assert_eq!(read.peers[0].availability, None);
+        assert!(read.roles_for(id).is_none());
+    }
+
+    #[test]
+    fn roles_for_finds_the_workspace() {
+        let ws = GrainId::random();
+        let d = GrainId::random();
+        let result = PeersResult {
+            peers: Vec::new(),
+            roles: vec![WorkspaceRoles { workspace_id: ws, designated: Some(d), backup: None }],
+        };
+
+        assert_eq!(result.roles_for(ws).unwrap().designated, Some(d));
+    }
+
+    #[test]
+    fn device_priority_set_params_are_selector_and_priority() {
+        let p = DevicePrioritySetParams { selector: "desk".into(), priority: 0 };
+        assert_eq!(
+            serde_json::to_value(&p).unwrap(),
+            serde_json::json!({ "selector": "desk", "priority": 0 })
+        );
     }
 }

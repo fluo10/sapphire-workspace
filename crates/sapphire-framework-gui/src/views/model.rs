@@ -278,6 +278,8 @@ mod tests {
             name: "desk".into(),
             node_id: "aaaa".into(),
             connected: true,
+            priority: 1,
+            availability: None,
         };
         assert!(is_this_device(&p, "aaaa"));
         assert!(!is_this_device(&p, "bbbb"));

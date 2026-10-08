@@ -143,12 +143,16 @@ mod tests {
                         name: "desk".into(),
                         node_id: "aaaa".into(),
                         connected: true,
+                        priority: 1,
+                        availability: None,
                     },
                     PeerInfo {
                         device_id: GrainId::random(),
                         name: "laptop".into(),
                         node_id: "bbbb".into(),
                         connected: false,
+                        priority: 1,
+                        availability: None,
                     },
                 ],
                 ledger: vec![WorkgroupWorkspaceInfo {

@@ -359,6 +359,8 @@ fn read_status_report() -> Result<Option<StatusReport>> {
                     name: p.name.clone(),
                     node_id: p.node_id.clone(),
                     connected: p.connected,
+                    priority: sapphire_bridge_api::DEFAULT_PRIORITY,
+                    availability: None,
                 })
                 .collect(),
             status: StatusResult {

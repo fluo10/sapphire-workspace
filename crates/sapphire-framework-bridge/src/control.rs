@@ -327,6 +327,7 @@ fn peers(bridge: &Bridge) -> Result<PeersResult> {
     let workgroup = bridge.workgroup()?.ok_or(Error::NoWorkgroup)?;
     Ok(PeersResult {
         peers: peer_infos(bridge, &workgroup)?,
+        roles: Vec::new(),
     })
 }
 
@@ -348,6 +349,8 @@ pub(crate) fn peer_infos(bridge: &Bridge, workgroup: &Workgroup) -> Result<Vec<P
                 device_id: d.id,
                 name: d.name.clone(),
                 connected: !node_id.is_empty() && bridge.transport().is_connected(&node_id),
+                priority: d.priority,
+                availability: None,
                 node_id,
             }
         })

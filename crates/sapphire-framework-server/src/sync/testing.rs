@@ -93,7 +93,7 @@ impl StubBridge {
                         let peers_queries = Arc::clone(&peers_queries);
                         async move {
                             peers_queries.fetch_add(1, Ordering::Relaxed);
-                            serde_json::to_value(PeersResult { peers: vec![] })
+                            serde_json::to_value(PeersResult { peers: vec![], roles: vec![] })
                                 .map_err(|e| sapphire_ipc::RpcError::internal(e.to_string()))
                         }
                     }
