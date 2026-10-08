@@ -155,6 +155,7 @@ mod tests {
                         availability: None,
                     },
                 ],
+                peer_roles: vec![],
                 ledger: vec![WorkgroupWorkspaceInfo {
                     workspace_id: GrainId::random(),
                     app_name: "app".into(),

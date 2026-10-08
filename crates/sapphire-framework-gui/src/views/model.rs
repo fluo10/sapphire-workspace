@@ -3,8 +3,8 @@
 use std::path::{Path, PathBuf};
 
 use grain_id::GrainId;
-use sapphire_backend::protocol::WorkspaceListEntry;
-use sapphire_bridge_api::{PeerInfo, WorkgroupWorkspaceInfo};
+use sapphire_backend::protocol::{Topology, WorkspaceListEntry};
+use sapphire_bridge_api::{PeerInfo, WorkgroupWorkspaceInfo, WorkspaceRoles};
 
 /// A workspace row's state, as one badge.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -13,6 +13,8 @@ pub enum Badge {
     Syncing {
         /// Other devices.
         peers: usize,
+        /// Whether the workspace syncs through a designated device.
+        star: bool,
     },
     /// Synced but paused, for this reason.
     Paused(String),
@@ -28,9 +30,10 @@ impl Badge {
     /// The text shown in the row.
     pub fn label(&self) -> String {
         match self {
-            Badge::Syncing { peers } => format!(
-                "syncing · {peers} peer{}",
-                if *peers == 1 { "" } else { "s" }
+            Badge::Syncing { peers, star } => format!(
+                "syncing · {peers} peer{}{}",
+                if *peers == 1 { "" } else { "s" },
+                if *star { " · star" } else { "" }
             ),
             Badge::Paused(why) => format!("paused: {why}"),
             Badge::Error(e) => format!("error: {e}"),
@@ -53,6 +56,7 @@ pub fn badge(entry: &WorkspaceListEntry) -> Badge {
     } else {
         Badge::Syncing {
             peers: entry.sync.peers,
+            star: matches!(entry.sync.topology, Topology::Star { .. }),
         }
     }
 }
@@ -170,6 +174,18 @@ pub fn display_path(p: &Path) -> PathBuf {
     }
 }
 
+/// The roles `peer` holds in any workspace, each named once: what its device row shows.
+pub fn role_badges(peer: &PeerInfo, roles: &[WorkspaceRoles]) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    if roles.iter().any(|r| r.designated == Some(peer.device_id)) {
+        out.push("designated");
+    }
+    if roles.iter().any(|r| r.backup == Some(peer.device_id)) {
+        out.push("backup");
+    }
+    out
+}
+
 /// The first eight characters of an id, for a compact column.
 pub fn short_id(id: &GrainId) -> String {
     id.to_string().chars().take(8).collect()
@@ -183,7 +199,8 @@ pub fn display_name(entry: &WorkspaceListEntry) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sapphire_backend::protocol::SyncStatusResult;
+    use sapphire_backend::protocol::{SyncStatusResult, Topology};
+    use sapphire_bridge_api::WorkspaceRoles;
     use std::path::{Path, PathBuf};
 
     fn entry(
@@ -234,7 +251,10 @@ mod tests {
         );
         assert_eq!(
             badge(&entry("a", None, true, synced(3))),
-            Badge::Syncing { peers: 3 }
+            Badge::Syncing {
+                peers: 3,
+                star: false
+            }
         );
     }
 
@@ -379,5 +399,49 @@ mod tests {
             ..e
         };
         assert_eq!(display_name(&named), "Notes");
+    }
+
+    #[test]
+    fn role_badges_name_each_role_once() {
+        let me = GrainId::random();
+        let p = PeerInfo {
+            device_id: me,
+            name: "a".into(),
+            node_id: String::new(),
+            connected: true,
+            priority: 1,
+            availability: None,
+        };
+        let roles = vec![
+            WorkspaceRoles {
+                workspace_id: GrainId::random(),
+                designated: Some(me),
+                backup: None,
+            },
+            WorkspaceRoles {
+                workspace_id: GrainId::random(),
+                designated: Some(me),
+                backup: None,
+            },
+            WorkspaceRoles {
+                workspace_id: GrainId::random(),
+                designated: None,
+                backup: Some(me),
+            },
+        ];
+        assert_eq!(role_badges(&p, &roles), vec!["designated", "backup"]);
+    }
+
+    #[test]
+    fn a_star_workspace_says_so() {
+        let mut s = synced(2);
+        s.topology = Topology::Star {
+            designated: GrainId::random(),
+            backup: None,
+        };
+        assert_eq!(
+            badge(&entry("a", None, true, s)).label(),
+            "syncing · 2 peers · star"
+        );
     }
 }

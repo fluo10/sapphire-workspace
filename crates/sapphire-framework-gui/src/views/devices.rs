@@ -1,8 +1,11 @@
+use std::collections::HashMap;
+
 use egui::{Align, Color32, Layout};
+use grain_id::GrainId;
 
 use crate::client::{Command, CommandOutput};
 
-use super::model::{TTL_CHOICES, is_this_device, short_id, valid_name};
+use super::model::{TTL_CHOICES, is_this_device, role_badges, short_id, valid_name};
 use super::{ViewCtx, error_line, unavailable};
 
 /// Issue an invite: a name and a lifetime in, a ticket out.
@@ -129,6 +132,8 @@ enum Last {
 pub struct DeviceList {
     invite: InviteDialog,
     confirm: Option<RetireConfirm>,
+    /// Priorities being edited, by device; dropped once the bridge reports the same value.
+    priority_edit: HashMap<GrainId, u8>,
     error: Option<String>,
     last: Option<Last>,
 }
@@ -166,6 +171,13 @@ impl DeviceList {
             ui.label("This host has not joined a workgroup yet. See the Workgroup screen.");
             return None;
         }
+        // Follow changes made elsewhere: an edit the bridge now agrees with is no longer an edit.
+        self.priority_edit.retain(|id, p| {
+            bridge
+                .peers
+                .iter()
+                .any(|x| x.device_id == *id && x.priority != *p)
+        });
         egui::ScrollArea::vertical().show(ui, |ui| {
             for peer in &bridge.peers {
                 egui::Frame::group(ui.style()).show(ui, |ui| {
@@ -178,20 +190,48 @@ impl DeviceList {
                         ui.colored_label(colour, dot);
                         ui.strong(&peer.name);
                         ui.small(short_id(&peer.device_id));
-                        if is_this_device(peer, &bridge.status.node_id) {
+                        for role in role_badges(peer, &bridge.peer_roles) {
+                            ui.small(format!("[{role}]"));
+                        }
+                        let this = is_this_device(peer, &bridge.status.node_id);
+                        if this {
                             ui.small("(this device)");
-                            return;
                         }
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if ui
-                                .add_enabled(!cx.busy, egui::Button::new("Retire"))
-                                .clicked()
+                            if !this
+                                && ui
+                                    .add_enabled(!cx.busy, egui::Button::new("Retire"))
+                                    .clicked()
                             {
                                 self.confirm = Some(RetireConfirm {
                                     name: peer.name.clone(),
                                     ..RetireConfirm::default()
                                 });
                             }
+                            let mut p = self
+                                .priority_edit
+                                .get(&peer.device_id)
+                                .copied()
+                                .unwrap_or(peer.priority);
+                            if ui
+                                .add_enabled(
+                                    !cx.busy && p != peer.priority,
+                                    egui::Button::new("Set"),
+                                )
+                                .clicked()
+                            {
+                                out = Some(Command::DevicePrioritySet {
+                                    selector: peer.name.clone(),
+                                    priority: p,
+                                });
+                            }
+                            ui.add_enabled(
+                                !cx.busy,
+                                egui::DragValue::new(&mut p)
+                                    .range(0..=255)
+                                    .prefix("priority "),
+                            );
+                            self.priority_edit.insert(peer.device_id, p);
                         });
                     });
                 });
