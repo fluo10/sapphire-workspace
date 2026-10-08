@@ -147,6 +147,16 @@ fn is_empty(db: &Database) -> Result<bool> {
     Ok(t.len().map_err(redb_err)? == 0)
 }
 
+/// The snippet for an FTS hit: the generator's fragment when it has one, else
+/// the file's leading text.
+fn pick_snippet(fragment: &str, text: &str) -> String {
+    if fragment.trim().is_empty() {
+        leading(text)
+    } else {
+        collapse_and_cut(fragment)
+    }
+}
+
 // ── tantivy schema ─────────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy)]
@@ -214,6 +224,7 @@ impl RedbStore {
                 }
                 db
             }
+            // A newer schema version is wiped too, on purpose: the store is only a cache.
             _ => {
                 // A cache written in an older shape: start over, as for UpgradeRequired.
                 drop(db);
@@ -478,6 +489,9 @@ impl RetrieveStore for RedbStore {
         let mut results: Vec<FileSearchResult> = Vec::new();
         // BM25: higher = better; tantivy already returns hits in that order.
         for (score, addr) in hits {
+            if results.len() == q.limit {
+                break;
+            }
             let d: TantivyDocument = searcher.doc(addr).map_err(tantivy_err)?;
             let Some(doc_id) = d.get_first(self.fields.doc_id).and_then(|v| v.as_i64()) else {
                 continue;
@@ -493,12 +507,7 @@ impl RetrieveStore for RedbStore {
             {
                 continue;
             }
-            let fragment = generator.snippet(&rec.text).fragment().to_owned();
-            let snippet = if fragment.trim().is_empty() {
-                leading(&rec.text)
-            } else {
-                collapse_and_cut(&fragment)
-            };
+            let snippet = pick_snippet(generator.snippet(&rec.text).fragment(), &rec.text);
             results.push(FileSearchResult {
                 id: doc_id,
                 path: rec.path,
@@ -506,7 +515,6 @@ impl RetrieveStore for RedbStore {
                 snippet,
             });
         }
-        results.truncate(q.limit);
         Ok(results)
     }
 
@@ -546,6 +554,9 @@ impl RetrieveStore for RedbStore {
         let prefix = q.path_prefix.map(|p| p.to_string_lossy().to_string());
         let mut results: Vec<FileSearchResult> = Vec::new();
         for (dist, doc_id) in scored {
+            if results.len() == q.limit {
+                break;
+            }
             let Some(rec) = self.get_doc(doc_id)? else {
                 continue;
             };
@@ -561,7 +572,6 @@ impl RetrieveStore for RedbStore {
                 snippet: leading(&rec.text),
             });
         }
-        results.truncate(q.limit);
         Ok(results)
     }
 }
@@ -797,6 +807,16 @@ mod tests {
     }
 
     #[test]
+    fn pick_snippet_uses_the_fragment_else_the_leading_text() {
+        assert_eq!(pick_snippet("", "leading  text\nhere"), "leading text here");
+        assert_eq!(pick_snippet("   ", "leading text"), "leading text");
+        assert_eq!(
+            pick_snippet("about\n\nbananas", "leading text"),
+            "about bananas"
+        );
+    }
+
+    #[test]
     fn an_empty_store_from_the_previous_schema_still_opens() {
         // The previous build created its tantivy index (with a `line_start`
         // field) on first open, even when no document was ever indexed.
@@ -822,7 +842,7 @@ mod tests {
     }
 
     #[test]
-    fn a_snippetless_fts_match_falls_back_to_the_leading_text() {
+    fn a_match_deep_in_a_long_file_still_gets_a_snippet() {
         let dir = tempfile::tempdir().unwrap();
         let store = RedbStore::open(dir.path(), None).unwrap();
         let body = format!("{} needle", "x ".repeat(2_000));
