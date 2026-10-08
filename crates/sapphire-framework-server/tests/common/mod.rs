@@ -495,13 +495,29 @@ async fn wait_until_listening(endpoint: &Endpoint, what: &str) {
 // ── live-propagation fixtures ───────────────────────────────────────────────
 
 /// Enable sync on `host`'s workspace, the way a client would.
-///
-/// After [`Host::restart`] the previous app server's session tasks can still be winding
-/// down on this test's runtime, holding the replica store's redb lock for a moment longer —
-/// a real process exit would release it at once (#141). A failed open leaves nothing
-/// behind, so "Database already open" is waited out against a deadline; any other error
-/// fails at once.
 pub async fn enable_sync(host: &Host) {
+    let _: proto::SyncEnableResult = host
+        .client
+        .call(
+            proto::SYNC_ENABLE,
+            proto::WsParams {
+                ws: host.ws.clone(),
+            },
+        )
+        .await
+        .unwrap();
+}
+
+/// [`enable_sync`] for a host that has just come back through [`Host::restart`].
+///
+/// The previous app server's session tasks can still be winding down on this test's
+/// runtime, holding the replica store's redb lock for a moment longer — a real process exit
+/// would release it at once (#141). A failed open leaves nothing behind, so "Database
+/// already open" is waited out against a deadline; any other error fails at once.
+///
+/// Only for restarts: on a first open the same error would be a regression of the
+/// first-open race the app server guards against, and must fail the test.
+pub async fn enable_sync_after_restart(host: &Host) {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let answer: std::result::Result<proto::SyncEnableResult, _> = host
