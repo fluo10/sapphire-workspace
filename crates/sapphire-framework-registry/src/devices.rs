@@ -37,6 +37,10 @@ const HEADER: &str = "\
 /// The priority a record has when it names none: every device takes part in the election.
 pub const DEFAULT_PRIORITY: u8 = 1;
 
+fn default_priority() -> u8 {
+    DEFAULT_PRIORITY
+}
+
 /// One device.
 ///
 /// Serializable because a whole record travels over the wire: the inviter hands the joiner
@@ -58,6 +62,7 @@ pub struct Device {
     pub description: Option<String>,
     /// How strongly this device is preferred as a workspace's designated device. `0` opts
     /// it out of the election entirely.
+    #[serde(default = "default_priority")]
     pub priority: u8,
     /// When the record was created. A hand-written record without it is stamped
     /// with the moment it was first loaded.
@@ -591,6 +596,12 @@ mod tests {
         assert_eq!(updated.priority, 0);
         let reloaded = Devices::open(&path).unwrap();
         assert_eq!(reloaded.entries()[0].priority, 0);
+
+        // Set it back to the default and verify the file no longer contains priority =
+        let back_to_default = devices.set_priority("desk", DEFAULT_PRIORITY).unwrap();
+        assert_eq!(back_to_default.priority, DEFAULT_PRIORITY);
+        let text_after = std::fs::read_to_string(path.join(back_to_default.file_name())).unwrap();
+        assert!(!text_after.contains("priority ="), "the default should not be written again: {text_after}");
     }
 
     #[test]
@@ -603,6 +614,24 @@ mod tests {
         let err = devices.set_priority("gone", 5).unwrap_err();
 
         assert!(err.to_string().contains("retired"), "{err}");
+    }
+
+    #[test]
+    fn a_device_deserialized_without_priority_gets_the_default() {
+        // This simulates receiving a Device from a peer running an older version
+        // that doesn't have the priority field. We test the RawDevice deserialization
+        // since that's what's read from files, and then verify the Device is created
+        // with the default priority.
+        let raw_toml = "name = \"laptop\"\ncreated_at = \"2026-01-01T00:00:00Z\"";
+        let raw: RawDevice = toml::from_str(raw_toml)
+            .expect("deserialize RawDevice without priority field");
+
+        // RawDevice.priority should be None when not provided
+        assert!(raw.priority.is_none(), "RawDevice priority should be None when missing");
+
+        // When constructing a Device from this RawDevice, the default should be used
+        let priority = raw.priority.unwrap_or(DEFAULT_PRIORITY);
+        assert_eq!(priority, DEFAULT_PRIORITY, "missing priority should use default");
     }
 }
 
