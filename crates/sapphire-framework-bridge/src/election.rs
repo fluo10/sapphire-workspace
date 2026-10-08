@@ -5,8 +5,6 @@
 //! accepted by design (spec decision 2): the work the designated device does is idempotent.
 //! Claims make the election non-preemptive — a device that holds a role keeps it while it
 //! is heard, whoever turns up.
-// Used from Task 5 (the bridge wiring); unused outside tests until then.
-#![cfg_attr(not(test), allow(dead_code))]
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};

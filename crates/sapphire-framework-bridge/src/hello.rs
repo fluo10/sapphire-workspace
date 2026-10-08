@@ -1,6 +1,3 @@
-// Used from Task 5 (the bridge wiring); unused outside tests until then.
-#![cfg_attr(not(test), allow(dead_code))]
-
 //! Hello: what each bridge tells its peers about itself, and the loop that keeps it said.
 
 use std::collections::{HashMap, HashSet};
@@ -12,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::watch;
 
+use crate::Bridge;
+use crate::election::{Elector, Own};
 use crate::peer::BoxedStream;
 
 /// The ALPN Hello streams speak.
@@ -188,6 +187,98 @@ pub(crate) async fn exchange(
         _ = reader => {}
         _ = writer => {}
     }
+}
+
+/// Keep Hello links to every peer, and re-run the election, every interval.
+///
+/// Only the lower device id of a pair dials, as everywhere else. Never fails: a bridge with
+/// no workgroup yet simply has nobody to greet, and asks again next tick.
+///
+/// Each tick publishes this host's fresh Hello before it dials, so a new link always has
+/// something to say at once (see [`exchange`]).
+pub(crate) async fn run(bridge: Arc<Bridge>) -> crate::Result<()> {
+    let timing = bridge.hello_timing;
+    let mut tick = tokio::time::interval(timing.interval);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut elector: Option<Elector> = None;
+    loop {
+        tick.tick().await;
+        let Ok(Some(workgroup)) = bridge.workgroup() else {
+            continue;
+        };
+        let Ok(me) = workgroup.this_device(&bridge.transport().node_id()) else {
+            continue;
+        };
+        let elector = elector.get_or_insert_with(|| Elector::new(me.id, timing.dead));
+
+        let hosting: Vec<GrainId> = bridge
+            .route_entries()
+            .into_iter()
+            .filter(|r| r.app_name != crate::wgsync::WORKSPACE_APP_NAME)
+            .filter(|r| bridge.owners().is_online(&r.app_name))
+            .map(|r| r.workspace_id)
+            .collect();
+        let own = Own {
+            priority: me.priority,
+            availability: None,
+            hosting,
+        };
+        let now = Instant::now();
+        let heard = bridge.neighbours.reachable(now, timing.dead);
+        let (hello, roles) = elector.step(now, &own, &heard);
+        *bridge.roles.lock().expect("roles") = roles;
+        bridge.hello_tx.send_if_modified(|current| {
+            let changed = current.as_ref() != Some(&hello);
+            *current = Some(hello);
+            changed
+        });
+
+        // A dialer must not open a link before it has a Hello to send: a silent opener
+        // stalls the peer's whole accept loop (see `exchange`).
+        if bridge.hello_tx.borrow().is_none() {
+            continue;
+        }
+        let Ok(devices) = workgroup.devices() else {
+            continue;
+        };
+        for device in devices.entries() {
+            if device.id <= me.id || device.is_retired() {
+                continue;
+            }
+            let Some(node_id) = device.node_id.clone() else {
+                continue;
+            };
+            if !bridge.neighbours.begin_link(device.id) {
+                continue;
+            }
+            let bridge = Arc::clone(&bridge);
+            let peer = device.id;
+            tokio::spawn(async move {
+                match bridge.transport().open_hello(&node_id).await {
+                    Ok(stream) => {
+                        exchange(
+                            stream,
+                            peer,
+                            bridge.hello_tx.subscribe(),
+                            Arc::clone(&bridge.neighbours),
+                            bridge.hello_timing,
+                        )
+                        .await;
+                    }
+                    Err(err) => tracing::debug!(%peer, "no hello link: {err}"),
+                }
+                bridge.neighbours.end_link(peer);
+            });
+        }
+    }
+}
+
+/// Answer an inbound Hello stream from an authorized device.
+pub(crate) fn serve_inbound(bridge: &Arc<Bridge>, peer: GrainId, stream: BoxedStream) {
+    let rx = bridge.hello_tx.subscribe();
+    let neighbours = Arc::clone(&bridge.neighbours);
+    let timing = bridge.hello_timing;
+    tokio::spawn(exchange(stream, peer, rx, neighbours, timing));
 }
 
 #[cfg(test)]

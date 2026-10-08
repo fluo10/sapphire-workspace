@@ -375,9 +375,16 @@ pub(crate) async fn inbound(bridge: Arc<Bridge>, net: NetConfig) -> Result<()> {
                 continue;
             }
             Inbound::Workspace(from, workspace_id, stream) => (from, workspace_id, stream),
-            // Task 5 routes Hello streams to the exchange; until then they are hung up on.
-            Inbound::Hello(_from, stream) => {
-                drop(stream);
+            Inbound::Hello(from, stream) => {
+                // Authorized exactly like a workspace stream: a stranger learns nothing, and
+                // a retired device is not heard.
+                match bridge.workgroup()?.map(|wg| wg.authorize(&from)) {
+                    Some(Ok(device)) => crate::hello::serve_inbound(&bridge, device.id, stream),
+                    _ => {
+                        tracing::debug!(peer = %from, "hung up on a hello stream");
+                        drop(stream);
+                    }
+                }
                 continue;
             }
         };
