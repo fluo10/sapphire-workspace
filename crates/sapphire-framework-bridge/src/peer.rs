@@ -79,6 +79,10 @@ pub trait PeerTransport: Send + Sync + 'static {
 
     /// Open a Hello stream to `node_id`.
     ///
+    /// The caller must not open one before its Hello watch holds `Some(Hello)` and must
+    /// write at once: on iroh a QUIC stream is invisible to the acceptor until the opener
+    /// writes, and the acceptor's accept loop is serial.
+    ///
     /// Defaults to an error, so a transport written before the Hello protocol still
     /// compiles. Its bridge then simply hears nobody, and nobody's election counts it.
     async fn open_hello(&self, node_id: &str) -> Result<BoxedStream> {

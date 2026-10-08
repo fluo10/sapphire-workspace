@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use grain_id::GrainId;
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::watch;
 
 use crate::peer::BoxedStream;
@@ -96,12 +96,29 @@ pub(crate) struct Hello {
     pub backup: Vec<GrainId>,
 }
 
+/// The longest Hello line read; a longer one is unreadable and ends the link.
+const MAX_HELLO_LINE: usize = 16 * 1024;
+
+/// Forgets a peer when dropped, so a cancelled or aborted [`exchange`] still does.
+struct Forget<'a>(&'a Neighbours, GrainId);
+
+impl Drop for Forget<'_> {
+    fn drop(&mut self) {
+        self.0.forget(self.1);
+    }
+}
+
 /// Speak Hello with `peer` over `stream` until either side goes away.
 ///
-/// Sends this host's current Hello every `interval` and whenever it changes. Records each
-/// Hello read, provided it names `peer`. Anything unreadable, or a Hello that names a
-/// different device, ends this link and only this link. The peer is forgotten when the
-/// link ends, so it stops counting at once instead of after `dead`.
+/// Sends this host's current Hello on open, then every `interval` and whenever it changes.
+/// Records each Hello read, provided it names `peer`. Anything unreadable (or longer than
+/// 16 KiB), or a Hello that names a different device, ends this link and only this link.
+/// The peer is forgotten when the link ends, or when this future is dropped, so it stops
+/// counting at once instead of after `dead`.
+///
+/// A dialer must not open a Hello stream before `local` holds `Some(Hello)`: on iroh a
+/// QUIC stream is invisible to the acceptor's `accept_bi` until the opener writes, and the
+/// accept loop is serial, so a dialer that stays silent stalls every later connection.
 pub(crate) async fn exchange(
     stream: BoxedStream,
     peer: GrainId,
@@ -109,29 +126,46 @@ pub(crate) async fn exchange(
     neighbours: Arc<Neighbours>,
     timing: HelloTiming,
 ) {
+    let _forget = Forget(&neighbours, peer);
     let (read, mut write) = tokio::io::split(stream);
     let reader = async {
-        let mut lines = BufReader::new(read).lines();
+        let mut reader = BufReader::new(read);
+        let mut buf = Vec::new();
         loop {
-            match lines.next_line().await {
-                Ok(Some(line)) => match serde_json::from_str::<Hello>(&line) {
-                    Ok(hello) if hello.device_id == peer => neighbours.heard(hello, Instant::now()),
-                    Ok(hello) => {
-                        tracing::debug!(%peer, claimed = %hello.device_id, "a Hello named another device");
-                        return;
-                    }
-                    Err(err) => {
-                        tracing::debug!(%peer, "an unreadable Hello: {err}");
-                        return;
-                    }
-                },
-                Ok(None) | Err(_) => return,
+            buf.clear();
+            // One byte more than the cap, so an over-long line is told from a full one.
+            let n = match (&mut reader)
+                .take(MAX_HELLO_LINE as u64 + 1)
+                .read_until(b'\n', &mut buf)
+                .await
+            {
+                Ok(n) => n,
+                Err(_) => return,
+            };
+            if n == 0 || buf.last() != Some(&b'\n') {
+                if n > MAX_HELLO_LINE {
+                    tracing::debug!(%peer, "a Hello line is too long");
+                }
+                return;
+            }
+            match serde_json::from_slice::<Hello>(&buf) {
+                Ok(hello) if hello.device_id == peer => neighbours.heard(hello, Instant::now()),
+                Ok(hello) => {
+                    tracing::debug!(%peer, claimed = %hello.device_id, "a Hello named another device");
+                    return;
+                }
+                Err(err) => {
+                    tracing::debug!(%peer, "an unreadable Hello: {err}");
+                    return;
+                }
             }
         }
     };
     let writer = async {
         let mut tick = tokio::time::interval(timing.interval);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // The first tick is immediate; the loop below already sends on open.
+        tick.tick().await;
         loop {
             let current = local.borrow_and_update().clone();
             if let Some(hello) = current {
@@ -154,7 +188,6 @@ pub(crate) async fn exchange(
         _ = reader => {}
         _ = writer => {}
     }
-    neighbours.forget(peer);
 }
 
 #[cfg(test)]
@@ -312,5 +345,57 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(net.frames_sent("node-a"), 0);
+    }
+
+    #[tokio::test]
+    async fn an_aborted_exchange_forgets_its_peer() {
+        let net = LoopbackNetwork::new();
+        let a = net.transport("node-a");
+        let b = net.transport("node-b");
+        let (ida, idb) = (GrainId::random(), GrainId::random());
+        let (na, nb) = (
+            Arc::new(Neighbours::default()),
+            Arc::new(Neighbours::default()),
+        );
+        let (_ta, ra) = watch::channel(Some(hello(ida)));
+        let (_tb, rb) = watch::channel(Some(hello(idb)));
+        let out = a.open_hello("node-b").await.unwrap();
+        let Inbound::Hello(_, inb) = b.accept().await.unwrap() else {
+            panic!()
+        };
+        let _ja = tokio::spawn(exchange(out, idb, ra, Arc::clone(&na), timing()));
+        let jb = tokio::spawn(exchange(inb, ida, rb, Arc::clone(&nb), timing()));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while nb.get(ida).is_none() {
+            assert!(Instant::now() < deadline, "the Hello never arrived");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        jb.abort();
+        let _ = jb.await;
+        assert!(
+            nb.get(ida).is_none(),
+            "an aborted exchange forgets its peer"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_overlong_hello_line_ends_the_link() {
+        use tokio::io::AsyncWriteExt;
+        let net = LoopbackNetwork::new();
+        let a = net.transport("node-a");
+        let b = net.transport("node-b");
+        let nb = Arc::new(Neighbours::default());
+        let (_tb, rb) = watch::channel(Some(hello(GrainId::random())));
+        let mut out = a.open_hello("node-b").await.unwrap();
+        let Inbound::Hello(_, inb) = b.accept().await.unwrap() else {
+            panic!()
+        };
+        let job = tokio::spawn(exchange(inb, GrainId::random(), rb, nb, timing()));
+        let long = vec![b'x'; MAX_HELLO_LINE + 100];
+        let _ = out.write_all(&long).await;
+        tokio::time::timeout(Duration::from_secs(5), job)
+            .await
+            .unwrap()
+            .unwrap();
     }
 }

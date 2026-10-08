@@ -384,19 +384,10 @@ pub async fn sync_workgroup(host: &Host, joiner: &BridgeDir, net: &LoopbackNetwo
     let joiner_session = tokio::spawn(async move {
         // The inviter dials the workgroup's own workspace, as a bridge would; a pairing
         // attempt would be someone else's business.
-        let stream = match transport
-            .accept()
+        let (_, _, stream) = transport
+            .accept_workspace()
             .await
-            .expect("the inviter dialed the joiner")
-        {
-            sapphire_framework_bridge::Inbound::Workspace(_, _, stream) => stream,
-            sapphire_framework_bridge::Inbound::Pairing(..) => {
-                panic!("the inviter dialed a pairing, not the workgroup workspace")
-            }
-            sapphire_framework_bridge::Inbound::Hello(..) => {
-                panic!("the inviter dialed a hello stream, not the workgroup workspace")
-            }
-        };
+            .expect("the inviter dialed the joiner");
         replica.session(stream).await
     });
 
