@@ -13,7 +13,9 @@ mod command;
 mod control;
 mod data;
 mod dir;
+mod election;
 mod error;
+mod hello;
 mod invite;
 #[cfg(feature = "node")]
 mod iroh;
