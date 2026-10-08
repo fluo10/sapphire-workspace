@@ -15,11 +15,12 @@ pub(crate) enum Link {
     Skip,
 }
 
-/// The link rule. With no designated or backup device for the workspace, the mesh rule
-/// applies unchanged. Otherwise only a pair with at least one hub in it links.
+/// The link rule. With no designated device for the workspace, the mesh rule applies
+/// unchanged, as [`topology`] reports. Otherwise only a pair with at least one hub (the
+/// designated or the backup device) in it links.
 pub(crate) fn link(me: GrainId, peer: GrainId, roles: Option<&WorkspaceRoles>) -> Link {
     let hub = |d: GrainId| roles.is_some_and(|r| r.designated == Some(d) || r.backup == Some(d));
-    let star = roles.is_some_and(|r| r.designated.is_some() || r.backup.is_some());
+    let star = roles.is_some_and(|r| r.designated.is_some());
     if star && !hub(me) && !hub(peer) {
         Link::Skip
     } else if me < peer {
@@ -101,6 +102,103 @@ mod tests {
         let id = sorted(3);
         let r = roles(GrainId::random(), Some(id[2]), None);
         assert_ne!(link(id[2], id[0], Some(&r)), Link::Skip);
+    }
+
+    #[test]
+    fn backup_only_roles_are_the_mesh() {
+        let id = sorted(3);
+        let r = roles(GrainId::random(), None, Some(id[2]));
+        assert_eq!(link(id[0], id[1], Some(&r)), Link::Dial);
+        assert_eq!(link(id[1], id[0], Some(&r)), Link::Await);
+        assert_eq!(topology(Some(&r)), proto::Topology::Mesh);
+    }
+
+    /// Every pair of me / peer drawn from designated, backup and two non-hubs, under every
+    /// assignment of ids to those roles, so both id orders are covered for each pair.
+    #[test]
+    fn link_covers_every_role_pair_in_both_id_orders() {
+        // Role slots: 0 designated, 1 backup, 2 and 3 neither.
+        let perms: Vec<[usize; 4]> = {
+            let mut out = Vec::new();
+            for a in 0..4 {
+                for b in 0..4 {
+                    for c in 0..4 {
+                        for d in 0..4 {
+                            let p = [a, b, c, d];
+                            let mut s = p;
+                            s.sort();
+                            if s == [0, 1, 2, 3] {
+                                out.push(p);
+                            }
+                        }
+                    }
+                }
+            }
+            out
+        };
+        assert_eq!(perms.len(), 24);
+        let ids = sorted(4);
+        let mut seen = Vec::new();
+        for perm in perms {
+            // `perm[slot]` is the rank of the id that slot gets.
+            let id = |slot: usize| ids[perm[slot]];
+            let r = roles(GrainId::random(), Some(id(0)), Some(id(1)));
+            for me in 0..4 {
+                for peer in 0..4 {
+                    if me == peer {
+                        continue;
+                    }
+                    let expected = if me >= 2 && peer >= 2 {
+                        Link::Skip
+                    } else if id(me) < id(peer) {
+                        Link::Dial
+                    } else {
+                        Link::Await
+                    };
+                    assert_eq!(
+                        link(id(me), id(peer), Some(&r)),
+                        expected,
+                        "me slot {me}, peer slot {peer}, ranks {perm:?}"
+                    );
+                    seen.push((me.min(2), peer.min(2), expected));
+                }
+            }
+        }
+        // Each (me role, peer role) with a hub in it was seen as both Dial and Await, and
+        // the non-hub pair only as Skip.
+        for me in 0..3 {
+            for peer in 0..3 {
+                if me == peer && me < 2 {
+                    continue;
+                }
+                if me == 2 && peer == 2 {
+                    assert!(seen.contains(&(2, 2, Link::Skip)));
+                } else {
+                    assert!(
+                        seen.contains(&(me, peer, Link::Dial)),
+                        "{me} -> {peer} Dial"
+                    );
+                    assert!(
+                        seen.contains(&(me, peer, Link::Await)),
+                        "{me} -> {peer} Await"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn named_cases_against_the_hubs() {
+        let id = sorted(4);
+        // Non-hub against the backup, both orders.
+        let r = roles(GrainId::random(), Some(id[3]), Some(id[1]));
+        assert_eq!(link(id[0], id[1], Some(&r)), Link::Dial);
+        assert_eq!(link(id[2], id[1], Some(&r)), Link::Await);
+        // A non-hub whose id is greater than the designated's awaits it.
+        let r = roles(GrainId::random(), Some(id[0]), Some(id[1]));
+        assert_eq!(link(id[3], id[0], Some(&r)), Link::Await);
+        // A designated whose id is lower than a non-hub's dials it.
+        assert_eq!(link(id[0], id[3], Some(&r)), Link::Dial);
     }
 
     #[test]

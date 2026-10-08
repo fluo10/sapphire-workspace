@@ -1032,8 +1032,11 @@ impl SyncRuntime {
     }
 
     /// Whether the last roles the bridge reported say this pair does not link.
+    ///
+    /// Reads the cached device id only: asking the bridge here would register with an empty
+    /// workspace list, racing `enable`'s registration. `false` (accept) when it is unknown.
     async fn should_skip(&self, workspace_id: GrainId, peer: GrainId) -> bool {
-        let Ok(me) = self.device_id().await else {
+        let Some(&me) = self.device_id.get() else {
             return false;
         };
         let cached = self.last_peers.lock().await;
@@ -1042,9 +1045,12 @@ impl SyncRuntime {
     }
 
     /// Whether this host is `workspace_id`'s designated device, by the last roles the
-    /// bridge reported. `false` when the bridge has not answered yet.
+    /// bridge reported. `false` when the bridge has not answered yet, or when this host's
+    /// device id is not known yet (no workspace was enabled). Reads the cached id only:
+    /// asking the bridge here would register with an empty workspace list, racing
+    /// `enable`'s registration.
     pub async fn is_designated(&self, workspace_id: GrainId) -> bool {
-        let Ok(me) = self.device_id().await else {
+        let Some(&me) = self.device_id.get() else {
             return false;
         };
         let cached = self.last_peers.lock().await;
