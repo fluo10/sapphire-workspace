@@ -17,7 +17,9 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Changed
 
-- With two or more devices at priority >= 1 (the default), a workspace syncs as a star around its designated and backup devices. Set every device's priority to 0 to keep the full mesh.
+- A workspace syncs as a star as soon as a designated device is elected, around its designated and backup devices. One candidate (a device at priority >= 1, the default) is enough: the devices at priority 0 then sync only through it. Set every device's priority to 0 to keep the full mesh.
+- Until availability (#190) exists, ties between equal priorities fall to the device id, which is arbitrary. Raise the priority of your always-on machine so that it is the one elected.
+- Raising a priority does not move a role that is already held: the election is non-preemptive, so the new priority counts only when the role is next free.
 - `workspace list` lists this host's workspaces from the running server.
 - `StatusReport` / `StatusRow` live in `backend::protocol` (still re-exported from the server crate).
 - `sapphire-framework-bridge-api` is versioned on its own (2.0.0; its major is the control-plane `API_VERSION`), no longer `version.workspace`.

@@ -110,6 +110,7 @@ pub enum DeviceCommand {
         selector: String,
     },
     /// Show or set a device's election priority (0-255; 0 = never designated or backup).
+    /// The election is non-preemptive: raising a priority does not move a role already held.
     Priority {
         /// The device's name or id.
         selector: String,
