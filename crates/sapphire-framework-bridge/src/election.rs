@@ -322,14 +322,17 @@ mod tests {
 
     #[test]
     fn the_backup_takes_over_when_the_designated_vanishes() {
-        let id = ids(2);
-        let (b_id, a_id) = (id[0], id[1]);
+        let id = ids(3);
+        let (b_id, c_id, a_id) = (id[0], id[1], id[2]);
         let ws = GrainId::random();
         let t0 = Instant::now();
         let mut a = Elector::new(a_id, Duration::ZERO);
         let mut b = Elector::new(b_id, Duration::ZERO);
-        let own_a = Own { priority: 9, availability: None, hosting: vec![ws] };
-        let own_b = Own { priority: 1, availability: None, hosting: vec![ws] };
+        let mut c = Elector::new(c_id, Duration::ZERO);
+        let own = |priority| Own { priority, availability: None, hosting: vec![ws] };
+        let (own_a, own_b, own_c) = (own(9), own(1), own(5));
+
+        // A and B converge first: A designated, B backup.
         let mut a_hello = hello(a_id, 9, ws);
         let mut b_hello = hello(b_id, 1, ws);
         for _ in 0..4 {
@@ -338,7 +341,20 @@ mod tests {
         }
         assert_eq!(a_hello.designated, vec![ws]);
         assert_eq!(b_hello.backup, vec![ws]);
-        let (out, roles) = b.step(t0, &own_b, &[]);
+
+        // C outranks B but arrives late: B's claim stands, C gets no role.
+        let mut c_hello = hello(c_id, 5, ws);
+        for _ in 0..3 {
+            c_hello = c.step(t0, &own_c, &[a_hello.clone(), b_hello.clone()]).0;
+            a_hello = a.step(t0, &own_a, &[b_hello.clone(), c_hello.clone()]).0;
+            b_hello = b.step(t0, &own_b, &[a_hello.clone(), c_hello.clone()]).0;
+        }
+        assert_eq!(a_hello.designated, vec![ws]);
+        assert_eq!(b_hello.backup, vec![ws]);
+        assert!(c_hello.designated.is_empty() && c_hello.backup.is_empty());
+
+        // A vanishes: B takes over although C outranks it.
+        let (out, roles) = b.step(t0, &own_b, &[c_hello]);
         assert_eq!(roles[&ws].designated, Some(b_id));
         assert_eq!(out.designated, vec![ws]);
     }
