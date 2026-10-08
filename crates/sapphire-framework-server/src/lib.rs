@@ -241,6 +241,12 @@ impl AppServer {
             managed_by: ManagedBy::Service,
         };
 
+        // The app's log file, held for as long as this server serves: the guard's
+        // drop flushes the writer thread, so the last lines of a clean shutdown land
+        // in the file. The subscriber itself was installed by `ctx.init`; this is what
+        // routes the file layer at `<data dir>/logs/`.
+        let _log = sapphire_workspace::logging::install(ctx)?;
+
         let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
 
         let mut router = subscribe_method(
@@ -658,6 +664,41 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+    }
+
+    /// A running server writes its log file: the framework's `logging` module
+    /// routes the app's log to `<data dir>/logs/app.log`, and `run()` holds the
+    /// guard for as long as it serves. The event is emitted by this test — the
+    /// subscriber and the file layer are the process's, installed by `CTX.init`
+    /// and `run` — so what lands in the file is exactly what a journald-less
+    /// host would otherwise never see.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_running_server_writes_its_log_file() {
+        let f = prepared();
+        let endpoint = f.endpoint.clone();
+        let server = AppServer::new(&CTX, "0.0.0").endpoint(endpoint.clone());
+        let handle = tokio::spawn(async move { server.run().await });
+        wait_until_listening(&endpoint).await;
+
+        tracing::info!("the server is serving, and this line belongs in its log");
+
+        let (client, _) = sapphire_ipc::connect_or_absent(&endpoint, CTX.app_name, client_info())
+            .await
+            .unwrap()
+            .expect("the server is listening");
+        let _: serde_json::Value = client
+            .call(sapphire_ipc::SHUTDOWN_METHOD, serde_json::json!({}))
+            .await
+            .unwrap();
+        // The guard flushes as `run` unwinds; awaiting it is what makes the
+        // file complete before it is read.
+        handle.await.unwrap().unwrap();
+
+        let text = std::fs::read_to_string(CTX.log_dir().join("app.log")).unwrap();
+        assert!(
+            text.contains("the server is serving, and this line belongs in its log"),
+            "{text}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
