@@ -172,7 +172,10 @@ fn embed_openai(config: &EmbedderConfig, texts: &[&str]) -> Result<Vec<Vec<f32>>
         .unwrap_or("https://api.openai.com");
     let url = format!("{base_url}/v1/embeddings");
 
-    let capped: Vec<&str> = texts.iter().map(|t| cap_chars(t, MAX_REST_EMBED_CHARS)).collect();
+    let capped: Vec<&str> = texts
+        .iter()
+        .map(|t| cap_chars(t, MAX_REST_EMBED_CHARS))
+        .collect();
 
     let body = serde_json::json!({
         "model": config.model,
@@ -219,7 +222,10 @@ fn embed_ollama(config: &EmbedderConfig, texts: &[&str]) -> Result<Vec<Vec<f32>>
         .unwrap_or("http://localhost:11434");
     let url = format!("{base_url}/api/embed");
 
-    let capped: Vec<&str> = texts.iter().map(|t| cap_chars(t, MAX_REST_EMBED_CHARS)).collect();
+    let capped: Vec<&str> = texts
+        .iter()
+        .map(|t| cap_chars(t, MAX_REST_EMBED_CHARS))
+        .collect();
 
     let body = serde_json::json!({
         "model": config.model,
