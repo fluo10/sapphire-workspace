@@ -147,6 +147,26 @@ fn is_empty(db: &Database) -> Result<bool> {
     Ok(t.len().map_err(redb_err)? == 0)
 }
 
+/// How much of a file's text, in bytes, the FTS snippet generator looks at.
+///
+/// `SnippetGenerator::snippet` tokenizes the whole text it is given, which is
+/// costly for a large file on every hit. Only the first 256 KiB are passed (cut
+/// on a `char` boundary); a match past that point gets the file's leading text
+/// as its snippet instead.
+const SNIPPET_SOURCE_BYTES: usize = 256 * 1024;
+
+/// `text` cut to at most `max` bytes, on a `char` boundary.
+fn snippet_source(text: &str, max: usize) -> &str {
+    if text.len() <= max {
+        return text;
+    }
+    let mut end = max;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
 /// The snippet for an FTS hit: the generator's fragment when it has one, else
 /// the file's leading text.
 fn pick_snippet(fragment: &str, text: &str) -> String {
@@ -555,7 +575,8 @@ impl RetrieveStore for RedbStore {
             {
                 continue;
             }
-            let snippet = pick_snippet(generator.snippet(&rec.text).fragment(), &rec.text);
+            let source = snippet_source(&rec.text, SNIPPET_SOURCE_BYTES);
+            let snippet = pick_snippet(generator.snippet(source).fragment(), &rec.text);
             results.push(FileSearchResult {
                 id: doc_id,
                 path: rec.path,
@@ -943,6 +964,32 @@ mod tests {
 
         assert!(err.to_string().contains("provider unreachable"), "{err}");
         assert_eq!(store.vec_info().unwrap().pending_count, 2);
+    }
+
+    #[test]
+    fn a_match_past_the_snippet_window_falls_back_to_the_leading_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RedbStore::open(dir.path(), None).unwrap();
+        let body = format!("start {} needle", "x ".repeat(SNIPPET_SOURCE_BYTES));
+        store.upsert_document(&doc(1, "/w/big.md", &body)).unwrap();
+        store.rebuild_fts().unwrap();
+
+        let hits = store.search_fts(&FtsQuery::new("needle").limit(5)).unwrap();
+
+        assert_eq!(hits.len(), 1);
+        assert!(
+            hits[0].snippet.starts_with("start x"),
+            "{:?}",
+            hits[0].snippet
+        );
+    }
+
+    #[test]
+    fn the_snippet_source_is_cut_on_a_char_boundary() {
+        let s = "あいう"; // 3 bytes per char
+        assert_eq!(snippet_source(s, 4), "あ");
+        assert_eq!(snippet_source(s, 6), "あい");
+        assert_eq!(snippet_source(s, 100), s);
     }
 
     #[test]
