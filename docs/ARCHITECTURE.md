@@ -67,7 +67,7 @@ arrow の更新がこちらの都合では進められない状態だった。`l
 - **唯一の永続実装 = `RedbStore`（redb + tantivy + brute-force vectors）**。C依存ゼロ・純Rust。
   `redb-store` を切ると揮発する in-memory ストアにフォールバックするだけなので、
   **各アプリは `redb-store` を既定に入れること**。
-  - **redb** = 正本レコード保管。`documents: doc_id -> {path, chunks}`、`vectors: (doc_id,line_start) -> f32[]`、`meta`。
+  - **redb** = 正本レコード保管。`documents: doc_id -> {path, text}`、`vectors: doc_id -> f32[]`（1 ファイル = 1 ドキュメント = 1 ベクトル。長い入力は切り詰め）、`meta`（`schema_version` を保持。現在 2 で、不一致なら初回オープン時に一度だけキャッシュを作り直す）。検索結果は一致箇所の `snippet` を返す。
   - **tantivy** = redb から作る転置インデックス。**trigram トークナイザ**（`NgramTokenizer(3,3)`）で
     旧 FTS5 `trigram` 相当（substring・CJK 対応）。BM25 ランキング。索引は redb から再構築可能。
   - **ベクトル検索は brute-force**（redb 上の全ベクトルを L2 距離でスキャン）。数万件までミリ秒未満で厳密。
@@ -76,7 +76,7 @@ arrow の更新がこちらの都合では進められない状態だった。`l
 - **feature**: `redb-store`（既定）/ `fastembed-embed`。`sqlite-store` / `lancedb-store` は削除済み（上記参照）。
   `VectorDb` config enum は `None` / `Redb`（既定のブルートフォース）。
 
-ストア分離の共有ヘルパー（`ChunkRow` / `group_by_file` / `vec_serialize` / `vec_deserialize` / `l2_distance`）は
+ストア分離の共有ヘルパー（`vec_serialize` / `vec_deserialize` / `l2_distance`）は
 `vector_store.rs` に集約し、sqlite / redb 両バックエンドで共用。
 
 ## crate 構成

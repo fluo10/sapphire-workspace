@@ -553,7 +553,7 @@ impl WorkspaceState {
         sync_workspace_with_hook(&self.workspace, self.retrieve_db(), self.track_db(), hook)
     }
 
-    /// Sync and, when embedding is configured, embed pending chunks.
+    /// Sync and, when embedding is configured, embed pending documents.
     ///
     /// Returns `(upserted, removed, embedded)`.
     pub async fn sync_and_embed(&self, retrieve: &RetrieveConfig) -> Result<(usize, usize, usize)> {
@@ -578,7 +578,7 @@ impl WorkspaceState {
         Ok((upserted, removed, embedded))
     }
 
-    /// Embed all pending chunks (sync). Loads backend and embedder if needed.
+    /// Embed all pending documents (sync). Loads backend and embedder if needed.
     pub fn embed_pending(
         &self,
         retrieve: &RetrieveConfig,

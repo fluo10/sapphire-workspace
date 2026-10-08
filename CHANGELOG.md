@@ -24,6 +24,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 - Backend `API_VERSION` 2 and bridge-api 2.0.0 (`API_VERSION` 2): replace and restart every CLI, server and bridge on a host together.
 - Upgrade note: workspaces initialised before this release are not in the new host workspace registry, so `workspace list` and the GUI do not show them. Re-add each one once — "Add existing…" in the GUI, or `workspace init` in its folder (re-enabling sync records it too) — and it appears in `workspace list` and the GUI from then on.
+- The chunker was removed from `sapphire-framework-retrieve`: a file is one document with one vector, and longer input is truncated.
+- `FileSearchResult.chunks` and `ChunkHit` are replaced by `FileSearchResult.snippet`; `Document.chunks` and the `Chunker` types are gone. Downstream: sapphire-timer's `search` command and sapphire-journal's MCP search output must switch to `snippet`.
+- The retrieve cache rebuilds itself once on first open (`schema_version` 2).
+- Backend `API_VERSION` 3 (search results carry a snippet): a CLI and a server must be the same build.
 - `sapphire-framework-session`: `run_session` now takes `&tokio::sync::Mutex<Replica>` instead of `&mut Replica`. It locks the replica itself, only from after the peer's `Hello` is in through to the end of the exchange — not while waiting for it — so a caller that used to pre-lock a `Mutex<Replica>` around the whole call should pass the mutex itself instead: pre-locking defeats the fix, pinning the replica against a concurrent scan or another session for as long as a slow-to-speak peer is waited on (issue #163).
 
 ### Fixed
