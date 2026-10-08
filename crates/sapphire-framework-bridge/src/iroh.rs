@@ -28,6 +28,7 @@ use ::iroh::{
 };
 
 use crate::error::{Error, Result};
+use crate::hello::HELLO_ALPN;
 use crate::net::NetConfig;
 use crate::pairing::PAIR_ALPN;
 use crate::peer::{BoxedStream, Inbound, PeerTransport, StreamRequest};
@@ -194,10 +195,10 @@ impl IrohTransport {
 
         // `Minimal` rather than `N0`: it picks the crypto provider, and nothing else. Every
         // other thing `N0` turns on is what `net` is here to decide.
-        // Two protocols on one endpoint: the data plane and, on its own ALPN, pairing.
+        // Three protocols on one endpoint: the data plane and, each on its own ALPN, pairing and hello.
         // They are listed together because iroh accepts per endpoint; which one a
         // connection spoke is reported by `accept`, and the two are gated differently.
-        let alpns = vec![ALPN.to_vec(), PAIR_ALPN.to_vec()];
+        let alpns = vec![ALPN.to_vec(), PAIR_ALPN.to_vec(), HELLO_ALPN.to_vec()];
         let mut builder = Endpoint::builder(presets::Minimal)
             .secret_key(secret)
             .alpns(alpns)
@@ -323,6 +324,22 @@ impl PeerTransport for IrohTransport {
         Ok(Box::new(tokio::io::join(recv, send)))
     }
 
+    async fn open_hello(&self, node_id: &str) -> Result<BoxedStream> {
+        let id: EndpointId = node_id
+            .parse()
+            .map_err(|e| Error::Peer(format!("{node_id}: not a node id: {e}")))?;
+        let conn = self
+            .endpoint
+            .connect(id, HELLO_ALPN)
+            .await
+            .map_err(|e| Error::Peer(format!("could not reach {node_id}: {e}")))?;
+        let (send, recv) = conn
+            .open_bi()
+            .await
+            .map_err(|e| Error::Peer(format!("could not open a hello stream to {node_id}: {e}")))?;
+        Ok(Box::new(tokio::io::join(recv, send)))
+    }
+
     async fn accept(&self) -> Result<Inbound> {
         loop {
             let Some(incoming) = self.endpoint.accept().await else {
@@ -370,6 +387,15 @@ impl PeerTransport for IrohTransport {
                 // lookup `authorize` runs would fail every joiner by definition. This is
                 // the one connection that arrives before membership exists.
                 return Ok(Inbound::Pairing(
+                    from.to_string(),
+                    Box::new(AcceptedStream {
+                        io: tokio::io::join(recv, send),
+                        conn,
+                    }),
+                ));
+            }
+            if alpn == HELLO_ALPN {
+                return Ok(Inbound::Hello(
                     from.to_string(),
                     Box::new(AcceptedStream {
                         io: tokio::io::join(recv, send),

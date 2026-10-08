@@ -10,8 +10,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use grain_id::GrainId;
+use sapphire_backend::protocol as proto;
 use sapphire_bridge_api::{
-    BridgeClient, ManagedBy, RegisterParams, WorkspaceRegistration, WorkspacesResult,
+    BridgeClient, ManagedBy, PeersResult, RegisterParams, WorkspaceRegistration, WorkspacesResult,
 };
 use sapphire_sync::{PathUpdate, PauseReason, Replica, ReplicaConfig, ScanOutcome, SystemClock};
 use sapphire_workspace::{AppContext, Workspace};
@@ -22,6 +23,7 @@ mod live;
 mod methods;
 #[cfg(any(test, feature = "test-util"))]
 pub mod testing;
+mod topology;
 mod watch;
 
 pub use id::{SYNC_ID_FILE, WORKSPACE_MAP_FILE, sync_id, sync_id_path};
@@ -50,6 +52,8 @@ pub struct SyncStatus {
     pub last_error: Option<String>,
     /// Whether the bridge is reachable. `false` is not an outage: the app server works.
     pub bridge_available: bool,
+    /// How the workspace is wired to its peers, by the roles the bridge last reported.
+    pub topology: proto::Topology,
 }
 
 /// One workspace this runtime syncs.
@@ -107,6 +111,9 @@ pub struct SyncRuntime {
     /// workspace, and the two storm rules are per-workspace rules. A root that is not
     /// synced has none, so a dial or a push for it is a no-op rather than an error.
     live: Mutex<HashMap<PathBuf, Arc<LivePeers>>>,
+    /// The bridge's last answer to `peers`, roles included. The inbound guard and
+    /// [`is_designated`](SyncRuntime::is_designated) read it rather than asking again.
+    last_peers: Mutex<Option<PeersResult>>,
 }
 
 impl SyncRuntime {
@@ -128,6 +135,7 @@ impl SyncRuntime {
             host: OnceCell::new(),
             reindexing: Mutex::new(()),
             live: Mutex::new(HashMap::new()),
+            last_peers: Mutex::new(None),
         }
     }
 
@@ -337,10 +345,13 @@ impl SyncRuntime {
     /// What `sync.status` answers with.
     pub async fn status(&self, root: &Path) -> SyncStatus {
         let bridge_available = self.bridge.status().await.is_ok();
-        let peers = match self.bridge.peers().await {
-            Ok(p) => p.peers.len().saturating_sub(1),
-            Err(_) => 0,
-        };
+        let answer = self.bridge.peers().await.ok();
+        if let Some(answer) = &answer {
+            *self.last_peers.lock().await = Some(answer.clone());
+        }
+        let peers = answer
+            .as_ref()
+            .map_or(0, |p| p.peers.len().saturating_sub(1));
         let Ok(key) = root.canonicalize() else {
             return SyncStatus {
                 enabled: false,
@@ -349,6 +360,7 @@ impl SyncRuntime {
                 paused: None,
                 last_error: None,
                 bridge_available,
+                topology: proto::Topology::Mesh,
             };
         };
         let synced = self.synced.lock().await;
@@ -360,6 +372,11 @@ impl SyncRuntime {
                 paused: entry.paused.map(|r| format!("{r:?}")),
                 last_error: entry.last_error.clone(),
                 bridge_available,
+                topology: topology::topology(
+                    answer
+                        .as_ref()
+                        .and_then(|p| p.roles_for(entry.workspace_id)),
+                ),
             },
             None => SyncStatus {
                 enabled: false,
@@ -368,6 +385,7 @@ impl SyncRuntime {
                 paused: None,
                 last_error: None,
                 bridge_available,
+                topology: proto::Topology::Mesh,
             },
         }
     }
@@ -501,12 +519,21 @@ impl SyncRuntime {
             .peers()
             .await
             .map_err(|e| Error::Bridge(e.to_string()))?;
+        *self.last_peers.lock().await = Some(peers.clone());
         let me = self.device_id().await?;
 
         // The same direction rule the dial loop follows: a host only dials peers with a
         // greater device id. Dialling the other way from here would reintroduce the
         // dial-both-ways deadlock the loop was cured of, just on a different trigger.
-        for peer in peers.peers.into_iter().filter(|p| me < p.device_id) {
+        // Inside a star, a pair with neither hub in it does not link at all.
+        let roles = peers.roles_for(workspace_id).cloned();
+        for peer in peers
+            .peers
+            .iter()
+            .filter(|p| topology::link(me, p.device_id, roles.as_ref()) == topology::Link::Dial)
+            .cloned()
+            .collect::<Vec<_>>()
+        {
             // A peer that already has a live session is caught up by it: a second exchange
             // on the same workspace would be redundant, and a second stream between the same
             // pair is exactly what the tie-break cannot settle.
@@ -605,6 +632,10 @@ impl SyncRuntime {
                         return;
                     }
                 };
+                if driver.should_skip(workspace_id, peer).await {
+                    tracing::debug!(%peer, "dropped an inbound session: both ends are outside this workspace's star");
+                    return;
+                }
                 // Live, not one-shot: the peer that dialled is keeping this session open and
                 // pushing what it commits, so this side has to keep reading. A session that
                 // closed after the exchange would leave the dialler pushing into a stream
@@ -740,7 +771,10 @@ impl SyncRuntime {
                 continue;
             }
             let peers = match self.bridge.peers().await {
-                Ok(peers) => peers,
+                Ok(peers) => {
+                    *self.last_peers.lock().await = Some(peers.clone());
+                    peers
+                }
                 // The bridge is down or has no workgroup: nothing to dial, and the next walk
                 // asks again. Not an error for the caller — the app server is still serving.
                 Err(err) => {
@@ -775,11 +809,14 @@ impl SyncRuntime {
                         None => continue,
                     }
                 };
-                for peer in peers
-                    .peers
-                    .iter()
-                    .filter(|p| p.connected && me < p.device_id)
-                {
+                let roles = peers.roles_for(workspace_id);
+                // Entering a star closes what it no longer needs. The hubs carry it all.
+                table
+                    .retain(|d| topology::link(me, *d, roles) != topology::Link::Skip)
+                    .await;
+                for peer in peers.peers.iter().filter(|p| {
+                    p.connected && topology::link(me, p.device_id, roles) == topology::Link::Dial
+                }) {
                     let device = peer.device_id;
                     if table.has(&device).await {
                         // Already talking; a redial would drop a working session.
@@ -992,6 +1029,35 @@ impl SyncRuntime {
             .await
             .map_err(|e| Error::Bridge(e.to_string()))?;
         Ok(())
+    }
+
+    /// Whether the last roles the bridge reported say this pair does not link.
+    ///
+    /// Reads the cached device id only: asking the bridge here would register with an empty
+    /// workspace list, racing `enable`'s registration. `false` (accept) when it is unknown.
+    async fn should_skip(&self, workspace_id: GrainId, peer: GrainId) -> bool {
+        let Some(&me) = self.device_id.get() else {
+            return false;
+        };
+        let cached = self.last_peers.lock().await;
+        let roles = cached.as_ref().and_then(|p| p.roles_for(workspace_id));
+        topology::link(me, peer, roles) == topology::Link::Skip
+    }
+
+    /// Whether this host is `workspace_id`'s designated device, by the last roles the
+    /// bridge reported. `false` when the bridge has not answered yet, or when this host's
+    /// device id is not known yet (no workspace was enabled). Reads the cached id only:
+    /// asking the bridge here would register with an empty workspace list, racing
+    /// `enable`'s registration.
+    pub async fn is_designated(&self, workspace_id: GrainId) -> bool {
+        let Some(&me) = self.device_id.get() else {
+            return false;
+        };
+        let cached = self.last_peers.lock().await;
+        cached
+            .as_ref()
+            .and_then(|p| p.roles_for(workspace_id))
+            .is_some_and(|r| r.designated == Some(me))
     }
 
     /// This host's device id, asked of the bridge once.

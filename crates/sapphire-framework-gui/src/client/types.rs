@@ -5,7 +5,9 @@ use std::time::Duration;
 
 use grain_id::GrainId;
 use sapphire_backend::protocol::{StatusReport, WorkspaceListEntry};
-use sapphire_bridge_api::{BRIDGE_NAME, PeerInfo, StatusResult, WorkgroupWorkspaceInfo};
+use sapphire_bridge_api::{
+    BRIDGE_NAME, PeerInfo, StatusResult, WorkgroupWorkspaceInfo, WorkspaceRoles,
+};
 use sapphire_ipc::Endpoint;
 
 /// Which application this GUI belongs to.
@@ -127,6 +129,8 @@ pub struct BridgeState {
     pub status: StatusResult,
     /// `bridge.peers` (empty without a workgroup).
     pub peers: Vec<PeerInfo>,
+    /// The roles `bridge.peers` reports per workspace (empty without a workgroup).
+    pub peer_roles: Vec<WorkspaceRoles>,
     /// `bridge.workspaces` (empty without a workgroup).
     pub ledger: Vec<WorkgroupWorkspaceInfo>,
 }
@@ -198,6 +202,13 @@ pub enum Command {
     DeviceRetire {
         /// The device's name or id.
         selector: String,
+    },
+    /// Set a device's election priority.
+    DevicePrioritySet {
+        /// The device's name or id.
+        selector: String,
+        /// `0..=255`; 0 opts the device out of the election.
+        priority: u8,
     },
     /// Create (or adopt) a workspace in `dir`, optionally syncing it.
     WorkspaceInit {

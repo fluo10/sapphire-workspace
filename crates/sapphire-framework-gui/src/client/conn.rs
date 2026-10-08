@@ -80,14 +80,16 @@ impl Connections {
                 return Ok(None);
             };
             let status = c.status().await?;
-            let (peers, ledger) = if status.workgroup.is_some() {
-                (c.peers().await?.peers, c.workspaces().await?.workspaces)
+            let (peers, peer_roles, ledger) = if status.workgroup.is_some() {
+                let p = c.peers().await?;
+                (p.peers, p.roles, c.workspaces().await?.workspaces)
             } else {
-                (Vec::new(), Vec::new())
+                (Vec::new(), Vec::new(), Vec::new())
             };
             Ok::<_, sapphire_ipc::Error>(Some(BridgeState {
                 status,
                 peers,
+                peer_roles,
                 ledger,
             }))
         })

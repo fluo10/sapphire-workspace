@@ -109,6 +109,14 @@ pub enum DeviceCommand {
         /// The device's name or id.
         selector: String,
     },
+    /// Show or set a device's election priority (0-255; 0 = never designated or backup).
+    /// The election is non-preemptive: raising a priority does not move a role already held.
+    Priority {
+        /// The device's name or id.
+        selector: String,
+        /// The new priority. Omit to show the current one.
+        priority: Option<u8>,
+    },
 }
 
 /// `workgroup` subcommands.
@@ -177,6 +185,9 @@ impl BridgeCommand {
                     workgroup,
                 } => device_invite(version, name, ttl, workgroup).await,
                 DeviceCommand::Retire { selector } => device_retire(version, &selector).await,
+                DeviceCommand::Priority { selector, priority } => {
+                    device_priority(version, &selector, priority).await
+                }
             },
         }
     }
@@ -359,6 +370,8 @@ fn read_status_report() -> Result<Option<StatusReport>> {
                     name: p.name.clone(),
                     node_id: p.node_id.clone(),
                     connected: p.connected,
+                    priority: sapphire_bridge_api::DEFAULT_PRIORITY,
+                    availability: None,
                 })
                 .collect(),
             status: StatusResult {
@@ -409,9 +422,22 @@ async fn device_list(version: &str) -> Result<i32> {
         println!("no devices");
         return Ok(0);
     }
+    let roles = peers.roles.clone();
     for peer in peers.peers {
+        let held: Vec<String> = roles
+            .iter()
+            .filter_map(|r| {
+                if r.designated == Some(peer.device_id) {
+                    Some(format!("designated:{}", r.workspace_id))
+                } else if r.backup == Some(peer.device_id) {
+                    Some(format!("backup:{}", r.workspace_id))
+                } else {
+                    None
+                }
+            })
+            .collect();
         println!(
-            "{} {} {}{}",
+            "{} {} {} p{}{}{}",
             peer.name,
             peer.device_id,
             if peer.node_id.is_empty() {
@@ -419,10 +445,60 @@ async fn device_list(version: &str) -> Result<i32> {
             } else {
                 peer.node_id
             },
-            if peer.connected { " (online)" } else { "" }
+            peer.priority,
+            if peer.connected { " (online)" } else { "" },
+            if held.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", held.join(" "))
+            },
         );
     }
     Ok(0)
+}
+
+/// Show or set a device's priority. Through the running bridge when there is one, else
+/// straight into the ledger, like `device retire`.
+async fn device_priority(version: &str, selector: &str, priority: Option<u8>) -> Result<i32> {
+    match priority {
+        Some(priority) => {
+            if let Some(client) = connect(version).await? {
+                let set = client
+                    .device_priority_set(sapphire_bridge_api::DevicePrioritySetParams {
+                        selector: selector.to_owned(),
+                        priority,
+                    })
+                    .await?;
+                println!("{} ({}) priority {}", set.name, set.device_id, set.priority);
+                return Ok(0);
+            }
+            let dir = BridgeDir::open()?;
+            let Some(workgroup) = Workgroup::open(&dir)? else {
+                println!("this host has not joined a workgroup");
+                return Ok(1);
+            };
+            let device = workgroup.set_priority(selector, priority)?;
+            println!(
+                "{} ({}) priority {}",
+                device.name, device.id, device.priority
+            );
+            Ok(0)
+        }
+        None => {
+            let dir = BridgeDir::open()?;
+            let Some(workgroup) = Workgroup::open(&dir)? else {
+                println!("this host has not joined a workgroup");
+                return Ok(1);
+            };
+            let devices = workgroup.devices()?;
+            let device = devices.resolve(selector)?;
+            println!(
+                "{} ({}) priority {}",
+                device.name, device.id, device.priority
+            );
+            Ok(0)
+        }
+    }
 }
 
 /// Create an invite ticket, printed alone on its line so it can be piped.
@@ -757,6 +833,35 @@ mod status_fallback_tests {
     use crate::status::PeerStatus;
     use chrono::Utc;
     use grain_id::GrainId;
+
+    #[tokio::test]
+    async fn priority_set_without_a_bridge_edits_the_ledger() {
+        let tmp = tempfile::tempdir().unwrap();
+        test_env::with_dirs(tmp.path(), |bridge| async move {
+            let dir = BridgeDir::at(bridge).unwrap();
+            Workgroup::create(&dir, "home", "desk", "aaaa").unwrap();
+            let code = device_priority("0.0.0", "desk", Some(0)).await.unwrap();
+            assert_eq!(code, 0);
+            let wg = Workgroup::open(&dir).unwrap().unwrap();
+            assert_eq!(wg.this_device("aaaa").unwrap().priority, 0);
+            // Showing it needs no bridge either, and succeeds.
+            assert_eq!(device_priority("0.0.0", "desk", None).await.unwrap(), 0);
+        })
+        .await;
+    }
+
+    #[test]
+    fn the_priority_subcommand_parses() {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct P {
+            #[command(subcommand)]
+            c: BridgeCommand,
+        }
+        assert!(P::try_parse_from(["b", "device", "priority", "desk"]).is_ok());
+        assert!(P::try_parse_from(["b", "device", "priority", "desk", "7"]).is_ok());
+        assert!(P::try_parse_from(["b", "device", "priority", "desk", "256"]).is_err());
+    }
 
     #[tokio::test]
     async fn status_without_a_bridge_reports_the_last_snapshot() {

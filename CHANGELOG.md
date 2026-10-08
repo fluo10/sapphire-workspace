@@ -10,6 +10,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
+- Designated and backup devices, elected per workspace from bridge `Hello` messages (`sapphire/hello/1`), with a manual priority: `sapphire-bridge device priority`. `sapphire-framework-bridge-api` 2.1.0 adds `bridge.device_priority_set`, `PeersResult.roles` and `PeerInfo.priority`.
 - `sapphire-framework-workspace`: a shared `logging` module — the app log, lifted from the bridge's own `logging` onto the foundation every app server builds on. `AppContext::init` now installs the process's `tracing` subscriber (console on stdout, so journald keeps seeing a service-managed server's output), and `AppServer::run` routes the file layer at `<data dir>/logs/app.log`: the framework's and the app's own targets at info, appending across restarts, rotating at 10 MiB with three rotated files kept. An app server that logged nothing before — no subscriber, so `tracing` silently dropped every event — now logs by building its context, with no wiring of its own. `tail`/`follow` read the file back in the manner of `tail -f`.
 - `bridge.workgroup_create` and `bridge.device_retire` on the bridge control plane; the framework and bridge CLIs use them when the bridge runs.
 - App server: a host workspace registry (`<config dir>/workspaces.toml`), `workspace.list` and `workspace.forget` (which also tears down sync for a workspace whose root no longer exists); `serve` restores synced workspaces on start.
@@ -17,6 +18,9 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Changed
 
+- A workspace syncs as a star as soon as a designated device is elected, around its designated and backup devices. One candidate (a device at priority >= 1, the default) is enough: the devices at priority 0 then sync only through it. Set every device's priority to 0 to keep the full mesh.
+- Until availability (#190) exists, ties between equal priorities fall to the device id, which is arbitrary. Raise the priority of your always-on machine so that it is the one elected.
+- Raising a priority does not move a role that is already held: the election is non-preemptive, so the new priority counts only when the role is next free.
 - `workspace list` lists this host's workspaces from the running server.
 - `StatusReport` / `StatusRow` live in `backend::protocol` (still re-exported from the server crate).
 - `sapphire-framework-bridge-api` is versioned on its own (2.0.0; its major is the control-plane `API_VERSION`), no longer `version.workspace`.

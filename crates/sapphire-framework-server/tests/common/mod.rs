@@ -22,7 +22,9 @@ use std::time::{Duration, Instant};
 use grain_id::GrainId;
 use sapphire_backend::protocol as proto;
 use sapphire_bridge_api::{BridgeClient, ManagedBy};
-use sapphire_framework_bridge::{Bridge, BridgeDir, LoopbackNetwork, NetConfig, Workgroup};
+use sapphire_framework_bridge::{
+    Bridge, BridgeDir, HelloTiming, LoopbackNetwork, NetConfig, Workgroup,
+};
 use sapphire_framework_server::{AppServer, SyncRuntime};
 use sapphire_ipc::{Client, ClientInfo, Endpoint, connect_or_absent};
 use sapphire_workspace::AppContext;
@@ -33,6 +35,8 @@ pub const NODE_A: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b
 pub const NODE_B: &str = "b1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
 /// The node id of a third host: the middle host, or an unreachable one.
 pub const NODE_S: &str = "c1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
+/// The node id of a fourth host, for the star topology.
+pub const NODE_C: &str = "d1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
 
 /// The version every side reports, so a client and a server always agree.
 pub const VERSION: &str = "0.0.0";
@@ -99,14 +103,47 @@ pub struct Host {
 }
 
 /// A fresh host, with a bridge and an app server of its own and sync wired but not enabled.
+///
+/// Its device has priority 0, so it never stands for election: hosts built this way sync as
+/// a full mesh, which is what every test written before the star topology expects.
 pub async fn start_host(net: &LoopbackNetwork, node_id: &str, device_name: &str) -> Host {
+    start_host_with_priority(net, node_id, device_name, 0).await
+}
+
+/// A fresh host whose own device record carries `priority`.
+///
+/// The priority is written before anything copies the record, so a later [`introduce_all`]
+/// carries it into the other hosts' ledgers, and before the bridge starts, so its Hellos
+/// carry it from the first one.
+pub async fn start_host_with_priority(
+    net: &LoopbackNetwork,
+    node_id: &str,
+    device_name: &str,
+    priority: u8,
+) -> Host {
     build(
         net,
         node_id,
         device_name,
+        priority,
         tempfile::tempdir().expect("a host tree"),
     )
     .await
+}
+
+/// Hosts with the given `(node id, device name, priority)`, introduced to one another with
+/// one shared workspace, and sync enabled on each.
+pub async fn star_hosts(net: &LoopbackNetwork, spec: &[(&str, &str, u8)]) -> Vec<Host> {
+    let mut hosts = Vec::new();
+    for (node, name, priority) in spec {
+        hosts.push(start_host_with_priority(net, node, name, *priority).await);
+    }
+    let refs: Vec<&Host> = hosts.iter().collect();
+    introduce_all(&refs);
+    for host in &hosts {
+        enable_sync(host).await;
+    }
+    hosts
 }
 
 /// Build (or rebuild) the processes of one host against `tmp`.
@@ -117,6 +154,7 @@ async fn build(
     net: &LoopbackNetwork,
     node_id: &str,
     device_name: &str,
+    priority: u8,
     tmp: tempfile::TempDir,
 ) -> Host {
     let ctx = ctx();
@@ -130,6 +168,8 @@ async fn build(
         Some(existing) => existing,
         None => Workgroup::create(&bridge_dir, "converge", device_name, node_id).unwrap(),
     };
+    // Written before the bridge starts, so its first Hello already carries it.
+    workgroup.set_priority(device_name, priority).unwrap();
 
     let root = tmp.path().join("ws");
     std::fs::create_dir_all(root.join(format!(".{}", ctx.app_name))).unwrap();
@@ -155,7 +195,13 @@ async fn build(
         ..NetConfig::default()
     })
     .control_endpoint(control.clone())
-    .data_endpoint(data);
+    .data_endpoint(data)
+    // Short Hello timing, so an election settles in well under a second instead of the
+    // field's default.
+    .hello_timing(HelloTiming {
+        interval: Duration::from_millis(100),
+        dead: Duration::from_millis(600),
+    });
     let bridge_runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -231,6 +277,30 @@ impl Host {
         self.runtime.clone()
     }
 
+    /// This host's connection to its own bridge.
+    pub fn bridge(&self) -> &BridgeClient {
+        &self.bridge_client
+    }
+
+    /// The id of this host's own device record.
+    pub async fn device_id(&self) -> GrainId {
+        Workgroup::open(&self.bridge_dir)
+            .unwrap()
+            .unwrap()
+            .this_device(&self.node_id)
+            .unwrap()
+            .id
+    }
+
+    /// The shared workspace id, as `.<app>/sync-id` holds it.
+    pub async fn workspace_id(&self) -> GrainId {
+        std::fs::read_to_string(sync_id_path(self))
+            .expect("the workspace has a sync-id")
+            .trim()
+            .parse()
+            .expect("the sync-id is a grain-id")
+    }
+
     /// Close this host's open sync sessions, as if its connections had been cut.
     pub async fn drop_connections(&self) {
         if let Some(runtime) = self.runtime() {
@@ -264,7 +334,14 @@ impl Host {
             .tmp
             .take()
             .expect("a host keeps its directories until it restarts");
-        build(net, &self.node_id, &self.device_name, tmp).await
+        // Keep the priority already on disk rather than resetting it.
+        let priority = Workgroup::open(&self.bridge_dir)
+            .unwrap()
+            .expect("a restarting host has a workgroup")
+            .this_device(&self.node_id)
+            .unwrap()
+            .priority;
+        build(net, &self.node_id, &self.device_name, priority, tmp).await
     }
 
     /// Stop this host's bridge, as if the daemon had died, and leave the app server running.
@@ -418,7 +495,7 @@ async fn wait_until_listening(endpoint: &Endpoint, what: &str) {
 // ── live-propagation fixtures ───────────────────────────────────────────────
 
 /// Enable sync on `host`'s workspace, the way a client would.
-async fn enable_sync(host: &Host) {
+pub async fn enable_sync(host: &Host) {
     let _: proto::SyncEnableResult = host
         .client
         .call(
@@ -429,6 +506,40 @@ async fn enable_sync(host: &Host) {
         )
         .await
         .unwrap();
+}
+
+/// [`enable_sync`] for a host that has just come back through [`Host::restart`].
+///
+/// The previous app server's session tasks can still be winding down on this test's
+/// runtime, holding the replica store's redb lock for a moment longer — a real process exit
+/// would release it at once (#141). A failed open leaves nothing behind, so "Database
+/// already open" is waited out against a deadline; any other error fails at once.
+///
+/// Only for restarts: on a first open the same error would be a regression of the
+/// first-open race the app server guards against, and must fail the test.
+pub async fn enable_sync_after_restart(host: &Host) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let answer: std::result::Result<proto::SyncEnableResult, _> = host
+            .client
+            .call(
+                proto::SYNC_ENABLE,
+                proto::WsParams {
+                    ws: host.ws.clone(),
+                },
+            )
+            .await;
+        match answer {
+            Ok(_) => return,
+            Err(err)
+                if format!("{err:?}").contains("Database already open")
+                    && Instant::now() < deadline =>
+            {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(err) => panic!("sync.enable failed: {err:?}"),
+        }
+    }
 }
 
 /// Two hosts sharing one workspace, synced and introduced.
@@ -506,6 +617,35 @@ pub async fn settle(hosts: &[&Host]) {
             Instant::now() < deadline,
             "the hosts never settled into live sessions"
         );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Wait until every host's bridge reports `want` as the designated device of its workspace.
+pub async fn await_designated(hosts: &[&Host], want: GrainId) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let mut all = true;
+        for host in hosts {
+            let peers = host.bridge().peers().await.expect("peers");
+            let ws = host.workspace_id().await;
+            if peers.roles_for(ws).and_then(|r| r.designated) != Some(want) {
+                all = false;
+            }
+        }
+        if all {
+            return;
+        }
+        if Instant::now() >= deadline {
+            for host in hosts {
+                eprintln!(
+                    "peers of {}: {:?}",
+                    host.node_id(),
+                    host.bridge().peers().await
+                );
+            }
+            panic!("the hosts never agreed on {want}");
+        }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
