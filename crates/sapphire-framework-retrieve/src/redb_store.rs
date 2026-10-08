@@ -967,6 +967,33 @@ mod tests {
     }
 
     #[test]
+    fn a_japanese_match_gets_a_short_one_line_snippet() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RedbStore::open(dir.path(), None).unwrap();
+        let body = format!(
+            "{}\n\nここに検索対象のテキストがあります。\n\n{}",
+            "日本語の文章が続きます。".repeat(20),
+            "最後の段落です。".repeat(10)
+        );
+        assert!(body.chars().count() > 150);
+        store.upsert_document(&doc(1, "/w/ja.md", &body)).unwrap();
+        store.rebuild_fts().unwrap();
+
+        let hits = store
+            .search_fts(&FtsQuery::new("テキスト").limit(5))
+            .unwrap();
+
+        assert_eq!(hits.len(), 1);
+        let snippet = &hits[0].snippet;
+        assert!(
+            snippet.chars().count() <= crate::snippet::SNIPPET_CHARS,
+            "{snippet:?}"
+        );
+        assert!(!snippet.contains('\n'), "{snippet:?}");
+        assert!(snippet.contains("テキスト"), "{snippet:?}");
+    }
+
+    #[test]
     fn a_match_past_the_snippet_window_falls_back_to_the_leading_text() {
         let dir = tempfile::tempdir().unwrap();
         let store = RedbStore::open(dir.path(), None).unwrap();
