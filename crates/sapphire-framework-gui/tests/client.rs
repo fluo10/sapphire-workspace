@@ -440,7 +440,7 @@ async fn workgroup_join_pairs_with_another_bridge() {
 /// Accept connections on `endpoint` and never answer them.
 async fn hang(endpoint: &Endpoint) -> tokio::task::JoinHandle<()> {
     #[cfg(unix)]
-    let mut listener = sapphire_ipc::bind(endpoint).await.unwrap();
+    let listener = sapphire_ipc::bind(endpoint).await.unwrap();
     #[cfg(windows)]
     let mut listener = sapphire_ipc::bind(endpoint).unwrap();
     tokio::spawn(async move {
