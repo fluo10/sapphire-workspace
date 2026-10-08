@@ -8,16 +8,19 @@
 //!
 //! | path | role |
 //! |------|------|
-//! | `docs.redb` | canonical record store (documents + chunk vectors + meta) |
+//! | `docs.redb` | canonical record store (one record + one vector per file, meta) |
 //! | `tantivy/`  | full-text inverted index (derived, rebuildable from redb) |
 //!
 //! - **redb** holds the source-of-truth cache records. `documents` maps
-//!   `doc_id -> {path, chunks}`; `vectors` maps `(doc_id, line_start) -> f32[]`.
-//! - **tantivy** holds a trigram full-text index over chunk text (BM25). It is
-//!   derived from redb and can be rebuilt at any time.
+//!   `doc_id -> {path, text}`; `vectors` maps `doc_id -> f32[]`; `meta` holds
+//!   `embedding_dim` and `schema_version`.
+//! - **tantivy** holds a trigram full-text index (BM25) with one document per
+//!   file. It is derived from redb and can be rebuilt at any time.
 //! - **Vector search is brute-force** over the `vectors` table (exact, no ANN).
-//!   Fine up to tens of thousands of chunks; swap in an HNSW index later if the
+//!   Fine up to tens of thousands of files; swap in an HNSW index later if the
 //!   collection grows.
+//! - A store whose `schema_version` is not `SCHEMA_VERSION` (an older shape)
+//!   is wiped on open and rebuilt by the caller, as for a fresh cache.
 
 use std::{
     collections::HashSet,
@@ -34,51 +37,42 @@ use tantivy::{
     schema::{
         Field, INDEXED, IndexRecordOption, STORED, Schema, TextFieldIndexing, TextOptions, Value,
     },
+    snippet::SnippetGenerator,
     tokenizer::{LowerCaser, NgramTokenizer, TextAnalyzer},
 };
 
 use crate::{
-    chunker::chunk_document,
     embed::Embedder,
     error::{Error, Result},
     retrieve_store::{Document, FileSearchResult, FtsQuery, RetrieveStore, VectorQuery},
-    vector_store::{ChunkRow, VecInfo, group_by_file, l2_distance, vec_deserialize, vec_serialize},
+    snippet::{collapse_and_cut, leading},
+    vector_store::{VecInfo, l2_distance, vec_deserialize, vec_serialize},
 };
 
 // ── redb tables ────────────────────────────────────────────────────────────────
 
 /// `doc_id -> serde_json(DocRecord)`.
 const DOCUMENTS: TableDefinition<i64, &[u8]> = TableDefinition::new("documents");
-/// `vkey(doc_id, line_start) -> little-endian f32 blob`.
+/// `doc_id (i64 LE) -> little-endian f32 blob`.
 const VECTORS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("vectors");
-/// misc key/value metadata (e.g. `embedding_dim`).
+/// misc key/value metadata (`embedding_dim`, `schema_version`).
 const META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
 
-#[derive(serde::Serialize, serde::Deserialize)]
-struct StoredChunk {
-    line_start: usize,
-    line_end: usize,
-    text: String,
-}
+/// The store's on-disk shape. 1: chunked records (no key). 2: one record per file.
+const SCHEMA_VERSION: u32 = 2;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct DocRecord {
     path: String,
-    chunks: Vec<StoredChunk>,
+    text: String,
 }
 
-/// 16-byte vector key: `doc_id` (i64 LE) ++ `line_start` (u64 LE).
-fn vkey(doc_id: i64, line_start: usize) -> [u8; 16] {
-    let mut k = [0u8; 16];
-    k[..8].copy_from_slice(&doc_id.to_le_bytes());
-    k[8..].copy_from_slice(&(line_start as u64).to_le_bytes());
-    k
+fn vkey(doc_id: i64) -> [u8; 8] {
+    doc_id.to_le_bytes()
 }
 
-fn vkey_parse(b: &[u8]) -> (i64, usize) {
-    let doc_id = i64::from_le_bytes(b[..8].try_into().unwrap());
-    let line_start = u64::from_le_bytes(b[8..16].try_into().unwrap()) as usize;
-    (doc_id, line_start)
+fn vkey_parse(b: &[u8]) -> Option<i64> {
+    Some(i64::from_le_bytes(b.get(..8)?.try_into().ok()?))
 }
 
 // ── error mapping ────────────────────────────────────────────────────────────
@@ -113,12 +107,51 @@ fn tantivy_err<E: std::fmt::Display>(e: E) -> Error {
     Error::Tantivy(e.to_string())
 }
 
+// ── redb helpers (usable before a `RedbStore` exists) ───────────────────────────
+
+/// Create every table, so later read transactions can open them.
+fn create_tables(db: &Database) -> Result<()> {
+    let wtx = db.begin_write().map_err(redb_err)?;
+    wtx.open_table(DOCUMENTS).map_err(redb_err)?;
+    wtx.open_table(VECTORS).map_err(redb_err)?;
+    wtx.open_table(META).map_err(redb_err)?;
+    wtx.commit().map_err(redb_err)?;
+    Ok(())
+}
+
+fn read_meta_u32(db: &Database, key: &str) -> Result<Option<u32>> {
+    let rtx = db.begin_read().map_err(redb_err)?;
+    let t = rtx.open_table(META).map_err(redb_err)?;
+    let v = t.get(key).map_err(redb_err)?;
+    Ok(v.and_then(|g| {
+        let b = g.value();
+        (b.len() == 4).then(|| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    }))
+}
+
+fn write_meta_u32(db: &Database, key: &str, value: u32) -> Result<()> {
+    let wtx = db.begin_write().map_err(redb_err)?;
+    {
+        let mut t = wtx.open_table(META).map_err(redb_err)?;
+        t.insert(key, value.to_le_bytes().as_slice())
+            .map_err(redb_err)?;
+    }
+    wtx.commit().map_err(redb_err)?;
+    Ok(())
+}
+
+/// Whether the store holds no documents (a fresh cache).
+fn is_empty(db: &Database) -> Result<bool> {
+    let rtx = db.begin_read().map_err(redb_err)?;
+    let t = rtx.open_table(DOCUMENTS).map_err(redb_err)?;
+    Ok(t.len().map_err(redb_err)? == 0)
+}
+
 // ── tantivy schema ─────────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy)]
 struct Fields {
     doc_id: Field,
-    line_start: Field,
     text: Field,
 }
 
@@ -126,26 +159,18 @@ const TRIGRAM_TOKENIZER: &str = "trigram";
 
 /// Build the tantivy schema. `text` is indexed with a character-trigram
 /// tokenizer (mirrors the previous SQLite FTS5 `trigram` design, so substring
-/// and CJK matching keep working); `doc_id`/`line_start` are stored so hits can
-/// be resolved back to redb records, and `doc_id` is indexed for `delete_term`.
+/// and CJK matching keep working); `doc_id` is stored so hits can be resolved
+/// back to redb records, and indexed for `delete_term`.
 fn build_schema() -> (Schema, Fields) {
     let mut sb = Schema::builder();
     let doc_id = sb.add_i64_field("doc_id", INDEXED | STORED);
-    let line_start = sb.add_u64_field("line_start", STORED);
     let text_indexing = TextFieldIndexing::default()
         .set_tokenizer(TRIGRAM_TOKENIZER)
         .set_index_option(IndexRecordOption::WithFreqsAndPositions);
     let text_opts = TextOptions::default().set_indexing_options(text_indexing);
     let text = sb.add_text_field("text", text_opts);
     let schema = sb.build();
-    (
-        schema,
-        Fields {
-            doc_id,
-            line_start,
-            text,
-        },
-    )
+    (schema, Fields { doc_id, text })
 }
 
 fn register_trigram(index: &Index) -> Result<()> {
@@ -173,13 +198,24 @@ impl RedbStore {
 
         // redb
         let db = create_or_reset(dir)?;
-        {
-            let wtx = db.begin_write().map_err(redb_err)?;
-            wtx.open_table(DOCUMENTS).map_err(redb_err)?;
-            wtx.open_table(VECTORS).map_err(redb_err)?;
-            wtx.open_table(META).map_err(redb_err)?;
-            wtx.commit().map_err(redb_err)?;
-        }
+        create_tables(&db)?;
+
+        // Schema version. This runs before the tantivy directory is opened, so a
+        // wipe clears the index along with the records.
+        let db = match read_meta_u32(&db, "schema_version")? {
+            Some(SCHEMA_VERSION) => db,
+            _ if is_empty(&db)? => db,
+            _ => {
+                // A cache written in an older shape: start over, as for UpgradeRequired.
+                drop(db);
+                std::fs::remove_dir_all(dir)?;
+                std::fs::create_dir_all(dir)?;
+                let db = create_or_reset(dir)?;
+                create_tables(&db)?;
+                db
+            }
+        };
+        write_meta_u32(&db, "schema_version", SCHEMA_VERSION)?;
 
         // tantivy
         let tantivy_dir = dir.join("tantivy");
@@ -217,24 +253,20 @@ impl RedbStore {
     }
 
     fn set_meta_u32(&self, key: &str, value: u32) -> Result<()> {
-        let wtx = self.db.begin_write().map_err(redb_err)?;
-        {
-            let mut t = wtx.open_table(META).map_err(redb_err)?;
-            t.insert(key, value.to_le_bytes().as_slice())
-                .map_err(redb_err)?;
-        }
-        wtx.commit().map_err(redb_err)?;
-        Ok(())
+        write_meta_u32(&self.db, key, value)
     }
 
     fn get_meta_u32(&self, key: &str) -> Result<Option<u32>> {
-        let rtx = self.db.begin_read().map_err(redb_err)?;
-        let t = rtx.open_table(META).map_err(redb_err)?;
-        let v = t.get(key).map_err(redb_err)?;
-        Ok(v.and_then(|g| {
-            let b = g.value();
-            (b.len() == 4).then(|| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-        }))
+        read_meta_u32(&self.db, key)
+    }
+
+    #[cfg(test)]
+    fn clear_meta_for_test(&self, key: &str) {
+        let wtx = self.db.begin_write().unwrap();
+        {
+            wtx.open_table(META).unwrap().remove(key).unwrap();
+        }
+        wtx.commit().unwrap();
     }
 
     pub fn dim(&self) -> Option<u32> {
@@ -248,74 +280,31 @@ impl RedbStore {
         Ok(v.and_then(|g| serde_json::from_slice(g.value()).ok()))
     }
 
-    /// Resolve `doc.chunks` (or auto-chunk `doc.body`) into stored chunks.
-    fn resolve_chunks(doc: &Document) -> Vec<StoredChunk> {
-        if let Some(chunks) = &doc.chunks {
-            chunks
-                .iter()
-                .map(|(ls, le, text)| StoredChunk {
-                    line_start: *ls,
-                    line_end: *le,
-                    text: text.clone(),
-                })
-                .collect()
-        } else {
-            chunk_document(&doc.body)
-                .into_iter()
-                .enumerate()
-                .map(|(i, text)| StoredChunk {
-                    line_start: i,
-                    line_end: i,
-                    text,
-                })
-                .collect()
-        }
-    }
-
-    /// Re-index a document's chunks in tantivy (delete-then-add). Writes are
-    /// buffered in the [`IndexWriter`]; call [`RetrieveStore::rebuild_fts`] to
-    /// commit and make them searchable.
-    fn reindex_fts(&self, doc_id: i64, path: &str, chunks: &[StoredChunk]) -> Result<()> {
-        let _ = path; // path is resolved from redb at search time
+    /// Re-index a document in tantivy (delete-then-add). Writes are buffered in
+    /// the [`IndexWriter`]; call [`RetrieveStore::rebuild_fts`] to commit and
+    /// make them searchable.
+    fn reindex_fts(&self, doc_id: i64, text: &str) -> Result<()> {
         let w = self.writer.lock().unwrap();
         w.delete_term(Term::from_field_i64(self.fields.doc_id, doc_id));
-        for c in chunks {
-            w.add_document(doc!(
-                self.fields.doc_id => doc_id,
-                self.fields.line_start => c.line_start as u64,
-                self.fields.text => c.text.clone(),
-            ))
-            .map_err(tantivy_err)?;
-        }
+        w.add_document(doc!(
+            self.fields.doc_id => doc_id,
+            self.fields.text => text.to_owned(),
+        ))
+        .map_err(tantivy_err)?;
         Ok(())
     }
 }
 
 impl RetrieveStore for RedbStore {
     fn upsert_document(&self, doc: &Document) -> Result<()> {
-        let chunks = Self::resolve_chunks(doc);
-        let new_starts: HashSet<usize> = chunks.iter().map(|c| c.line_start).collect();
-
-        // Detect stale/changed vectors from the previous record.
-        let previous = self.get_doc(doc.id)?;
-        let mut drop_vectors: Vec<usize> = Vec::new();
-        if let Some(prev) = &previous {
-            for pc in &prev.chunks {
-                let changed = chunks
-                    .iter()
-                    .find(|c| c.line_start == pc.line_start)
-                    .map(|c| c.text != pc.text)
-                    .unwrap_or(true); // removed chunk
-                if changed {
-                    drop_vectors.push(pc.line_start);
-                }
-            }
-        }
-        let _ = new_starts;
+        // A new record, or one whose text changed, needs a new vector.
+        let drop_vector = self
+            .get_doc(doc.id)?
+            .is_none_or(|prev| prev.text != doc.body);
 
         let record = DocRecord {
             path: doc.path.clone(),
-            chunks,
+            text: doc.body.clone(),
         };
         let bytes = serde_json::to_vec(&record).map_err(|e| Error::Redb(e.to_string()))?;
 
@@ -323,35 +312,23 @@ impl RetrieveStore for RedbStore {
         {
             let mut docs = wtx.open_table(DOCUMENTS).map_err(redb_err)?;
             docs.insert(doc.id, bytes.as_slice()).map_err(redb_err)?;
-            let mut vecs = wtx.open_table(VECTORS).map_err(redb_err)?;
-            for ls in drop_vectors {
-                vecs.remove(vkey(doc.id, ls).as_slice()).map_err(redb_err)?;
+            if drop_vector {
+                let mut vecs = wtx.open_table(VECTORS).map_err(redb_err)?;
+                vecs.remove(vkey(doc.id).as_slice()).map_err(redb_err)?;
             }
         }
         wtx.commit().map_err(redb_err)?;
 
-        self.reindex_fts(doc.id, &record.path, &record.chunks)?;
-        Ok(())
+        self.reindex_fts(doc.id, &record.text)
     }
 
     fn remove_document(&self, id: i64) -> Result<()> {
-        // Remove the record and all its vectors.
         let wtx = self.db.begin_write().map_err(redb_err)?;
-        let starts: Vec<usize> = {
-            let docs = wtx.open_table(DOCUMENTS).map_err(redb_err)?;
-            docs.get(id)
-                .map_err(redb_err)?
-                .and_then(|g| serde_json::from_slice::<DocRecord>(g.value()).ok())
-                .map(|r| r.chunks.iter().map(|c| c.line_start).collect())
-                .unwrap_or_default()
-        };
         {
             let mut docs = wtx.open_table(DOCUMENTS).map_err(redb_err)?;
             docs.remove(id).map_err(redb_err)?;
             let mut vecs = wtx.open_table(VECTORS).map_err(redb_err)?;
-            for ls in starts {
-                vecs.remove(vkey(id, ls).as_slice()).map_err(redb_err)?;
-            }
+            vecs.remove(vkey(id).as_slice()).map_err(redb_err)?;
         }
         wtx.commit().map_err(redb_err)?;
 
@@ -395,23 +372,11 @@ impl RetrieveStore for RedbStore {
             return Ok(0);
         }
 
-        // Collect (doc_id, line_start, text) for chunks that lack a vector.
-        let embedded: HashSet<[u8; 16]> = {
-            let rtx = self.db.begin_read().map_err(redb_err)?;
-            let vecs = rtx.open_table(VECTORS).map_err(redb_err)?;
-            let mut set = HashSet::new();
-            for entry in vecs.iter().map_err(redb_err)? {
-                let (k, _) = entry.map_err(redb_err)?;
-                let mut key = [0u8; 16];
-                key.copy_from_slice(k.value());
-                set.insert(key);
-            }
-            set
-        };
-
-        let mut pending: Vec<(i64, usize, String)> = Vec::new();
+        // Collect (doc_id, text) for non-empty documents that lack a vector.
+        let mut pending: Vec<(i64, String)> = Vec::new();
         {
             let rtx = self.db.begin_read().map_err(redb_err)?;
+            let vecs = rtx.open_table(VECTORS).map_err(redb_err)?;
             let docs = rtx.open_table(DOCUMENTS).map_err(redb_err)?;
             for entry in docs.iter().map_err(redb_err)? {
                 let (k, v) = entry.map_err(redb_err)?;
@@ -419,10 +384,15 @@ impl RetrieveStore for RedbStore {
                 let Ok(rec) = serde_json::from_slice::<DocRecord>(v.value()) else {
                     continue;
                 };
-                for c in rec.chunks {
-                    if !embedded.contains(&vkey(doc_id, c.line_start)) {
-                        pending.push((doc_id, c.line_start, c.text));
-                    }
+                if rec.text.trim().is_empty() {
+                    continue;
+                }
+                if vecs
+                    .get(vkey(doc_id).as_slice())
+                    .map_err(redb_err)?
+                    .is_none()
+                {
+                    pending.push((doc_id, rec.text));
                 }
             }
         }
@@ -430,17 +400,14 @@ impl RetrieveStore for RedbStore {
         let total = pending.len();
         let mut done = 0;
         for batch in pending.chunks(100) {
-            let texts: Vec<&str> = batch.iter().map(|(_, _, t)| t.as_str()).collect();
+            let texts: Vec<&str> = batch.iter().map(|(_, t)| t.as_str()).collect();
             let embeddings = embedder.embed_texts(&texts)?;
             let wtx = self.db.begin_write().map_err(redb_err)?;
             {
                 let mut vecs = wtx.open_table(VECTORS).map_err(redb_err)?;
-                for ((doc_id, line_start, _), emb) in batch.iter().zip(embeddings.iter()) {
-                    vecs.insert(
-                        vkey(*doc_id, *line_start).as_slice(),
-                        vec_serialize(emb).as_slice(),
-                    )
-                    .map_err(redb_err)?;
+                for ((doc_id, _), emb) in batch.iter().zip(embeddings.iter()) {
+                    vecs.insert(vkey(*doc_id).as_slice(), vec_serialize(emb).as_slice())
+                        .map_err(redb_err)?;
                 }
             }
             wtx.commit().map_err(redb_err)?;
@@ -464,18 +431,20 @@ impl RetrieveStore for RedbStore {
             .map_err(redb_err)?
             .len()
             .map_err(redb_err)?;
-        let mut chunk_count: u64 = 0;
+        let mut embeddable: u64 = 0;
         let docs = rtx.open_table(DOCUMENTS).map_err(redb_err)?;
         for entry in docs.iter().map_err(redb_err)? {
             let (_, v) = entry.map_err(redb_err)?;
-            if let Ok(rec) = serde_json::from_slice::<DocRecord>(v.value()) {
-                chunk_count += rec.chunks.len() as u64;
+            if let Ok(rec) = serde_json::from_slice::<DocRecord>(v.value())
+                && !rec.text.trim().is_empty()
+            {
+                embeddable += 1;
             }
         }
         Ok(VecInfo {
             embedding_dim: dim,
             vector_count,
-            pending_count: chunk_count.saturating_sub(vector_count),
+            pending_count: embeddable.saturating_sub(vector_count),
         })
     }
 
@@ -492,18 +461,21 @@ impl RetrieveStore for RedbStore {
         let hits = searcher
             .search(&query, &TopDocs::with_limit(over_fetch).order_by_score())
             .map_err(tantivy_err)?;
+        let generator =
+            SnippetGenerator::create(&searcher, &*query, self.fields.text).map_err(tantivy_err)?;
 
         let prefix = q.path_prefix.map(|p| p.to_string_lossy().to_string());
-        let mut rows: Vec<ChunkRow> = Vec::new();
+        let mut seen: HashSet<i64> = HashSet::new();
+        let mut results: Vec<FileSearchResult> = Vec::new();
+        // BM25: higher = better; tantivy already returns hits in that order.
         for (score, addr) in hits {
             let d: TantivyDocument = searcher.doc(addr).map_err(tantivy_err)?;
             let Some(doc_id) = d.get_first(self.fields.doc_id).and_then(|v| v.as_i64()) else {
                 continue;
             };
-            let line_start = d
-                .get_first(self.fields.line_start)
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as usize;
+            if !seen.insert(doc_id) {
+                continue;
+            }
             let Some(rec) = self.get_doc(doc_id)? else {
                 continue;
             };
@@ -512,23 +484,21 @@ impl RetrieveStore for RedbStore {
             {
                 continue;
             }
-            let (line_end, text) = rec
-                .chunks
-                .iter()
-                .find(|c| c.line_start == line_start)
-                .map(|c| (c.line_end, c.text.clone()))
-                .unwrap_or((line_start, String::new()));
-            rows.push(ChunkRow {
-                doc_id,
+            let fragment = generator.snippet(&rec.text).fragment().to_owned();
+            let snippet = if fragment.trim().is_empty() {
+                leading(&rec.text)
+            } else {
+                collapse_and_cut(&fragment)
+            };
+            results.push(FileSearchResult {
+                id: doc_id,
                 path: rec.path,
-                line_start,
-                line_end,
-                text,
                 score: score as f64,
+                snippet,
             });
         }
-        // BM25: higher = better.
-        Ok(group_by_file(rows, q.limit, |a, b| a > b))
+        results.truncate(q.limit);
+        Ok(results)
     }
 
     fn search_similar(&self, q: &VectorQuery<'_>) -> Result<Vec<FileSearchResult>> {
@@ -544,27 +514,29 @@ impl RetrieveStore for RedbStore {
         let over_fetch = q.limit.saturating_mul(5).max(q.limit);
 
         // Brute-force scan: keep the best `over_fetch` by L2 distance.
-        let mut scored: Vec<(f64, i64, usize)> = Vec::new();
+        let mut scored: Vec<(f64, i64)> = Vec::new();
         {
             let rtx = self.db.begin_read().map_err(redb_err)?;
             let vecs = rtx.open_table(VECTORS).map_err(redb_err)?;
             for entry in vecs.iter().map_err(redb_err)? {
                 let (k, v) = entry.map_err(redb_err)?;
-                let (doc_id, line_start) = vkey_parse(k.value());
+                let Some(doc_id) = vkey_parse(k.value()) else {
+                    continue;
+                };
                 let emb = vec_deserialize(v.value());
                 if emb.len() != query_vec.len() {
                     continue;
                 }
-                let dist = l2_distance(&query_vec, &emb);
-                scored.push((dist, doc_id, line_start));
+                scored.push((l2_distance(&query_vec, &emb), doc_id));
             }
         }
+        // L2 distance: lower = better.
         scored.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(over_fetch);
 
         let prefix = q.path_prefix.map(|p| p.to_string_lossy().to_string());
-        let mut rows: Vec<ChunkRow> = Vec::new();
-        for (dist, doc_id, line_start) in scored {
+        let mut results: Vec<FileSearchResult> = Vec::new();
+        for (dist, doc_id) in scored {
             let Some(rec) = self.get_doc(doc_id)? else {
                 continue;
             };
@@ -573,23 +545,15 @@ impl RetrieveStore for RedbStore {
             {
                 continue;
             }
-            let (line_end, text) = rec
-                .chunks
-                .iter()
-                .find(|c| c.line_start == line_start)
-                .map(|c| (c.line_end, c.text.clone()))
-                .unwrap_or((line_start, String::new()));
-            rows.push(ChunkRow {
-                doc_id,
+            results.push(FileSearchResult {
+                id: doc_id,
                 path: rec.path,
-                line_start,
-                line_end,
-                text,
                 score: dist,
+                snippet: leading(&rec.text),
             });
         }
-        // L2 distance: lower = better.
-        Ok(group_by_file(rows, q.limit, |a, b| a < b))
+        results.truncate(q.limit);
+        Ok(results)
     }
 }
 
@@ -632,9 +596,8 @@ mod tests {
     fn doc(id: i64, path: &str, text: &str) -> Document {
         Document {
             id,
-            body: String::new(),
+            body: text.to_owned(),
             path: path.to_owned(),
-            chunks: Some(vec![(0, 0, text.to_owned())]),
         }
     }
 
@@ -661,7 +624,7 @@ mod tests {
         assert_eq!(hits[0].id, 1);
         assert_eq!(hits[0].path, "/a.md");
 
-        // Embed pending chunks, then semantic search.
+        // Embed pending documents, then semantic search.
         let embedder = FakeEmbedder;
         let embedded = store.embed_pending(&embedder, &|_, _| {}).unwrap();
         assert_eq!(embedded, 2);
@@ -700,5 +663,141 @@ mod tests {
         assert_eq!(store.document_count().unwrap(), 1);
         let hits = store.search_fts(&FtsQuery::new("world").limit(10)).unwrap();
         assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
+    fn one_result_per_file_with_an_fts_snippet() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RedbStore::open(dir.path(), None).unwrap();
+        let body = "first paragraph about apples\n\nsecond paragraph about bananas\n\nthird about apples again";
+        store.upsert_document(&doc(1, "/w/a.md", body)).unwrap();
+        store
+            .upsert_document(&doc(2, "/w/b.md", "nothing relevant here"))
+            .unwrap();
+        store.rebuild_fts().unwrap();
+
+        let hits = store
+            .search_fts(&FtsQuery::new("bananas").limit(10))
+            .unwrap();
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "/w/a.md");
+        assert!(hits[0].snippet.contains("bananas"), "{:?}", hits[0].snippet);
+        assert!(hits[0].snippet.chars().count() <= crate::snippet::SNIPPET_CHARS);
+        assert!(!hits[0].snippet.contains('\n'));
+    }
+
+    #[test]
+    fn vector_hits_carry_the_leading_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RedbStore::open(dir.path(), Some(3)).unwrap();
+        store
+            .upsert_document(&doc(1, "/w/a.md", "alpha beta gamma"))
+            .unwrap();
+        store.rebuild_fts().unwrap();
+        assert_eq!(store.embed_pending(&FakeEmbedder, &|_, _| {}).unwrap(), 1);
+
+        let hits = store
+            .search_similar(&VectorQuery::new("alpha", &FakeEmbedder).limit(5))
+            .unwrap();
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].snippet, "alpha beta gamma");
+        let info = store.vec_info().unwrap();
+        assert_eq!((info.vector_count, info.pending_count), (1, 0));
+    }
+
+    #[test]
+    fn a_changed_body_drops_the_vector_and_an_unchanged_one_keeps_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RedbStore::open(dir.path(), Some(3)).unwrap();
+        store.upsert_document(&doc(1, "/w/a.md", "one")).unwrap();
+        store.embed_pending(&FakeEmbedder, &|_, _| {}).unwrap();
+
+        store.upsert_document(&doc(1, "/w/a.md", "one")).unwrap();
+        assert_eq!(store.vec_info().unwrap().pending_count, 0);
+
+        store.upsert_document(&doc(1, "/w/a.md", "two")).unwrap();
+        assert_eq!(store.vec_info().unwrap().pending_count, 1);
+    }
+
+    #[test]
+    fn an_empty_file_is_indexed_but_never_embedded() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RedbStore::open(dir.path(), Some(3)).unwrap();
+        store.upsert_document(&doc(1, "/w/empty.md", "")).unwrap();
+        assert_eq!(store.document_count().unwrap(), 1);
+        assert_eq!(store.embed_pending(&FakeEmbedder, &|_, _| {}).unwrap(), 0);
+        assert_eq!(store.vec_info().unwrap().pending_count, 0);
+    }
+
+    #[test]
+    fn path_prefix_filters_fts_and_vector_results() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RedbStore::open(dir.path(), Some(3)).unwrap();
+        store
+            .upsert_document(&doc(1, "/w/x/a.md", "shared words"))
+            .unwrap();
+        store
+            .upsert_document(&doc(2, "/w/y/b.md", "shared words"))
+            .unwrap();
+        store.rebuild_fts().unwrap();
+        store.embed_pending(&FakeEmbedder, &|_, _| {}).unwrap();
+        let x = std::path::Path::new("/w/x");
+
+        let fts = store
+            .search_fts(&FtsQuery::new("shared").path_prefix(x).limit(10))
+            .unwrap();
+        let vec = store
+            .search_similar(
+                &VectorQuery::new("shared", &FakeEmbedder)
+                    .path_prefix(x)
+                    .limit(10),
+            )
+            .unwrap();
+
+        assert_eq!(fts.iter().map(|h| h.id).collect::<Vec<_>>(), vec![1]);
+        assert_eq!(vec.iter().map(|h| h.id).collect::<Vec<_>>(), vec![1]);
+    }
+
+    #[test]
+    fn a_store_from_the_previous_schema_is_wiped_once() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            // Simulate the previous build: a populated store with no schema_version.
+            let store = RedbStore::open(dir.path(), None).unwrap();
+            store.upsert_document(&doc(1, "/w/a.md", "old")).unwrap();
+            store.rebuild_fts().unwrap();
+            store.clear_meta_for_test("schema_version");
+        }
+        let reopened = RedbStore::open(dir.path(), None).unwrap();
+        assert_eq!(
+            reopened.document_count().unwrap(),
+            0,
+            "the old store is wiped"
+        );
+        reopened.upsert_document(&doc(2, "/w/b.md", "new")).unwrap();
+        drop(reopened);
+
+        let again = RedbStore::open(dir.path(), None).unwrap();
+        assert_eq!(
+            again.document_count().unwrap(),
+            1,
+            "a current store is not wiped again"
+        );
+    }
+
+    #[test]
+    fn a_snippetless_fts_match_falls_back_to_the_leading_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RedbStore::open(dir.path(), None).unwrap();
+        let body = format!("{} needle", "x ".repeat(2_000));
+        store.upsert_document(&doc(1, "/w/a.md", &body)).unwrap();
+        store.rebuild_fts().unwrap();
+
+        let hits = store.search_fts(&FtsQuery::new("needle").limit(5)).unwrap();
+
+        assert_eq!(hits.len(), 1);
+        assert!(!hits[0].snippet.is_empty());
     }
 }
