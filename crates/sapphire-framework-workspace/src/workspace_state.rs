@@ -2,8 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use sapphire_retrieve::{
-    Chunker, Document, Embedder, FileSearchResult, FtsQuery, HybridQuery, JsonlChunker,
-    RetrieveStore, TomlChunker, VectorQuery,
+    Embedder, FileSearchResult, FtsQuery, HybridQuery, RetrieveStore, VectorQuery,
 };
 #[cfg(feature = "redb-store")]
 use sapphire_retrieve::{open_redb, open_redb_vec};
@@ -182,14 +181,9 @@ impl WorkspaceState {
 
     /// Update the retrieve index for a single file.
     ///
-    /// Reads the file from disk and upserts it into the retrieve DB.
-    ///
-    /// JSONL files are pre-chunked line-by-line so that an append only
-    /// produces new chunks at the tail; existing lines retain their
-    /// `(doc_id, line_start)` identity in the chunk store and are not
-    /// re-embedded.  TOML files are stored as a single whole-file chunk.
-    /// Other file types fall through to the storage layer's default
-    /// paragraph chunker.
+    /// Reads the file from disk and upserts it into the retrieve DB. The file
+    /// is indexed whole, whatever its extension: when it changes, the whole
+    /// file is re-indexed and re-embedded.
     pub fn on_file_updated(&self, path: &Path) -> Result<()> {
         let resolved = self.resolve_path(path)?;
         if !resolved.is_internal() {
@@ -200,49 +194,7 @@ impl WorkspaceState {
 
         let stamp = file_stamp(abs);
 
-        let body = std::fs::read_to_string(abs)?;
-        let doc_id = path_to_doc_id(abs);
-
-        let ext = abs
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e.to_ascii_lowercase());
-        let is_jsonl = ext.as_deref() == Some("jsonl");
-        let is_toml = ext.as_deref() == Some("toml");
-
-        let doc = if is_jsonl || is_toml {
-            let file_name = abs
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let text_chunks = if is_jsonl {
-                JsonlChunker.chunk(&file_name, &body)
-            } else {
-                TomlChunker.chunk(&file_name, &body)
-            };
-            let stored_body = text_chunks
-                .iter()
-                .map(|c| c.text.as_str())
-                .collect::<Vec<_>>()
-                .join("\n\n");
-            let chunks: Vec<(usize, usize, String)> = text_chunks
-                .into_iter()
-                .map(|c| (c.line_start, c.line_end, c.text))
-                .collect();
-            Document {
-                id: doc_id,
-                body: stored_body,
-                path: path_str.clone(),
-                chunks: Some(chunks),
-            }
-        } else {
-            Document {
-                id: doc_id,
-                body,
-                path: path_str.clone(),
-                chunks: None,
-            }
-        };
+        let doc = build_document_from_disk(abs, path_to_doc_id(abs))?;
 
         // Index first, then record the stamp (see the atomicity note in
         // `indexer::sync_inner`).
@@ -284,8 +236,8 @@ impl WorkspaceState {
     /// lockstep with the workspace.
     ///
     /// The hook does **not** see or modify the indexed [`Document`]; the
-    /// workspace always reads the file from disk and applies the default
-    /// chunking. Non-indexable extensions and external paths short-circuit
+    /// workspace always reads the file from disk and indexes it whole.
+    /// Non-indexable extensions and external paths short-circuit
     /// without invoking the hook.
     pub fn on_file_updated_with_hook<H: IndexHook>(
         &self,

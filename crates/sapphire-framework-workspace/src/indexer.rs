@@ -4,7 +4,7 @@ use std::{
     sync::Arc,
 };
 
-use sapphire_retrieve::{Chunker, Document, JsonlChunker, RetrieveStore, TomlChunker};
+use sapphire_retrieve::{Document, RetrieveStore};
 use sapphire_track::{FileStamp, TrackStore};
 use thiserror::Error;
 
@@ -46,61 +46,19 @@ pub fn path_to_doc_id(path: &Path) -> i64 {
     h as i64
 }
 
-/// Build a [`Document`] for `path` by reading the file from disk and applying
-/// the extension-based chunking (paragraph / per-line / whole-file).
+/// Build a [`Document`] for `path` by reading the file from disk. Every file
+/// is indexed whole and verbatim, whatever its extension.
 ///
 /// Returns the `io::Error` from `read_to_string` if the file cannot be read.
 /// Bulk walkers call this and silently drop failures via `.ok()`; the
 /// single-file `on_file_updated_*` methods propagate the error.
 pub(crate) fn build_document_from_disk(path: &Path, doc_id: i64) -> std::io::Result<Document> {
     let raw = std::fs::read_to_string(path)?;
-
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-
-    let is_jsonl = JSONL_EXTENSIONS.contains(&ext.as_str());
-    let is_toml = TOML_EXTENSIONS.contains(&ext.as_str());
-
-    let path_str = path.to_string_lossy().into_owned();
-
-    let doc = if is_jsonl || is_toml {
-        let file_name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let text_chunks = if is_jsonl {
-            JsonlChunker.chunk(&file_name, &raw)
-        } else {
-            TomlChunker.chunk(&file_name, &raw)
-        };
-        let body = text_chunks
-            .iter()
-            .map(|c| c.text.as_str())
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        let chunks: Vec<(usize, usize, String)> = text_chunks
-            .into_iter()
-            .map(|c| (c.line_start, c.line_end, c.text))
-            .collect();
-        Document {
-            id: doc_id,
-            body,
-            path: path_str,
-            chunks: Some(chunks),
-        }
-    } else {
-        Document {
-            id: doc_id,
-            body: raw,
-            path: path_str,
-            chunks: None,
-        }
-    };
-
-    Ok(doc)
+    Ok(Document {
+        id: doc_id,
+        body: raw,
+        path: path.to_string_lossy().into_owned(),
+    })
 }
 
 /// Recursively walk `workspace` and upsert all text files into `retrieve_db`.
@@ -109,11 +67,11 @@ pub(crate) fn build_document_from_disk(path: &Path, doc_id: i64) -> std::io::Res
 ///
 /// # Supported file types
 ///
-/// | Extension | Chunking | line range in results |
-/// |-----------|----------|-----------------------|
-/// | `md`, `markdown`, `txt`, `rst`, `org` | paragraph split | start/end line of paragraph |
-/// | `jsonl` | one message per line | `line_start == line_end` |
-/// | `toml` | single whole-file chunk | first/last non-blank line |
+/// | Extension | Indexed as |
+/// |-----------|------------|
+/// | `md`, `markdown`, `txt`, `rst`, `org` | one whole document |
+/// | `jsonl` | one whole document |
+/// | `toml` | one whole document |
 pub fn sync_workspace(
     workspace: &Workspace,
     retrieve_db: Arc<dyn RetrieveStore + Send + Sync>,
@@ -476,6 +434,22 @@ mod tests {
         fn after_sweep(&mut self) -> std::result::Result<(), Self::Error> {
             self.after_sweep_count.set(self.after_sweep_count.get() + 1);
             Ok(())
+        }
+    }
+
+    #[test]
+    fn every_file_becomes_one_whole_document() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, body) in [
+            ("a.md", "p1\n\np2"),
+            ("b.jsonl", "{\"x\":1}\n{\"x\":2}"),
+            ("c.toml", "k = 1\n"),
+        ] {
+            let p = dir.path().join(name);
+            std::fs::write(&p, body).unwrap();
+            let d = build_document_from_disk(&p, 7).unwrap();
+            assert_eq!(d.body, body, "{name} is indexed whole and verbatim");
+            assert_eq!(d.id, 7);
         }
     }
 
