@@ -2,8 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use sapphire_retrieve::{
-    Chunker, Document, Embedder, FileSearchResult, FtsQuery, HybridQuery, JsonlChunker,
-    RetrieveStore, TomlChunker, VectorQuery,
+    Embedder, FileSearchResult, FtsQuery, HybridQuery, RetrieveStore, VectorQuery,
 };
 #[cfg(feature = "redb-store")]
 use sapphire_retrieve::{open_redb, open_redb_vec};
@@ -70,6 +69,20 @@ pub struct DbInfo {
     pub pending_count: u64,
 }
 
+/// Whether `retrieve` is empty while `track` still records stamps.
+///
+/// That pair is never consistent. It is what a reset of the retrieve store
+/// leaves behind (`RedbStore::open` wiping an old schema or an
+/// `UpgradeRequired` file, or the store directory deleted by hand). An
+/// incremental sync would skip every file whose stamp matches and the index
+/// would stay empty, so the caller clears the track store.
+fn index_lost_its_documents(
+    retrieve: &(dyn RetrieveStore + Send + Sync),
+    track: &(dyn TrackStore + Send + Sync),
+) -> Result<bool> {
+    Ok(retrieve.document_count()? == 0 && track.count()? > 0)
+}
+
 /// Convert a `sapphire_retrieve::Error` to a `SyncWithHookError::Workspace`.
 fn map_retrieve_err<E: std::error::Error + Send + Sync + 'static>(
     e: sapphire_retrieve::Error,
@@ -134,7 +147,16 @@ impl WorkspaceState {
     /// Open (or create) the retrieve DB for `workspace`.
     pub fn open(workspace: Workspace) -> Result<Self> {
         let backend = Self::open_initial_backend(&workspace)?;
-        let track_db = Self::open_initial_track(&workspace)?;
+        let mut track_db = Self::open_initial_track(&workspace)?;
+        if index_lost_its_documents(backend.as_ref(), track_db.as_ref())? {
+            // The retrieve store was reset (an old schema or redb file format)
+            // but the track store still has a stamp for every file, so an
+            // incremental sync would skip them all. Start the track store over,
+            // as `rebuild` does, so the next sync re-indexes the workspace.
+            drop(track_db);
+            let _ = std::fs::remove_file(workspace.track_db_path());
+            track_db = Self::open_initial_track(&workspace)?;
+        }
         Ok(Self {
             retrieve_db: Mutex::new(backend),
             track_db,
@@ -182,14 +204,9 @@ impl WorkspaceState {
 
     /// Update the retrieve index for a single file.
     ///
-    /// Reads the file from disk and upserts it into the retrieve DB.
-    ///
-    /// JSONL files are pre-chunked line-by-line so that an append only
-    /// produces new chunks at the tail; existing lines retain their
-    /// `(doc_id, line_start)` identity in the chunk store and are not
-    /// re-embedded.  TOML files are stored as a single whole-file chunk.
-    /// Other file types fall through to the storage layer's default
-    /// paragraph chunker.
+    /// Reads the file from disk and upserts it into the retrieve DB. The file
+    /// is indexed whole, whatever its extension: when it changes, the whole
+    /// file is re-indexed and re-embedded.
     pub fn on_file_updated(&self, path: &Path) -> Result<()> {
         let resolved = self.resolve_path(path)?;
         if !resolved.is_internal() {
@@ -200,49 +217,7 @@ impl WorkspaceState {
 
         let stamp = file_stamp(abs);
 
-        let body = std::fs::read_to_string(abs)?;
-        let doc_id = path_to_doc_id(abs);
-
-        let ext = abs
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e.to_ascii_lowercase());
-        let is_jsonl = ext.as_deref() == Some("jsonl");
-        let is_toml = ext.as_deref() == Some("toml");
-
-        let doc = if is_jsonl || is_toml {
-            let file_name = abs
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let text_chunks = if is_jsonl {
-                JsonlChunker.chunk(&file_name, &body)
-            } else {
-                TomlChunker.chunk(&file_name, &body)
-            };
-            let stored_body = text_chunks
-                .iter()
-                .map(|c| c.text.as_str())
-                .collect::<Vec<_>>()
-                .join("\n\n");
-            let chunks: Vec<(usize, usize, String)> = text_chunks
-                .into_iter()
-                .map(|c| (c.line_start, c.line_end, c.text))
-                .collect();
-            Document {
-                id: doc_id,
-                body: stored_body,
-                path: path_str.clone(),
-                chunks: Some(chunks),
-            }
-        } else {
-            Document {
-                id: doc_id,
-                body,
-                path: path_str.clone(),
-                chunks: None,
-            }
-        };
+        let doc = build_document_from_disk(abs, path_to_doc_id(abs))?;
 
         // Index first, then record the stamp (see the atomicity note in
         // `indexer::sync_inner`).
@@ -284,8 +259,8 @@ impl WorkspaceState {
     /// lockstep with the workspace.
     ///
     /// The hook does **not** see or modify the indexed [`Document`]; the
-    /// workspace always reads the file from disk and applies the default
-    /// chunking. Non-indexable extensions and external paths short-circuit
+    /// workspace always reads the file from disk and indexes it whole.
+    /// Non-indexable extensions and external paths short-circuit
     /// without invoking the hook.
     pub fn on_file_updated_with_hook<H: IndexHook>(
         &self,
@@ -508,6 +483,15 @@ impl WorkspaceState {
             return Ok(());
         };
         if let Some(backend) = self.make_vector_backend(vector_db, dim)? {
+            if index_lost_its_documents(backend.as_ref(), self.track_db())? {
+                // Same rule as in `open`. The track store is shared without a
+                // lock and stays open here, so its entries are removed in place
+                // instead of deleting the file.
+                let track = self.track_db();
+                for path in track.mtimes()?.keys() {
+                    track.remove(path)?;
+                }
+            }
             *self.retrieve_db.lock().unwrap() = backend;
         }
         Ok(())
@@ -601,7 +585,7 @@ impl WorkspaceState {
         sync_workspace_with_hook(&self.workspace, self.retrieve_db(), self.track_db(), hook)
     }
 
-    /// Sync and, when embedding is configured, embed pending chunks.
+    /// Sync and, when embedding is configured, embed pending documents.
     ///
     /// Returns `(upserted, removed, embedded)`.
     pub async fn sync_and_embed(&self, retrieve: &RetrieveConfig) -> Result<(usize, usize, usize)> {
@@ -626,7 +610,7 @@ impl WorkspaceState {
         Ok((upserted, removed, embedded))
     }
 
-    /// Embed all pending chunks (sync). Loads backend and embedder if needed.
+    /// Embed all pending documents (sync). Loads backend and embedder if needed.
     pub fn embed_pending(
         &self,
         retrieve: &RetrieveConfig,
@@ -949,6 +933,45 @@ mod tests {
                 hook.removed[0]
             );
             assert_eq!(state.retrieve_db().document_count().unwrap(), 0);
+        }
+
+        fn reopen(tmp: &tempfile::TempDir) -> WorkspaceState {
+            WorkspaceState::open(Workspace::from_root(ctx(), tmp.path()).unwrap()).unwrap()
+        }
+
+        #[test]
+        fn a_wiped_retrieve_store_is_reindexed_by_an_incremental_sync() {
+            let (tmp, state) = make_state();
+            fs::write(tmp.path().join("a.md"), "alpha").unwrap();
+            fs::write(tmp.path().join("b.md"), "bravo").unwrap();
+            state.sync().unwrap();
+            assert_eq!(state.retrieve_db().document_count().unwrap(), 2);
+            let store_dir = state.workspace.retrieve_db_path().with_extension("redb");
+            drop(state);
+
+            // Simulate the reset `RedbStore::open` performs for an old schema or an
+            // `UpgradeRequired` file: the retrieve store is gone, the track store is not.
+            fs::remove_dir_all(&store_dir).unwrap();
+
+            let state = reopen(&tmp);
+            let (upserted, _) = state.sync_retrieve().unwrap();
+
+            assert_eq!(upserted, 2);
+            assert_eq!(state.retrieve_db().document_count().unwrap(), 2);
+        }
+
+        #[test]
+        fn reopening_a_populated_store_keeps_the_track_store() {
+            let (tmp, state) = make_state();
+            fs::write(tmp.path().join("a.md"), "alpha").unwrap();
+            state.sync().unwrap();
+            drop(state);
+
+            let state = reopen(&tmp);
+
+            assert_eq!(state.track_db().count().unwrap(), 1);
+            let (upserted, _) = state.sync_retrieve().unwrap();
+            assert_eq!(upserted, 0, "unchanged files are still skipped");
         }
     }
 

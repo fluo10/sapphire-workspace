@@ -150,11 +150,11 @@ Environment variable overrides:
 The indexer walks the workspace root (hidden directories are skipped) and
 processes:
 
-| Extension | Chunking strategy |
+| Extension | Indexing |
 |---|---|
-| `md`, `markdown`, `txt`, `rst`, `org` | Paragraph split; backends auto-chunk |
-| `json` | Message/element extraction; each element is a separate chunk |
-| `jsonl` | One chunk per line |
+| `md`, `markdown`, `txt`, `rst`, `org` | Indexed as one document per file |
+| `toml` | Indexed as one document per file |
+| `jsonl` | Indexed as one document per file |
 
 ## License
 

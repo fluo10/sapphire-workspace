@@ -22,7 +22,9 @@ use crate::{BackendEvent, FileSearchResult, SearchMode};
 /// result here.
 ///
 /// 2: `workspace.list`, `workspace.forget`.
-pub const API_VERSION: u32 = 2;
+///
+/// 3: search results carry `snippet` in place of `chunks` (#184).
+pub const API_VERSION: u32 = 3;
 
 /// Search the workspace.
 pub const SEARCH: &str = "workspace.search";
@@ -301,7 +303,7 @@ mod tests {
         );
         assert_eq!(WORKSPACE_LIST, "workspace.list");
         assert_eq!(WORKSPACE_FORGET, "workspace.forget");
-        assert_eq!(API_VERSION, 2);
+        assert_eq!(API_VERSION, 3);
     }
 
     #[test]

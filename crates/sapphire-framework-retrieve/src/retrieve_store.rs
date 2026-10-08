@@ -159,50 +159,28 @@ impl std::fmt::Debug for HybridQuery<'_> {
 
 // ── shared domain types ───────────────────────────────────────────────────────
 
-/// A document to be indexed for FTS and/or vector search.
+/// A document to index for FTS and vector search: one file.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Document {
     /// Stable identifier assigned by the caller.
     pub id: i64,
-    /// Full body text; used only as input to the chunker when `chunks` is `None`.
-    /// Not persisted to the database.
+    /// The text that is indexed and embedded: the file's content.
     pub body: String,
     /// Absolute file path (shown in search results).
     pub path: String,
-    /// Pre-computed text chunks with source-location ranges.
-    ///
-    /// Each element is `(line_start, line_end, embed_text)` where the line
-    /// values are 0-based and inclusive.  When `None`, the storage backend
-    /// falls back to auto-chunking `body` via [`crate::chunker::chunk_document`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub chunks: Option<Vec<(usize, usize, String)>>,
 }
 
-/// A single chunk match inside a [`FileSearchResult`].
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ChunkHit {
-    /// First source line of the matched chunk (inclusive, 0-based).
-    pub line_start: usize,
-    /// Last source line of the matched chunk (inclusive, 0-based).
-    pub line_end: usize,
-    /// The chunk's extracted text.
-    pub text: String,
-    /// Per-chunk score: FTS rank (lower = better), vector L2 distance
-    /// (lower = better), or RRF score (higher = better), depending on the
-    /// search mode.
-    pub score: f64,
-}
-
-/// File-level search result with one or more matched chunks.
+/// One file matching a search.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FileSearchResult {
     pub id: i64,
     pub path: String,
-    /// Representative score for the file (best chunk for FTS/vector,
-    /// aggregated RRF score for hybrid).
+    /// FTS: BM25 (higher is better). Vector: L2 distance (lower is better).
+    /// Hybrid: RRF (higher is better).
     pub score: f64,
-    /// Matched chunks within this file, ordered by per-chunk score.
-    pub chunks: Vec<ChunkHit>,
+    /// A short excerpt: the FTS fragment around the match, else the leading text.
+    /// At most [`SNIPPET_CHARS`](crate::snippet::SNIPPET_CHARS) characters, on one line.
+    pub snippet: String,
 }
 
 // ── trait ─────────────────────────────────────────────────────────────────────
@@ -227,7 +205,11 @@ pub trait RetrieveStore: Send + Sync {
 
     // ── embedding ──────────────────────────────────────────────────────────────
 
-    /// Generate and store embeddings for all pending chunks.
+    /// Generate and store embeddings for all documents without a vector.
+    ///
+    /// Returns the number of documents embedded. A document the embedder
+    /// rejects is logged and stays pending; the call fails only when nothing
+    /// could be embedded and the embedder returned an error.
     fn embed_pending(
         &self,
         embedder: &dyn Embedder,
@@ -238,10 +220,10 @@ pub trait RetrieveStore: Send + Sync {
 
     // ── search ─────────────────────────────────────────────────────────────────
 
-    /// Full-text search at chunk granularity, grouped per file.
+    /// Full-text search at file granularity.
     fn search_fts(&self, q: &FtsQuery<'_>) -> Result<Vec<FileSearchResult>>;
 
-    /// Semantic (vector) search at chunk granularity, grouped per file.
+    /// Semantic (vector) search at file granularity.
     ///
     /// The backend embeds `q.query` using `q.embedder` internally.
     fn search_similar(&self, q: &VectorQuery<'_>) -> Result<Vec<FileSearchResult>>;

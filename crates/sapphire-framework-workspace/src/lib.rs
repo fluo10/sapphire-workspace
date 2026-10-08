@@ -39,7 +39,7 @@ pub use workspace_state::{DbInfo, RetrieveParams, SearchMode, WorkspaceState};
 /// format, so this is always `0`.
 pub const RETRIEVE_SCHEMA_VERSION: i32 = 0;
 pub use sapphire_retrieve::{
-    Chunk, ChunkHit, Document, Embedder, EmbedderConfig, Error as RetrieveError, FileSearchResult,
-    FtsQuery, HybridQuery, RetrieveDb, RetrieveStore, VecInfo, VectorQuery, build_embedder,
-    default_hybrid, merge_rrf_files,
+    Document, Embedder, EmbedderConfig, Error as RetrieveError, FileSearchResult, FtsQuery,
+    HybridQuery, RetrieveDb, RetrieveStore, VecInfo, VectorQuery, build_embedder, default_hybrid,
+    merge_rrf_files,
 };

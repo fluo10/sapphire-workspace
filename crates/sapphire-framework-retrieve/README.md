@@ -6,7 +6,7 @@ Full-text and semantic search library extracted from [sapphire-journal](https://
 
 - **Full-text search** — trigram search over a tantivy index (`RetrieveDb::search_fts`)
 - **Vector search** — brute-force nearest-neighbour search over stored embeddings (`RetrieveDb::search_similar`)
-- **Chunker** — splits documents into overlapping text chunks for embedding (`chunker::chunk_document`)
+- **One document per file** — each file is indexed as a single document with a single vector (longer input is truncated), and search results carry a `snippet` of the matching text
 - **Embedder trait** — pluggable embedding backends (`build_embedder`)
   - `openai` — OpenAI-compatible REST API
   - `ollama` — local Ollama server

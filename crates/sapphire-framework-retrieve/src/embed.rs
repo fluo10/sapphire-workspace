@@ -78,6 +78,9 @@ pub fn build_embedder(config: &EmbedderConfig) -> Result<Box<dyn Embedder + Send
 
 // ── REST embedder (OpenAI / Ollama) ───────────────────────────────────────────
 
+/// One REST request: the provider-specific call for a group of (capped) inputs.
+type SendRequest = fn(&EmbedderConfig, &[&str]) -> Result<Vec<Vec<f32>>>;
+
 struct RestEmbedder {
     config: EmbedderConfig,
 }
@@ -87,11 +90,31 @@ impl Embedder for RestEmbedder {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
-        match self.config.provider.as_str() {
-            "openai" => embed_openai(&self.config, texts),
-            "ollama" => embed_ollama(&self.config, texts),
-            other => Err(Error::Embed(format!("unknown REST provider `{other}`"))),
+        let send: SendRequest = match self.config.provider.as_str() {
+            "openai" => embed_openai,
+            "ollama" => embed_ollama,
+            other => return Err(Error::Embed(format!("unknown REST provider `{other}`"))),
+        };
+        let capped: Vec<&str> = texts
+            .iter()
+            .map(|t| cap_chars(t, MAX_REST_EMBED_CHARS))
+            .collect();
+
+        // One sub-request per group, results concatenated in input order.
+        let mut out = Vec::with_capacity(capped.len());
+        for group in request_groups(&capped, MAX_REST_REQUEST_CHARS) {
+            let inputs = &capped[group];
+            let vectors = send(&self.config, inputs)?;
+            if vectors.len() != inputs.len() {
+                return Err(Error::Embed(format!(
+                    "embedding provider returned {} vectors for {} inputs",
+                    vectors.len(),
+                    inputs.len()
+                )));
+            }
+            out.extend(vectors);
         }
+        Ok(out)
     }
 }
 
@@ -172,6 +195,7 @@ fn embed_openai(config: &EmbedderConfig, texts: &[&str]) -> Result<Vec<Vec<f32>>
         .unwrap_or("https://api.openai.com");
     let url = format!("{base_url}/v1/embeddings");
 
+    // `texts` arrive capped and grouped from `RestEmbedder::embed_texts`.
     let body = serde_json::json!({
         "model": config.model,
         "input": texts,
@@ -217,6 +241,7 @@ fn embed_ollama(config: &EmbedderConfig, texts: &[&str]) -> Result<Vec<Vec<f32>>
         .unwrap_or("http://localhost:11434");
     let url = format!("{base_url}/api/embed");
 
+    // `texts` arrive capped and grouped from `RestEmbedder::embed_texts`.
     let body = serde_json::json!({
         "model": config.model,
         "input": texts,
@@ -253,4 +278,109 @@ fn parse_float_array(value: &serde_json::Value) -> Result<Vec<f32>> {
                 .ok_or_else(|| Error::Embed("non-numeric value in embedding vector".into()))
         })
         .collect()
+}
+
+// ── REST input cap ────────────────────────────────────────────────────────────
+
+/// Input cap for REST embedders, in characters.
+///
+/// OpenAI's embedding models reject an input over 8,191 tokens. In cl100k a
+/// Japanese kanji is often 2–3 tokens, so 4,000 characters keeps even dense CJK
+/// text under that limit with some margin. This is a safety net only: #185
+/// replaces it with token-level truncation.
+pub(crate) const MAX_REST_EMBED_CHARS: usize = 4_000;
+
+/// Upper bound on the total characters sent in one REST request.
+///
+/// A batch is split into sub-requests of at most this many characters (after
+/// [`MAX_REST_EMBED_CHARS`] is applied), so a batch of large files does not
+/// become one oversized request body.
+pub(crate) const MAX_REST_REQUEST_CHARS: usize = 200_000;
+
+/// Split `texts` into consecutive groups whose total length, in characters,
+/// is at most `limit`. Order is kept, every input is in exactly one group, and
+/// an input longer than `limit` gets a group of its own.
+fn request_groups(texts: &[&str], limit: usize) -> Vec<std::ops::Range<usize>> {
+    let mut groups = Vec::new();
+    let mut start = 0;
+    let mut total = 0;
+    for (i, text) in texts.iter().enumerate() {
+        let len = text.chars().count();
+        if i > start && total + len > limit {
+            groups.push(start..i);
+            start = i;
+            total = 0;
+        }
+        total += len;
+    }
+    if start < texts.len() {
+        groups.push(start..texts.len());
+    }
+    groups
+}
+
+/// `text` cut to at most `max` characters, on a `char` boundary.
+pub(crate) fn cap_chars(text: &str, max: usize) -> &str {
+    match text.char_indices().nth(max) {
+        Some((i, _)) => &text[..i],
+        None => text,
+    }
+}
+
+#[cfg(test)]
+mod cap_tests {
+    use super::*;
+
+    #[test]
+    fn cap_keeps_short_input() {
+        assert_eq!(cap_chars("abc", 8), "abc");
+    }
+
+    #[test]
+    fn cap_cuts_on_a_char_boundary() {
+        let s = "日本語のテキスト";
+        assert_eq!(cap_chars(s, 3), "日本語");
+    }
+}
+
+#[cfg(test)]
+mod rest_split_tests {
+    use super::*;
+
+    #[test]
+    fn the_cap_is_four_thousand_chars() {
+        assert_eq!(MAX_REST_EMBED_CHARS, 4_000);
+        let kanji = "漢".repeat(5_000);
+        assert_eq!(
+            cap_chars(&kanji, MAX_REST_EMBED_CHARS).chars().count(),
+            4_000
+        );
+    }
+
+    #[test]
+    fn groups_keep_order_and_stay_within_the_limit() {
+        assert_eq!(
+            request_groups(&["aa", "bbb", "c", "dddd", "e"], 5),
+            vec![0..2, 2..4, 4..5]
+        );
+    }
+
+    #[test]
+    fn an_input_over_the_limit_gets_a_group_of_its_own() {
+        assert_eq!(
+            request_groups(&["a", "abcdef", "b"], 5),
+            vec![0..1, 1..2, 2..3]
+        );
+    }
+
+    #[test]
+    fn no_inputs_means_no_groups() {
+        assert!(request_groups(&[], 5).is_empty());
+    }
+
+    #[test]
+    fn chars_not_bytes_are_counted() {
+        // Three kanji are 9 bytes but 3 chars.
+        assert_eq!(request_groups(&["日本語", "テキ"], 5), vec![0..2]);
+    }
 }
