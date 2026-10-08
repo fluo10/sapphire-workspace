@@ -300,6 +300,30 @@ impl RedbStore {
         Ok(v.and_then(|g| serde_json::from_slice(g.value()).ok()))
     }
 
+    /// Store one vector per document in a single write transaction.
+    fn put_vectors(&self, vectors: &[(i64, Vec<f32>)]) -> Result<()> {
+        if vectors.is_empty() {
+            return Ok(());
+        }
+        let wtx = self.db.begin_write().map_err(redb_err)?;
+        {
+            let mut vecs = wtx.open_table(VECTORS).map_err(redb_err)?;
+            for (doc_id, emb) in vectors {
+                vecs.insert(vkey(*doc_id).as_slice(), vec_serialize(emb).as_slice())
+                    .map_err(redb_err)?;
+            }
+        }
+        wtx.commit().map_err(redb_err)?;
+        Ok(())
+    }
+
+    /// Log a document that could not be embedded; it stays pending.
+    fn warn_embed_failed(&self, doc_id: i64, err: &Error) -> Result<()> {
+        let path = self.get_doc(doc_id)?.map(|r| r.path).unwrap_or_default();
+        tracing::warn!(%path, error = %err, "embedding failed; the document stays pending");
+        Ok(())
+    }
+
     /// Re-index a document in tantivy (delete-then-add). Writes are buffered in
     /// the [`IndexWriter`]; call [`RetrieveStore::rebuild_fts`] to commit and
     /// make them searchable.
@@ -419,22 +443,46 @@ impl RetrieveStore for RedbStore {
 
         let total = pending.len();
         let mut done = 0;
+        let mut embedded = 0;
+        let mut last_err = None;
         for batch in pending.chunks(100) {
             let texts: Vec<&str> = batch.iter().map(|(_, t)| t.as_str()).collect();
-            let embeddings = embedder.embed_texts(&texts)?;
-            let wtx = self.db.begin_write().map_err(redb_err)?;
-            {
-                let mut vecs = wtx.open_table(VECTORS).map_err(redb_err)?;
-                for ((doc_id, _), emb) in batch.iter().zip(embeddings.iter()) {
-                    vecs.insert(vkey(*doc_id).as_slice(), vec_serialize(emb).as_slice())
-                        .map_err(redb_err)?;
+            let vectors: Vec<(i64, Vec<f32>)> = match embedder.embed_texts(&texts) {
+                Ok(embeddings) => batch.iter().map(|(id, _)| *id).zip(embeddings).collect(),
+                // One bad input must not block the rest: retry the batch one
+                // document at a time, and leave each one that still fails pending.
+                Err(_) => {
+                    let mut ok = Vec::new();
+                    for (doc_id, text) in batch {
+                        match embedder.embed_texts(&[text.as_str()]) {
+                            Ok(mut v) if v.len() == 1 => ok.push((*doc_id, v.remove(0))),
+                            Ok(v) => {
+                                let e = Error::Embed(format!(
+                                    "embedder returned {} vectors for 1 input",
+                                    v.len()
+                                ));
+                                self.warn_embed_failed(*doc_id, &e)?;
+                                last_err = Some(e);
+                            }
+                            Err(e) => {
+                                self.warn_embed_failed(*doc_id, &e)?;
+                                last_err = Some(e);
+                            }
+                        }
+                    }
+                    ok
                 }
-            }
-            wtx.commit().map_err(redb_err)?;
+            };
+            self.put_vectors(&vectors)?;
+            embedded += vectors.len();
             done += batch.len();
             on_progress(done, total);
         }
-        Ok(total)
+        // Nothing embedded at all: report it, so a broken configuration is not silent.
+        match last_err {
+            Some(e) if embedded == 0 => Err(e),
+            _ => Ok(embedded),
+        }
     }
 
     fn vec_info(&self) -> Result<VecInfo> {
@@ -839,6 +887,62 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    /// Fails any call whose input contains `POISON`; otherwise embeds like
+    /// [`FakeEmbedder`].
+    struct PoisonEmbedder;
+    impl Embedder for PoisonEmbedder {
+        fn embed_texts(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+            if texts.iter().any(|t| t.contains("POISON")) {
+                return Err(Error::Embed("input rejected".into()));
+            }
+            FakeEmbedder.embed_texts(texts)
+        }
+    }
+
+    struct BrokenEmbedder;
+    impl Embedder for BrokenEmbedder {
+        fn embed_texts(&self, _: &[&str]) -> Result<Vec<Vec<f32>>> {
+            Err(Error::Embed("provider unreachable".into()))
+        }
+    }
+
+    #[test]
+    fn a_failing_document_stays_pending_and_the_rest_are_embedded() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RedbStore::open(dir.path(), Some(3)).unwrap();
+        store.upsert_document(&doc(1, "/w/a.md", "banana")).unwrap();
+        store
+            .upsert_document(&doc(2, "/w/bad.md", "POISON pill"))
+            .unwrap();
+        store.upsert_document(&doc(3, "/w/c.md", "cherry")).unwrap();
+
+        let embedded = store.embed_pending(&PoisonEmbedder, &|_, _| {}).unwrap();
+
+        assert_eq!(embedded, 2);
+        let info = store.vec_info().unwrap();
+        assert_eq!((info.vector_count, info.pending_count), (2, 1));
+        // The failure is not sticky: once the input is fixed it embeds.
+        store
+            .upsert_document(&doc(2, "/w/bad.md", "fixed"))
+            .unwrap();
+        assert_eq!(store.embed_pending(&PoisonEmbedder, &|_, _| {}).unwrap(), 1);
+    }
+
+    #[test]
+    fn an_embedder_that_fails_every_call_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RedbStore::open(dir.path(), Some(3)).unwrap();
+        store.upsert_document(&doc(1, "/w/a.md", "one")).unwrap();
+        store.upsert_document(&doc(2, "/w/b.md", "two")).unwrap();
+
+        let err = store
+            .embed_pending(&BrokenEmbedder, &|_, _| {})
+            .unwrap_err();
+
+        assert!(err.to_string().contains("provider unreachable"), "{err}");
+        assert_eq!(store.vec_info().unwrap().pending_count, 2);
     }
 
     #[test]

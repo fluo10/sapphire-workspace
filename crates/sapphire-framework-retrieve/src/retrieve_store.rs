@@ -206,6 +206,10 @@ pub trait RetrieveStore: Send + Sync {
     // ── embedding ──────────────────────────────────────────────────────────────
 
     /// Generate and store embeddings for all documents without a vector.
+    ///
+    /// Returns the number of documents embedded. A document the embedder
+    /// rejects is logged and stays pending; the call fails only when nothing
+    /// could be embedded and the embedder returned an error.
     fn embed_pending(
         &self,
         embedder: &dyn Embedder,
