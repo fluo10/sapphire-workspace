@@ -20,10 +20,22 @@ pub use client::BridgeClient;
 
 /// The version of the bridge's control-plane API: the methods below and their types.
 ///
-/// This, not the crate version, is what an app server and the bridge must agree on —
-/// they are different crates on different release lines. Bump it on a breaking change to
-/// a method, a parameter or a result here.
-pub const API_VERSION: u32 = 1;
+/// It is this crate's major version, parsed at compile time, so the two cannot drift: a
+/// breaking change to a method, a parameter or a result here is a major release of this
+/// crate, and that release is the new API version. The handshake compares this number.
+pub const API_VERSION: u32 = parse_major(env!("CARGO_PKG_VERSION_MAJOR"));
+
+/// `CARGO_PKG_VERSION_MAJOR` as a number. Cargo guarantees it is decimal digits.
+const fn parse_major(s: &str) -> u32 {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    let mut n = 0u32;
+    while i < bytes.len() {
+        n = n * 10 + (bytes[i] - b'0') as u32;
+        i += 1;
+    }
+    n
+}
 
 /// The endpoint name the bridge's control plane listens under.
 pub const BRIDGE_NAME: &str = "bridge";
@@ -48,6 +60,10 @@ pub const INVITE: &str = "bridge.invite";
 pub const JOIN: &str = "bridge.join";
 /// List the workspaces the workgroup knows about.
 pub const WORKSPACES: &str = "bridge.workspaces";
+/// Found a workgroup on this host, as its first device.
+pub const WORKGROUP_CREATE: &str = "bridge.workgroup_create";
+/// Retire a device of this host's workgroup.
+pub const DEVICE_RETIRE: &str = "bridge.device_retire";
 
 /// Parameters of [`INVITE`].
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -67,6 +83,42 @@ pub struct InviteParams {
 pub struct InviteResult {
     /// The ticket, in the text form a user copies to the joining device.
     pub ticket: String,
+}
+
+/// Parameters of [`WORKGROUP_CREATE`].
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct WorkgroupCreateParams {
+    /// The workgroup's name.
+    pub name: String,
+    /// This host's device name inside it.
+    pub device_name: String,
+}
+
+/// Result of [`WORKGROUP_CREATE`].
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct WorkgroupCreateResult {
+    /// The new workgroup's id.
+    pub workgroup_id: GrainId,
+    /// Its name.
+    pub name: String,
+    /// This host's device id in it.
+    pub device_id: GrainId,
+}
+
+/// Parameters of [`DEVICE_RETIRE`].
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct DeviceRetireParams {
+    /// The device's name or id.
+    pub selector: String,
+}
+
+/// Result of [`DEVICE_RETIRE`].
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct DeviceRetireResult {
+    /// The retired device's id.
+    pub device_id: GrainId,
+    /// Its name.
+    pub name: String,
 }
 
 /// Parameters of [`JOIN`].
@@ -386,5 +438,40 @@ mod tests {
                 "sapphire-framework-bridge-api must not depend on {forbidden}"
             );
         }
+    }
+
+    #[test]
+    fn the_api_version_is_the_crate_major() {
+        let major: u32 = env!("CARGO_PKG_VERSION_MAJOR").parse().unwrap();
+        assert_eq!(API_VERSION, major);
+        assert_eq!(API_VERSION, 2);
+    }
+
+    #[test]
+    fn workgroup_create_and_device_retire_wire_shapes() {
+        let p = WorkgroupCreateParams {
+            name: "home".into(),
+            device_name: "desk".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&p).unwrap(),
+            serde_json::json!({ "name": "home", "device_name": "desk" })
+        );
+        let p = DeviceRetireParams {
+            selector: "laptop".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&p).unwrap(),
+            serde_json::json!({ "selector": "laptop" })
+        );
+        let id = GrainId::random();
+        let r = WorkgroupCreateResult {
+            workgroup_id: id,
+            name: "home".into(),
+            device_id: id,
+        };
+        assert_eq!(round_trip(&r).name, "home");
+        assert_eq!(WORKGROUP_CREATE, "bridge.workgroup_create");
+        assert_eq!(DEVICE_RETIRE, "bridge.device_retire");
     }
 }

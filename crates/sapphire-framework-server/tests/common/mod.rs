@@ -168,10 +168,17 @@ async fn build(
     // The app server's connection to its own bridge. Built explicitly rather than through
     // `BridgeClient::connect`, which would look the bridge up in the process environment —
     // one value, two hosts.
-    let (control_client, _) = connect_or_absent(&control, "bridge", client_info("test"))
-        .await
-        .unwrap()
-        .expect("the bridge is listening");
+    let (control_client, _) = connect_or_absent(
+        &control,
+        "bridge",
+        ClientInfo {
+            api: sapphire_bridge_api::API_VERSION,
+            ..client_info("test")
+        },
+    )
+    .await
+    .unwrap()
+    .expect("the bridge is listening");
     let bridge_client = Arc::new(BridgeClient::from_client(
         Arc::new(control_client),
         runtime_dir.clone(),
@@ -365,7 +372,7 @@ fn client_info(kind: &str) -> ClientInfo {
     ClientInfo {
         kind: kind.to_owned(),
         version: VERSION.to_owned(),
-        api: 1,
+        api: sapphire_backend::protocol::API_VERSION,
         pid: std::process::id(),
     }
 }

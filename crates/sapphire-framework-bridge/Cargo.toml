@@ -20,7 +20,7 @@ embedded-relay = ["dep:iroh-relay", "dep:rustls", "node"]
 test-util = []
 
 [dependencies]
-sapphire-bridge-api = { package = "sapphire-framework-bridge-api", version = "0.14.0", path = "../sapphire-framework-bridge-api" }
+sapphire-bridge-api = { package = "sapphire-framework-bridge-api", version = "2", path = "../sapphire-framework-bridge-api" }
 sapphire-ipc = { package = "sapphire-framework-ipc", version = "0.14.0", path = "../sapphire-framework-ipc" }
 sapphire-registry = { package = "sapphire-framework-registry", version = "0.14.0", path = "../sapphire-framework-registry" }
 sapphire-framework-session = { version = "0.14.0", path = "../sapphire-framework-session" }
