@@ -3,8 +3,9 @@
 - Date: 2026-10-09
 - Issues: #185 (main), #194 (REST fixes folded in); tracking: #189
 - Scope:
-  - new crate `sapphire-framework-bridge-embed`;
-  - `sapphire-framework-bridge` (an `embed` feature, two control-plane methods, `embedding.toml`);
+  - new crate `apps/sapphire-bridge-embed`, a bridge-only component;
+  - `sapphire-framework-bridge` (an `EmbedProvider` hook, two control-plane methods);
+  - `apps/sapphire-bridge`, the binary, which wires the provider in and reads `embedding.toml`;
   - `sapphire-framework-bridge-api` (method types, client, own version → 2.2.0);
   - `sapphire-framework-retrieve` (keeps only the `Embedder` trait);
   - `sapphire-framework-workspace` (`BridgeEmbedder`, `RetrieveConfig` without `embedding`);
@@ -57,11 +58,25 @@ The fix is to move embedding into the bridge, which is the one per-host daemon:
    or a model that failed to load all mean the app searches with FTS only. None of them is an
    error.
 
-## `sapphire-framework-bridge-embed` (a bridge component)
+## `sapphire-bridge-embed` (a bridge component)
 
-This crate is a component of the bridge, and nothing else depends on it. Its name follows the
-other bridge crates (`sapphire-framework-bridge`, `sapphire-framework-bridge-api`), under the
-project rule that every crate carries the `sapphire-framework-` prefix. Its dependencies:
+The crate lives at `apps/sapphire-bridge-embed/`, beside the bridge binary. Only that binary
+depends on it.
+
+**Naming.** `sapphire-bridge` is an application, the per-host daemon. Components private to it
+carry its prefix, `sapphire-bridge-`, just as journal's private crates carry
+`sapphire-journal-`. That fits the rule against occupying the general `sapphire-*`
+namespace. The `sapphire-framework-` prefix is kept for crates that belong to the
+framework and can be re-exported by the `sapphire-framework` facade. That includes
+`sapphire-framework-bridge` (the daemon library, re-exported under the facade's `bridge`
+feature) and `sapphire-framework-bridge-api`.
+
+**Dependency direction.** The facade re-exports `sapphire-framework-bridge`, so that library
+must not depend on this crate. Otherwise fastembed and candle would follow the facade's
+`bridge` feature into every app. The library defines the hook (`EmbedProvider`, below); the
+binary implements it with this crate and injects it.
+
+Its dependencies:
 
 - fastembed (`default-features = false`, features `qwen3`, `hf-hub-native-tls`,
   `ort-load-dynamic`) behind the feature `local`, which is on by default;
@@ -164,11 +179,25 @@ impl EmbedService {
 
 ## Bridge
 
-- **Cargo feature `embed`**, on by default, pulls in `sapphire-framework-bridge-embed`. Without it
-  `embed.info` answers `{ enabled: false }` and `embed.embed` is an error. That keeps a
-  slim bridge build possible.
-- **Settings.** `embedding.toml` is read at bridge start. A change takes effect on restart;
-  #186 adds live reload together with its CLI.
+- **The hook, in `sapphire-framework-bridge`.** There is no dependency on the embed crate.
+
+```rust
+#[async_trait::async_trait]
+pub trait EmbedProvider: Send + Sync {
+    /// `None` when embedding is disabled on this host.
+    fn info(&self) -> Option<sapphire_bridge_api::EmbedModelInfo>;
+    async fn embed(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>>;
+}
+impl Bridge { pub fn embed_provider(self, p: Arc<dyn EmbedProvider>) -> Bridge; } // builder
+```
+
+  A bridge built without a provider answers `embed.info` with `{ enabled: false }`, and
+  `embed.embed` is an error. That is the facade's bridge, and every test fixture's bridge.
+- **The binary, `apps/sapphire-bridge`.** It depends on `sapphire-bridge-embed`. At start it
+  reads `<bridge dir>/embedding.toml`, starts `EmbedService`, and injects it through
+  `embed_provider`. `EmbedService` implements `EmbedProvider`, through a thin adapter in the
+  binary or in the embed crate. A change to the file takes effect on restart; #186 adds live
+  reload together with its CLI.
 - **Control plane, in `sapphire-framework-bridge-api` 2.2.0.** Everything is additive, and
   `API_VERSION` stays 2.
 
@@ -176,6 +205,7 @@ impl EmbedService {
 pub const EMBED_INFO: &str = "embed.info";
 pub const EMBED: &str = "embed.embed";
 
+pub struct EmbedModelInfo { pub model: String, pub dimension: u32, pub template_version: u32 }
 pub struct EmbedInfoResult { pub enabled: bool, pub model: Option<String>,
                              pub dimension: Option<u32>, pub template_version: Option<u32> }
 pub struct EmbedParams { pub texts: Vec<String> }
