@@ -46,12 +46,17 @@ fn best(pool: &[&Candidate], pick: impl Fn(&Candidate) -> bool) -> Option<GrainI
 
 /// Elect the designated and backup device among `candidates`.
 ///
-/// Designated: the best current claimant; else the best backup claimant (promotion); else
+/// Designated: the best current claimant; else, if `promote`, the best backup claimant; else
 /// the best candidate. Backup: the same over the rest, with backup claims.
-pub(crate) fn elect(candidates: &[Candidate]) -> Roles {
+///
+/// `promote` gates promotion: a backup claim only shows the designated device is gone if a
+/// designated claim was seen before. Otherwise the claim may be provisional (the designated
+/// device has not announced yet), and promoting on it lets a lower-ranked device take the
+/// role and flap it.
+pub(crate) fn elect(candidates: &[Candidate], promote: bool) -> Roles {
     let eligible: Vec<&Candidate> = candidates.iter().filter(|c| c.priority > 0).collect();
     let designated = best(&eligible, |c| c.claims_designated)
-        .or_else(|| best(&eligible, |c| c.claims_backup))
+        .or_else(|| if promote { best(&eligible, |c| c.claims_backup) } else { None })
         .or_else(|| best(&eligible, |_| true));
     let rest: Vec<&Candidate> = eligible
         .iter()
@@ -75,12 +80,14 @@ pub(crate) struct Elector {
     wait: Duration,
     since: BTreeMap<GrainId, Instant>,
     designated: BTreeSet<GrainId>,
+    /// Workspaces in which a designated claim has been heard (from anyone, this host included).
+    seen_designated: BTreeSet<GrainId>,
     backup: BTreeSet<GrainId>,
 }
 
 impl Elector {
     pub(crate) fn new(me: GrainId, wait: Duration) -> Elector {
-        Elector { me, wait, since: BTreeMap::new(), designated: BTreeSet::new(), backup: BTreeSet::new() }
+        Elector { me, wait, since: BTreeMap::new(), designated: BTreeSet::new(), seen_designated: BTreeSet::new(), backup: BTreeSet::new() }
     }
 
     /// Run one round: elect every hosted workspace, update this host's claims, and return
@@ -100,6 +107,7 @@ impl Elector {
             self.since.entry(*ws).or_insert(now);
         }
         self.designated.retain(|ws| own.hosting.contains(ws));
+        self.seen_designated.retain(|ws| own.hosting.contains(ws));
         self.backup.retain(|ws| own.hosting.contains(ws));
 
         let mut roles = BTreeMap::new();
@@ -125,7 +133,10 @@ impl Elector {
                     claims_backup: self.backup.contains(ws),
                 });
             }
-            let elected = elect(&candidates);
+            if candidates.iter().any(|c| c.claims_designated) {
+                self.seen_designated.insert(*ws);
+            }
+            let elected = elect(&candidates, self.seen_designated.contains(ws));
             if waited {
                 set(&mut self.designated, *ws, elected.designated == Some(self.me));
                 set(&mut self.backup, *ws, elected.backup == Some(self.me));
@@ -169,13 +180,13 @@ mod tests {
 
     #[test]
     fn no_candidates_elect_nobody() {
-        assert_eq!(elect(&[]), Roles::default());
+        assert_eq!(elect(&[], true), Roles::default());
     }
 
     #[test]
     fn priority_zero_is_never_elected() {
         let id = ids(1);
-        assert_eq!(elect(&[cand(id[0], 0)]), Roles::default());
+        assert_eq!(elect(&[cand(id[0], 0)], true), Roles::default());
     }
 
     #[test]
@@ -185,7 +196,7 @@ mod tests {
         a.availability = Some(0);
         let b = cand(id[1], 2); // no availability: ranks below Some(0)
         let c = cand(id[2], 1); // highest id, lowest priority
-        let roles = elect(&[a, b, c]);
+        let roles = elect(&[a, b, c], false);
         assert_eq!(roles.designated, Some(id[0]));
         assert_eq!(roles.backup, Some(id[1]));
     }
@@ -196,7 +207,7 @@ mod tests {
         let mut holder = cand(id[0], 1);
         holder.claims_designated = true;
         let newcomer = cand(id[1], 9);
-        let roles = elect(&[holder, newcomer]);
+        let roles = elect(&[holder, newcomer], false);
         assert_eq!(roles.designated, Some(id[0]));
         assert_eq!(roles.backup, Some(id[1]));
     }
@@ -206,7 +217,7 @@ mod tests {
         let id = ids(3);
         let mut backup = cand(id[0], 1);
         backup.claims_backup = true;
-        let roles = elect(&[backup, cand(id[1], 1), cand(id[2], 9)]);
+        let roles = elect(&[backup, cand(id[1], 1), cand(id[2], 9)], true);
         assert_eq!(roles.designated, Some(id[0]));
         assert_eq!(roles.backup, Some(id[2]));
     }
@@ -218,7 +229,7 @@ mod tests {
         low.claims_designated = true;
         let mut high = cand(id[1], 1);
         high.claims_designated = true;
-        assert_eq!(elect(&[low, high]).designated, Some(id[1]));
+        assert_eq!(elect(&[low, high], false).designated, Some(id[1]));
     }
 
     fn hello(id: GrainId, priority: u8, ws: GrainId) -> Hello {
@@ -280,5 +291,55 @@ mod tests {
         let (out, roles) = elector.step(t0, &Own { priority: 1, availability: None, hosting: vec![] }, &[]);
         assert!(out.designated.is_empty());
         assert!(roles.is_empty());
+    }
+
+    #[test]
+    fn a_provisional_backup_claim_does_not_promote() {
+        let id = ids(2);
+        let (b_id, a_id) = (id[0], id[1]);
+        let ws = GrainId::random();
+        let t0 = Instant::now();
+        let mut a = Elector::new(a_id, Duration::ZERO);
+        let mut b = Elector::new(b_id, Duration::ZERO);
+        let own_a = Own { priority: 9, availability: None, hosting: vec![ws] };
+        let own_b = Own { priority: 1, availability: None, hosting: vec![ws] };
+        let a_unclaimed = hello(a_id, 9, ws);
+        let mut b_hello = None;
+        for _ in 0..2 {
+            let (h, roles) = b.step(t0, &own_b, &[a_unclaimed.clone()]);
+            assert_ne!(roles[&ws].designated, Some(b_id), "B must not promote itself");
+            b_hello = Some(h);
+        }
+        let b_hello = b_hello.unwrap();
+        assert_eq!(b_hello.backup, vec![ws]);
+        let (a_out, a_roles) = a.step(t0, &own_a, &[b_hello]);
+        assert_eq!(a_roles[&ws].designated, Some(a_id));
+        assert_eq!(a_roles[&ws].backup, Some(b_id));
+        let (_, b_roles) = b.step(t0, &own_b, &[a_out]);
+        assert_eq!(b_roles[&ws].designated, Some(a_id));
+        assert_eq!(b_roles[&ws].backup, Some(b_id));
+    }
+
+    #[test]
+    fn the_backup_takes_over_when_the_designated_vanishes() {
+        let id = ids(2);
+        let (b_id, a_id) = (id[0], id[1]);
+        let ws = GrainId::random();
+        let t0 = Instant::now();
+        let mut a = Elector::new(a_id, Duration::ZERO);
+        let mut b = Elector::new(b_id, Duration::ZERO);
+        let own_a = Own { priority: 9, availability: None, hosting: vec![ws] };
+        let own_b = Own { priority: 1, availability: None, hosting: vec![ws] };
+        let mut a_hello = hello(a_id, 9, ws);
+        let mut b_hello = hello(b_id, 1, ws);
+        for _ in 0..4 {
+            a_hello = a.step(t0, &own_a, &[b_hello.clone()]).0;
+            b_hello = b.step(t0, &own_b, &[a_hello.clone()]).0;
+        }
+        assert_eq!(a_hello.designated, vec![ws]);
+        assert_eq!(b_hello.backup, vec![ws]);
+        let (out, roles) = b.step(t0, &own_b, &[]);
+        assert_eq!(roles[&ws].designated, Some(b_id));
+        assert_eq!(out.designated, vec![ws]);
     }
 }
