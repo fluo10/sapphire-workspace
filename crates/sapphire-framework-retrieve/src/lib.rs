@@ -6,6 +6,7 @@ pub mod error;
 #[cfg(feature = "redb-store")]
 pub mod redb_store;
 pub mod retrieve_store;
+pub mod snippet;
 pub mod vector_store;
 
 pub use chunker::{Chunker, JsonlChunker, MarkdownChunker, TextChunk, TomlChunker};
@@ -19,4 +20,5 @@ pub use error::{Error, Result};
 pub use retrieve_store::{
     ChunkHit, Document, FileSearchResult, FtsQuery, HybridQuery, RetrieveStore, VectorQuery,
 };
+pub use snippet::SNIPPET_CHARS;
 pub use vector_store::{Chunk, VecInfo};

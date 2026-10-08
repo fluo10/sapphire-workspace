@@ -172,9 +172,11 @@ fn embed_openai(config: &EmbedderConfig, texts: &[&str]) -> Result<Vec<Vec<f32>>
         .unwrap_or("https://api.openai.com");
     let url = format!("{base_url}/v1/embeddings");
 
+    let capped: Vec<&str> = texts.iter().map(|t| cap_chars(t, MAX_REST_EMBED_CHARS)).collect();
+
     let body = serde_json::json!({
         "model": config.model,
-        "input": texts,
+        "input": capped,
     });
 
     let response: serde_json::Value = ureq::post(&url)
@@ -217,9 +219,11 @@ fn embed_ollama(config: &EmbedderConfig, texts: &[&str]) -> Result<Vec<Vec<f32>>
         .unwrap_or("http://localhost:11434");
     let url = format!("{base_url}/api/embed");
 
+    let capped: Vec<&str> = texts.iter().map(|t| cap_chars(t, MAX_REST_EMBED_CHARS)).collect();
+
     let body = serde_json::json!({
         "model": config.model,
-        "input": texts,
+        "input": capped,
     });
 
     let response: serde_json::Value = ureq::post(&url)
@@ -253,4 +257,34 @@ fn parse_float_array(value: &serde_json::Value) -> Result<Vec<f32>> {
                 .ok_or_else(|| Error::Embed("non-numeric value in embedding vector".into()))
         })
         .collect()
+}
+
+// ── REST input cap ────────────────────────────────────────────────────────────
+
+/// Input cap for REST embedders, in characters. Deliberately conservative for CJK
+/// text (about one token per character). A safety net until #185 truncates by tokens.
+pub(crate) const MAX_REST_EMBED_CHARS: usize = 8_000;
+
+/// `text` cut to at most `max` characters, on a `char` boundary.
+pub(crate) fn cap_chars(text: &str, max: usize) -> &str {
+    match text.char_indices().nth(max) {
+        Some((i, _)) => &text[..i],
+        None => text,
+    }
+}
+
+#[cfg(test)]
+mod cap_tests {
+    use super::*;
+
+    #[test]
+    fn cap_keeps_short_input() {
+        assert_eq!(cap_chars("abc", 8), "abc");
+    }
+
+    #[test]
+    fn cap_cuts_on_a_char_boundary() {
+        let s = "日本語のテキスト";
+        assert_eq!(cap_chars(s, 3), "日本語");
+    }
 }
