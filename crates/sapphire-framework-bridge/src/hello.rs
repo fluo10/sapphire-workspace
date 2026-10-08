@@ -8,10 +8,12 @@ use grain_id::GrainId;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::watch;
+use tokio::task::AbortHandle;
 
 use crate::Bridge;
 use crate::election::{Elector, Own};
 use crate::peer::BoxedStream;
+use sapphire_registry::Device;
 
 /// The ALPN Hello streams speak.
 pub const HELLO_ALPN: &[u8] = b"sapphire/hello/1";
@@ -39,6 +41,8 @@ impl Default for HelloTiming {
 pub(crate) struct Neighbours {
     heard: Mutex<HashMap<GrainId, (Hello, Instant)>>,
     links: Mutex<HashSet<GrainId>>,
+    /// The tasks running Hello links, per peer, both directions.
+    tasks: Mutex<HashMap<GrainId, Vec<AbortHandle>>>,
 }
 
 impl Neighbours {
@@ -77,6 +81,26 @@ impl Neighbours {
 
     pub(crate) fn end_link(&self, device: GrainId) {
         self.links.lock().expect("neighbours").remove(&device);
+    }
+
+    /// Remember the task running a Hello link with `device`, so [`cut`](Self::cut) can end it.
+    pub(crate) fn track(&self, device: GrainId, task: AbortHandle) {
+        let mut tasks = self.tasks.lock().expect("neighbours");
+        let list = tasks.entry(device).or_default();
+        list.retain(|t| !t.is_finished());
+        list.push(task);
+    }
+
+    /// End every Hello link with `device`. Ending one forgets the device (see [`exchange`]).
+    pub(crate) fn cut(&self, device: GrainId) {
+        let Some(tasks) = self.tasks.lock().expect("neighbours").remove(&device) else {
+            return;
+        };
+        for task in tasks {
+            task.abort();
+        }
+        self.forget(device);
+        self.end_link(device);
     }
 }
 
@@ -189,6 +213,22 @@ pub(crate) async fn exchange(
     }
 }
 
+/// The heard Hellos that may stand in the election: those from devices the ledger holds and
+/// has not retired.
+///
+/// A link refuses a retired device only when it opens, so one retired while it is online
+/// keeps talking until the link ends. Without this filter it would keep its role meanwhile.
+pub(crate) fn electable(heard: Vec<Hello>, ledger: &[Device]) -> Vec<Hello> {
+    heard
+        .into_iter()
+        .filter(|h| {
+            ledger
+                .iter()
+                .any(|d| d.id == h.device_id && !d.is_retired())
+        })
+        .collect()
+}
+
 /// Keep Hello links to every peer, and re-run the election, every interval.
 ///
 /// Only the lower device id of a pair dials, as everywhere else. Never fails: a bridge with
@@ -223,8 +263,19 @@ pub(crate) async fn run(bridge: Arc<Bridge>) -> crate::Result<()> {
             availability: None,
             hosting,
         };
+        let Ok(devices) = workgroup.devices() else {
+            continue;
+        };
+        // A device retired while its link was up is still heard; end the link, and keep it
+        // out of the election even before the link has gone.
+        for device in devices.entries().iter().filter(|d| d.is_retired()) {
+            bridge.neighbours.cut(device.id);
+        }
         let now = Instant::now();
-        let heard = bridge.neighbours.reachable(now, timing.dead);
+        let heard = electable(
+            bridge.neighbours.reachable(now, timing.dead),
+            devices.entries(),
+        );
         let (hello, roles) = elector.step(now, &own, &heard);
         *bridge.roles.lock().expect("roles") = roles;
         bridge.hello_tx.send_if_modified(|current| {
@@ -238,9 +289,6 @@ pub(crate) async fn run(bridge: Arc<Bridge>) -> crate::Result<()> {
         if bridge.hello_tx.borrow().is_none() {
             continue;
         }
-        let Ok(devices) = workgroup.devices() else {
-            continue;
-        };
         for device in devices.entries() {
             if device.id <= me.id || device.is_retired() {
                 continue;
@@ -253,7 +301,8 @@ pub(crate) async fn run(bridge: Arc<Bridge>) -> crate::Result<()> {
             }
             let bridge = Arc::clone(&bridge);
             let peer = device.id;
-            tokio::spawn(async move {
+            let neighbours = Arc::clone(&bridge.neighbours);
+            let task = tokio::spawn(async move {
                 match bridge.transport().open_hello(&node_id).await {
                     Ok(stream) => {
                         exchange(
@@ -269,6 +318,7 @@ pub(crate) async fn run(bridge: Arc<Bridge>) -> crate::Result<()> {
                 }
                 bridge.neighbours.end_link(peer);
             });
+            neighbours.track(peer, task.abort_handle());
         }
     }
 }
@@ -278,7 +328,8 @@ pub(crate) fn serve_inbound(bridge: &Arc<Bridge>, peer: GrainId, stream: BoxedSt
     let rx = bridge.hello_tx.subscribe();
     let neighbours = Arc::clone(&bridge.neighbours);
     let timing = bridge.hello_timing;
-    tokio::spawn(exchange(stream, peer, rx, neighbours, timing));
+    let task = tokio::spawn(exchange(stream, peer, rx, Arc::clone(&neighbours), timing));
+    neighbours.track(peer, task.abort_handle());
 }
 
 #[cfg(test)]
@@ -302,6 +353,65 @@ mod tests {
             designated: vec![],
             backup: vec![],
         }
+    }
+
+    fn device(id: GrainId, retired: bool) -> Device {
+        Device {
+            id,
+            name: id.to_string(),
+            node_id: None,
+            description: None,
+            priority: 1,
+            created_at: chrono::Utc::now(),
+            retired_at: retired.then(chrono::Utc::now),
+        }
+    }
+
+    #[test]
+    fn only_live_ledger_devices_are_electable() {
+        let (live, retired, stranger) = (GrainId::random(), GrainId::random(), GrainId::random());
+        let ledger = [device(live, false), device(retired, true)];
+        let kept: Vec<GrainId> =
+            electable(vec![hello(live), hello(retired), hello(stranger)], &ledger)
+                .into_iter()
+                .map(|h| h.device_id)
+                .collect();
+        assert_eq!(kept, vec![live]);
+    }
+
+    #[test]
+    fn a_retired_device_still_heard_is_not_elected() {
+        let ws = GrainId::random();
+        let mut ids = [GrainId::random(), GrainId::random(), GrainId::random()];
+        ids.sort();
+        // `old` outranks the rest and holds the designated role; `live` is its backup.
+        let (me, live, old) = (ids[0], ids[1], ids[2]);
+        let hello = |id: GrainId, designated: bool, backup: bool| Hello {
+            device_id: id,
+            priority: 9,
+            availability: None,
+            hosting: vec![ws],
+            designated: if designated { vec![ws] } else { vec![] },
+            backup: if backup { vec![ws] } else { vec![] },
+        };
+        let heard = || vec![hello(old, true, false), hello(live, false, true)];
+        let mut elector = Elector::new(me, Duration::ZERO);
+        let own = Own {
+            priority: 1,
+            availability: None,
+            hosting: vec![ws],
+        };
+        let t0 = Instant::now();
+
+        let before = [device(me, false), device(live, false), device(old, false)];
+        let (_, roles) = elector.step(t0, &own, &electable(heard(), &before));
+        assert_eq!(roles[&ws].designated, Some(old));
+
+        // `old` is retired while its link is up: it is still heard, but loses the role.
+        let after = [device(me, false), device(live, false), device(old, true)];
+        let (_, roles) = elector.step(t0, &own, &electable(heard(), &after));
+        assert_eq!(roles[&ws].designated, Some(live), "the backup takes over");
+        assert_ne!(roles[&ws].backup, Some(old));
     }
 
     #[test]
@@ -467,6 +577,38 @@ mod tests {
             nb.get(ida).is_none(),
             "an aborted exchange forgets its peer"
         );
+    }
+
+    #[tokio::test]
+    async fn a_cut_link_ends_and_forgets_its_peer() {
+        let net = LoopbackNetwork::new();
+        let a = net.transport("node-a");
+        let b = net.transport("node-b");
+        let (ida, idb) = (GrainId::random(), GrainId::random());
+        let nb = Arc::new(Neighbours::default());
+        let (_ta, ra) = watch::channel(Some(hello(ida)));
+        let (_tb, rb) = watch::channel(Some(hello(idb)));
+        let out = a.open_hello("node-b").await.unwrap();
+        let Inbound::Hello(_, inb) = b.accept().await.unwrap() else {
+            panic!()
+        };
+        let _ja = tokio::spawn(exchange(
+            out,
+            idb,
+            ra,
+            Arc::new(Neighbours::default()),
+            timing(),
+        ));
+        let jb = tokio::spawn(exchange(inb, ida, rb, Arc::clone(&nb), timing()));
+        nb.track(ida, jb.abort_handle());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while nb.get(ida).is_none() {
+            assert!(Instant::now() < deadline, "the Hello never arrived");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        nb.cut(ida);
+        assert!(jb.await.unwrap_err().is_cancelled(), "the link ended");
+        assert!(nb.get(ida).is_none(), "the cut peer is forgotten");
     }
 
     #[tokio::test]
