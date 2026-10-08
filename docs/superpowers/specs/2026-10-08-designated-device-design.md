@@ -76,7 +76,10 @@ the device id.
 
 A new ALPN, `sapphire/hello/1`, authorized by the device ledger exactly like the workspace
 ALPN. Each bridge holds one long-lived Hello stream per connected peer and sends a message
-every `HELLO_INTERVAL` (10 s) and whenever its content changes:
+every `HELLO_INTERVAL` (10 s) and whenever its content changes. Lines are capped at 16 KiB.
+A dialer does not open a Hello stream before it has its own `Some(Hello)` to send (on iroh
+the acceptor's loop is serial). A link that ends forgets its peer, including when its task
+is aborted.
 
 ```rust
 struct Hello {
@@ -97,11 +100,12 @@ candidate. Its app server syncs as before (see "Mixed versions").
 
 ## Election (`sapphire-framework-bridge`, `election.rs`)
 
-A pure function, run per workspace whenever a Hello arrives, a peer dies, or this host's own
-state changes:
+A pure function, run per workspace and driven by a stateful `Elector::step(now, &own,
+&peers)`. The election re-runs once per Hello interval, not on every Hello arrival, so
+failover lags by up to one interval plus the app server's dial interval.
 
 ```rust
-fn elect(me: &View, peers: &[Hello], workspace: GrainId, waited: bool) -> Roles
+fn elect(candidates: &[Candidate], promote: bool) -> Roles
 
 struct Roles { designated: Option<GrainId>, backup: Option<GrainId> }
 ```
@@ -111,13 +115,18 @@ struct Roles { designated: Option<GrainId>, backup: Option<GrainId> }
 - **Rank:** `(priority, availability tier, device id)`, highest first. A missing tier ranks
   below every tier.
 - **Designated:** if candidates already claim it, the highest-ranked claimant keeps it, and
-  the others drop their claims. Otherwise, if a candidate claims backup, the backup is
-  promoted. Otherwise, the highest-ranked candidate.
+  the others drop their claims. Otherwise, if a candidate claims backup and `promote` is
+  set, the backup is promoted. Otherwise, the highest-ranked candidate.
+- **Promotion gate:** `promote` is true only for a workspace in which this `Elector` has
+  previously seen a designated claim. Before that, designated is chosen by rank. A
+  provisional backup claim must not promote itself before the rank-elected designated has
+  claimed, which would make the role flap.
 - **Backup:** the same rule over the candidates other than the designated device, using
   `backup` claims.
 - **Wait timer:** a bridge that has just started (or just started hosting a workspace)
-  claims nothing for `DEAD_INTERVAL` (`waited == false`). This gives existing claims time to
-  arrive, so a device that wakes up does not seize a role that is already held.
+  claims nothing for `DEAD_INTERVAL`, and while it waits it is left out of its own election
+  entirely (it still hears its peers). This gives existing claims time to arrive, so a
+  device that wakes up does not seize a role that is already held.
 
 Each bridge then publishes its own claims in its next Hello. Two bridges with different
 views can transiently disagree. The claim rule makes them converge in one Hello round once
@@ -129,13 +138,13 @@ These changes only add things, so `API_VERSION` stays 2.
 
 - `PeersResult` gains `roles: Vec<WorkspaceRoles>` (`#[serde(default)]`), with
   `WorkspaceRoles { workspace_id, designated: Option<GrainId>, backup: Option<GrainId> }` for
-  every workspace this host's app servers own. An app server talking to an older bridge reads
+  every hosted workspace, including entries where both roles are `None`. An app server talking to an older bridge reads
   an empty list and stays a mesh.
 - `PeerInfo` gains `priority: u8` and `availability: Option<Tier>` (`#[serde(default)]`), for
   display.
 - New method `bridge.device_priority_set` (`DEVICE_PRIORITY_SET`):
-  `{ workgroup: Option<String>, device: String, priority: u8 }` → `{}`. An unknown or retired
-  device is an error.
+  `{ selector: String, priority: u8 }` → `{ device_id, name, priority }`, mirroring
+  `device_retire`. An unknown or retired device is an error.
 
 ## CLI (`sapphire-bridge`)
 
@@ -147,7 +156,8 @@ sapphire-bridge device priority <device> <0-255>    # set
 Like `device retire`: with a bridge running it goes through the control-plane method; with
 none running it edits the ledger directly. The change is a write to the synced workgroup
 root, so every device sees it at its next workgroup session. `device list` gains `priority`
-and `availability` columns, plus the workspaces each device is designated or backup for.
+column, plus the workspaces each device is designated or backup for. The `availability`
+column of `device list` belongs to #190.
 The apps' flat `device` directive gains the same verb, pointing at the bridge as the other
 bridge-owned verbs do.
 
@@ -157,14 +167,16 @@ The server gets roles from `bridge.peers()`, the call it already makes on every 
 A pure function decides each pair:
 
 ```rust
-enum Link { Dial, Skip }
+enum Link { Dial, Await, Skip }
 
 fn link(me: GrainId, peer: GrainId, roles: &Roles) -> Link
 ```
 
-- If `roles` is empty for the workspace, or this host is the designated or backup device,
-  the existing rule applies: dial only if `me < peer`. The designated and backup devices
-  therefore stay linked to everyone, and to each other.
+- A star requires a `designated` device. Roles with only `backup` set, or with nothing set,
+  mean mesh, and the existing rule applies: `Dial` only if `me < peer`, otherwise `Await`
+  the peer's dial.
+- In a star, if this host is the designated or backup device, the same id rule applies to
+  every peer. They therefore stay linked to everyone, and to each other.
 - Otherwise (this host is neither), a peer that is neither designated nor backup is `Skip`.
   The designated and backup devices follow the id rule.
 
@@ -184,8 +196,8 @@ Where the rule applies:
 - **Relay.** Unchanged. A reader already forwards what one peer sends to every other session
   (`fan_out(.., Some(from))`).
 
-`SyncRuntime::is_designated(workspace) -> bool` is the hook #188 uses, read from the same
-`peers()` answer.
+`SyncRuntime::is_designated(workspace) -> bool` is the hook #188 uses. It reads only the
+cached device id and the last roles the bridge reported, and never registers anything.
 
 Status: each workspace's sync status gains `topology: mesh | star { designated, backup }`,
 and `sapphire-<app> status` prints it.
@@ -242,10 +254,12 @@ and `sapphire-<app> status` prints it.
 - **Integration (three devices, existing sync test harness):**
   1. With A designated, an edit on B reaches C, and B and C hold no session with each other.
   2. With A stopped, the backup takes over, and edits still arrive with no gap longer than
-     a dial pass.
+     a dial pass. (Not enforced by a test.)
   3. A returns and does **not** take the role back (non-preemption).
-  4. A workspace hosted on B and C only syncs B↔C directly while another workspace is in a
-     star.
+  4. B and C, which the top-priority device does not host, elect among themselves and sync
+     directly. Cross-workspace isolation is covered by the `Elector` unit test
+     `a_peer_not_hosting_the_workspace_is_not_a_candidate`, because the test harness runs
+     one workspace per host.
   5. With every priority at 0, the mesh is used.
 
 ## Out of scope

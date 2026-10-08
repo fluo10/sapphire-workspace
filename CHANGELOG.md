@@ -10,12 +10,14 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
+- Designated and backup devices, elected per workspace from bridge `Hello` messages (`sapphire/hello/1`), with a manual priority: `sapphire-bridge device priority`. `sapphire-framework-bridge-api` 2.1.0 adds `bridge.device_priority_set`, `PeersResult.roles` and `PeerInfo.priority`.
 - `bridge.workgroup_create` and `bridge.device_retire` on the bridge control plane; the framework and bridge CLIs use them when the bridge runs.
 - App server: a host workspace registry (`<config dir>/workspaces.toml`), `workspace.list` and `workspace.forget` (which also tears down sync for a workspace whose root no longer exists); `serve` restores synced workspaces on start.
 - `sapphire-framework-gui`: `client::FrameworkClient`, `views::*` and `SyncPanel` for workgroup, device and workspace management; every refresh is time-boxed to 5 s and every command to 30 s (join 90 s, service install 5 min), configurable via `ClientConfig::{fetch_timeout, command_timeout, install_timeout}`; `fonts::{system_cjk_font, add_system_cjk_fallback, install_system_cjk_fallback}` (a CJK system font on Windows / macOS / Linux, no bundled assets); `pub use egui`.
 
 ### Changed
 
+- With two or more devices at priority >= 1 (the default), a workspace syncs as a star around its designated and backup devices. Set every device's priority to 0 to keep the full mesh.
 - `workspace list` lists this host's workspaces from the running server.
 - `StatusReport` / `StatusRow` live in `backend::protocol` (still re-exported from the server crate).
 - `sapphire-framework-bridge-api` is versioned on its own (2.0.0; its major is the control-plane `API_VERSION`), no longer `version.workspace`.

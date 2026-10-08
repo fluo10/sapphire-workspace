@@ -210,6 +210,7 @@ CLI は全アプリ共通のフラット語彙 `serve` / `status` / `service` / 
    新規登録（`Service`）では起動しない — Service 管理の所有者は自身の service manager が
    起動するもので、bridge も CLI もその manager ではない。よってオフライン報告になる。
    spawn 機構自体の再設計は Phase 2 の後続 issue で扱う。
+4. **選出** — Hello を交換し、ワークスペースごとに代表 / 予備デバイスを選ぶ。
 
 workgroup のメタ（デバイス台帳・ワークスペース一覧）はそれ自体が同期されるワークスペースなので、
 **bridge はそのアプリのサーバでもある**（アプリ名 `sapphire-bridge`、マーカー `.bridge/`）。
@@ -222,6 +223,18 @@ CLI は `sapphire-bridge`（`serve` / `status` / `service` / `workspace` / `work
 `workspace` は読み取り専用の `list` のみ — ワークスペースを workgroup に置くのは
 それを所有するアプリの仕事だからである（仕様 §1）。
 詳細はプロセス構成仕様 §5。
+
+### 代表デバイスとスター型同期（#182）
+
+ワークスペースごとに、代表（designated）デバイスと予備（backup）デバイスが 1 台ずつ選ばれる。
+決め手は 2 つ: デバイス台帳の priority（手動。0 なら選出に参加しない）と、bridge 同士が
+`sapphire/hello/1` で交換する Hello（10 秒間隔、40 秒で到達不能とみなす）。選出は
+ワークスペースごとに非先取り（non-preemptive）で、すでに役割を持つデバイスは、あとから来た
+上位デバイスに奪われない。役割は合意（consensus）ではない — 分断中は両側がそれぞれ代表を選ぶ
+ので、代表デバイスが行う作業は冪等でなければならない。代表がいる間、同期は代表と予備を軸にした
+スター型になり、それ以外のデバイス同士は直接つながない。代表が決まらない場合（候補が 1 台以下、
+全員 priority 0、旧版の bridge など）は従来どおりのフルメッシュに戻る。
+詳細は[設計仕様](superpowers/specs/2026-10-08-designated-device-design.md)。
 
 ### セッションはエンドツーエンド
 
