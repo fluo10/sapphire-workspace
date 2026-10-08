@@ -384,7 +384,7 @@ mod tests {
         let a_unclaimed = hello(a_id, 9, ws);
         let mut b_hello = None;
         for _ in 0..2 {
-            let (h, roles) = b.step(t0, &own_b, &[a_unclaimed.clone()]);
+            let (h, roles) = b.step(t0, &own_b, std::slice::from_ref(&a_unclaimed));
             assert_ne!(
                 roles[&ws].designated,
                 Some(b_id),
