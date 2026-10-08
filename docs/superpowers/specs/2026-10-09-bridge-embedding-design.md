@@ -3,7 +3,7 @@
 - Date: 2026-10-09
 - Issues: #185 (main), #194 (REST fixes folded in); tracking: #189
 - Scope:
-  - new crate `sapphire-framework-embed`;
+  - new crate `sapphire-framework-bridge-embed`;
   - `sapphire-framework-bridge` (an `embed` feature, two control-plane methods, `embedding.toml`);
   - `sapphire-framework-bridge-api` (method types, client, own version → 2.2.0);
   - `sapphire-framework-retrieve` (keeps only the `Embedder` trait);
@@ -57,7 +57,7 @@ The fix is to move embedding into the bridge, which is the one per-host daemon:
    or a model that failed to load all mean the app searches with FTS only. None of them is an
    error.
 
-## `sapphire-framework-embed`
+## `sapphire-framework-bridge-embed` (a bridge component)
 
 The crate is used only by the bridge. Its dependencies:
 
@@ -162,7 +162,7 @@ impl EmbedService {
 
 ## Bridge
 
-- **Cargo feature `embed`**, on by default, pulls in `sapphire-framework-embed`. Without it
+- **Cargo feature `embed`**, on by default, pulls in `sapphire-framework-bridge-embed`. Without it
   `embed.info` answers `{ enabled: false }` and `embed.embed` is an error. That keeps a
   slim bridge build possible.
 - **Settings.** `embedding.toml` is read at bridge start. A change takes effect on restart;
