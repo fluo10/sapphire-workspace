@@ -69,6 +69,20 @@ pub struct DbInfo {
     pub pending_count: u64,
 }
 
+/// Whether `retrieve` is empty while `track` still records stamps.
+///
+/// That pair is never consistent. It is what a reset of the retrieve store
+/// leaves behind (`RedbStore::open` wiping an old schema or an
+/// `UpgradeRequired` file, or the store directory deleted by hand). An
+/// incremental sync would skip every file whose stamp matches and the index
+/// would stay empty, so the caller clears the track store.
+fn index_lost_its_documents(
+    retrieve: &(dyn RetrieveStore + Send + Sync),
+    track: &(dyn TrackStore + Send + Sync),
+) -> Result<bool> {
+    Ok(retrieve.document_count()? == 0 && track.count()? > 0)
+}
+
 /// Convert a `sapphire_retrieve::Error` to a `SyncWithHookError::Workspace`.
 fn map_retrieve_err<E: std::error::Error + Send + Sync + 'static>(
     e: sapphire_retrieve::Error,
@@ -133,7 +147,16 @@ impl WorkspaceState {
     /// Open (or create) the retrieve DB for `workspace`.
     pub fn open(workspace: Workspace) -> Result<Self> {
         let backend = Self::open_initial_backend(&workspace)?;
-        let track_db = Self::open_initial_track(&workspace)?;
+        let mut track_db = Self::open_initial_track(&workspace)?;
+        if index_lost_its_documents(backend.as_ref(), track_db.as_ref())? {
+            // The retrieve store was reset (an old schema or redb file format)
+            // but the track store still has a stamp for every file, so an
+            // incremental sync would skip them all. Start the track store over,
+            // as `rebuild` does, so the next sync re-indexes the workspace.
+            drop(track_db);
+            let _ = std::fs::remove_file(workspace.track_db_path());
+            track_db = Self::open_initial_track(&workspace)?;
+        }
         Ok(Self {
             retrieve_db: Mutex::new(backend),
             track_db,
@@ -460,6 +483,15 @@ impl WorkspaceState {
             return Ok(());
         };
         if let Some(backend) = self.make_vector_backend(vector_db, dim)? {
+            if index_lost_its_documents(backend.as_ref(), self.track_db())? {
+                // Same rule as in `open`. The track store is shared without a
+                // lock and stays open here, so its entries are removed in place
+                // instead of deleting the file.
+                let track = self.track_db();
+                for path in track.mtimes()?.keys() {
+                    track.remove(path)?;
+                }
+            }
             *self.retrieve_db.lock().unwrap() = backend;
         }
         Ok(())
@@ -901,6 +933,45 @@ mod tests {
                 hook.removed[0]
             );
             assert_eq!(state.retrieve_db().document_count().unwrap(), 0);
+        }
+
+        fn reopen(tmp: &tempfile::TempDir) -> WorkspaceState {
+            WorkspaceState::open(Workspace::from_root(ctx(), tmp.path()).unwrap()).unwrap()
+        }
+
+        #[test]
+        fn a_wiped_retrieve_store_is_reindexed_by_an_incremental_sync() {
+            let (tmp, state) = make_state();
+            fs::write(tmp.path().join("a.md"), "alpha").unwrap();
+            fs::write(tmp.path().join("b.md"), "bravo").unwrap();
+            state.sync().unwrap();
+            assert_eq!(state.retrieve_db().document_count().unwrap(), 2);
+            let store_dir = state.workspace.retrieve_db_path().with_extension("redb");
+            drop(state);
+
+            // Simulate the reset `RedbStore::open` performs for an old schema or an
+            // `UpgradeRequired` file: the retrieve store is gone, the track store is not.
+            fs::remove_dir_all(&store_dir).unwrap();
+
+            let state = reopen(&tmp);
+            let (upserted, _) = state.sync_retrieve().unwrap();
+
+            assert_eq!(upserted, 2);
+            assert_eq!(state.retrieve_db().document_count().unwrap(), 2);
+        }
+
+        #[test]
+        fn reopening_a_populated_store_keeps_the_track_store() {
+            let (tmp, state) = make_state();
+            fs::write(tmp.path().join("a.md"), "alpha").unwrap();
+            state.sync().unwrap();
+            drop(state);
+
+            let state = reopen(&tmp);
+
+            assert_eq!(state.track_db().count().unwrap(), 1);
+            let (upserted, _) = state.sync_retrieve().unwrap();
+            assert_eq!(upserted, 0, "unchanged files are still skipped");
         }
     }
 
