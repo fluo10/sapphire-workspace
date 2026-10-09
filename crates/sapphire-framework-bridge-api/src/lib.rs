@@ -244,12 +244,12 @@ pub struct UnregisterParams {
 pub struct WorkspaceRoles {
     /// The workspace.
     pub workspace_id: GrainId,
-    /// The designated device, if any candidate exists.
+    /// The primary device, if any candidate exists.
     #[serde(default)]
-    pub designated: Option<GrainId>,
-    /// The backup device, if a second candidate exists.
+    pub primary: Option<GrainId>,
+    /// The secondary device, if a second candidate exists.
     #[serde(default)]
-    pub backup: Option<GrainId>,
+    pub secondary: Option<GrainId>,
 }
 
 /// One device of the workgroup.
@@ -650,12 +650,12 @@ mod tests {
             peers: Vec::new(),
             roles: vec![WorkspaceRoles {
                 workspace_id: ws,
-                designated: Some(d),
-                backup: None,
+                primary: Some(d),
+                secondary: None,
             }],
         };
 
-        assert_eq!(result.roles_for(ws).unwrap().designated, Some(d));
+        assert_eq!(result.roles_for(ws).unwrap().primary, Some(d));
     }
 
     #[test]

@@ -247,7 +247,7 @@ CLI は `sapphire-bridge`（`serve` / `status` / `service` / `workspace` / `work
 
 ### 代表デバイスとスター型同期（#182）
 
-ワークスペースごとに、代表（designated）デバイスと予備（backup）デバイスが 1 台ずつ選ばれる。
+ワークスペースごとに、代表（primary）デバイスと予備（secondary）デバイスが 1 台ずつ選ばれる。
 決め手は 2 つ: デバイス台帳の priority（手動。0 なら選出に参加しない）と、bridge 同士が
 `sapphire/hello/1` で交換する Hello（10 秒間隔、40 秒で到達不能とみなす）。選出は
 ワークスペースごとに非先取り（non-preemptive）で、すでに役割を持つデバイスは、あとから来た
@@ -257,7 +257,7 @@ CLI は `sapphire-bridge`（`serve` / `status` / `service` / `workspace` / `work
 が 1 台だけでも代表は選ばれ、priority 0 の他のデバイスはその代表を介してのみ同期する。代表が
 選ばれない場合（候補がいない＝全員 priority 0、旧版の bridge だけ、など）や、起動直後でまだ誰も
 代表を名乗っていない間は、従来どおりのフルメッシュになる。
-詳細は[設計仕様](superpowers/specs/2026-10-08-designated-device-design.md)。
+詳細は[設計仕様](superpowers/specs/2026-10-08-primary-device-design.md)。
 
 ### セッションはエンドツーエンド
 

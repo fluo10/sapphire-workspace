@@ -360,12 +360,12 @@ pub enum Topology {
     /// Every device syncs with every other. Also the answer when no device was elected.
     #[default]
     Mesh,
-    /// Devices that are neither designated nor backup sync only with those two.
+    /// Devices that are neither primary nor secondary sync only with those two.
     Star {
-        /// The designated device.
-        designated: grain_id::GrainId,
-        /// The backup device, if there is a second candidate.
-        backup: Option<grain_id::GrainId>,
+        /// The primary device.
+        primary: grain_id::GrainId,
+        /// The secondary device, if there is a second candidate.
+        secondary: Option<grain_id::GrainId>,
     },
 }
 

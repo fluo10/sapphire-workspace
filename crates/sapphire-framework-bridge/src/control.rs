@@ -356,8 +356,8 @@ fn peers(bridge: &Bridge) -> Result<PeersResult> {
         .into_iter()
         .map(|(workspace_id, r)| WorkspaceRoles {
             workspace_id,
-            designated: r.designated,
-            backup: r.backup,
+            primary: r.primary,
+            secondary: r.secondary,
         })
         .collect();
     Ok(PeersResult {
@@ -798,7 +798,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn two_bridges_elect_the_same_designated_device() {
+    async fn two_bridges_elect_the_same_primary_device() {
         let net = LoopbackNetwork::new();
         let (ta, tb) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         let dir_a = BridgeDir::at(ta.path().join("bridge")).unwrap();
@@ -845,8 +845,8 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
             let (ra, rb) = (a.roles(), b.roles());
-            if ra.get(&ws).and_then(|r| r.designated) == Some(a_id)
-                && rb.get(&ws).and_then(|r| r.designated) == Some(a_id)
+            if ra.get(&ws).and_then(|r| r.primary) == Some(a_id)
+                && rb.get(&ws).and_then(|r| r.primary) == Some(a_id)
             {
                 break;
             }

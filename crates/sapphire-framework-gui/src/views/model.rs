@@ -14,7 +14,7 @@ pub enum Badge {
     Syncing {
         /// Other devices.
         peers: usize,
-        /// Whether the workspace syncs through a designated device.
+        /// Whether the workspace syncs through a primary device.
         star: bool,
     },
     /// Synced but paused, for this reason.
@@ -193,11 +193,11 @@ pub fn display_path(p: &Path) -> PathBuf {
 /// The roles `peer` holds in any workspace, each named once: what its device row shows.
 pub fn role_badges(peer: &PeerInfo, roles: &[WorkspaceRoles]) -> Vec<&'static str> {
     let mut out = Vec::new();
-    if roles.iter().any(|r| r.designated == Some(peer.device_id)) {
-        out.push("designated");
+    if roles.iter().any(|r| r.primary == Some(peer.device_id)) {
+        out.push("primary");
     }
-    if roles.iter().any(|r| r.backup == Some(peer.device_id)) {
-        out.push("backup");
+    if roles.iter().any(|r| r.secondary == Some(peer.device_id)) {
+        out.push("secondary");
     }
     out
 }
@@ -489,29 +489,29 @@ mod tests {
         let roles = vec![
             WorkspaceRoles {
                 workspace_id: GrainId::random(),
-                designated: Some(me),
-                backup: None,
+                primary: Some(me),
+                secondary: None,
             },
             WorkspaceRoles {
                 workspace_id: GrainId::random(),
-                designated: Some(me),
-                backup: None,
+                primary: Some(me),
+                secondary: None,
             },
             WorkspaceRoles {
                 workspace_id: GrainId::random(),
-                designated: None,
-                backup: Some(me),
+                primary: None,
+                secondary: Some(me),
             },
         ];
-        assert_eq!(role_badges(&p, &roles), vec!["designated", "backup"]);
+        assert_eq!(role_badges(&p, &roles), vec!["primary", "secondary"]);
     }
 
     #[test]
     fn a_star_workspace_says_so() {
         let mut s = synced(2);
         s.topology = Topology::Star {
-            designated: GrainId::random(),
-            backup: None,
+            primary: GrainId::random(),
+            secondary: None,
         };
         assert_eq!(
             badge(&entry("a", None, true, s)).label(),

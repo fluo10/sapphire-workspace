@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust 2024, tokio, serde/serde_json (NDJSON lines), iroh (ALPN), egui (GUI), the existing loopback transport for tests.
 
-**Spec:** `docs/superpowers/specs/2026-10-08-designated-device-design.md`
+**Spec:** `docs/superpowers/specs/2026-10-08-primary-device-design.md`
 
 ## Global Constraints
 
@@ -2121,7 +2121,7 @@ git commit -m "feat(gui): device priority editor, role badges, star in the works
 **Files:**
 - Modify: `docs/ARCHITECTURE.md`
 - Modify: `CHANGELOG.md`
-- Modify: `docs/superpowers/specs/2026-10-08-designated-device-design.md` (one correction)
+- Modify: `docs/superpowers/specs/2026-10-08-primary-device-design.md` (one correction)
 
 - [ ] **Step 1: Correct the spec**
 

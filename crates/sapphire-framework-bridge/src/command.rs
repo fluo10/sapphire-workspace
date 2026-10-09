@@ -109,7 +109,7 @@ pub enum DeviceCommand {
         /// The device's name or id.
         selector: String,
     },
-    /// Show or set a device's election priority (0-255; 0 = never designated or backup).
+    /// Show or set a device's election priority (0-255; 0 = never primary or secondary).
     /// The election is non-preemptive: raising a priority does not move a role already held.
     Priority {
         /// The device's name or id.
@@ -480,10 +480,10 @@ async fn device_list(version: &str) -> Result<i32> {
         let held: Vec<String> = roles
             .iter()
             .filter_map(|r| {
-                if r.designated == Some(peer.device_id) {
-                    Some(format!("designated:{}", r.workspace_id))
-                } else if r.backup == Some(peer.device_id) {
-                    Some(format!("backup:{}", r.workspace_id))
+                if r.primary == Some(peer.device_id) {
+                    Some(format!("primary:{}", r.workspace_id))
+                } else if r.secondary == Some(peer.device_id) {
+                    Some(format!("secondary:{}", r.workspace_id))
                 } else {
                     None
                 }

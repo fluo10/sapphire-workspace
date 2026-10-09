@@ -13,7 +13,7 @@
 - Builds on: #184 (one document per file). Branch `feat/bridge-embed` is stacked on
   `feat/remove-chunker` (PR #196).
 - Related: #183 (spike: Qwen3-VL-Embedding-2B on CPU), #186 (workgroup-shared settings, API
-  key store, CLI/GUI), #187 (synced vector files), #188 (backfill on the designated device).
+  key store, CLI/GUI), #187 (synced vector files), #188 (backfill on the primary device).
 
 ## Background
 
@@ -314,6 +314,6 @@ follow-up issue is filed there. Timer and agent do not configure embedding.
 
 - Workgroup-shared settings, the API key store, and the CLI and GUI for settings: #186.
 - Synced vector files and the template and model header: #187.
-- Backfill on the designated device: #188.
+- Backfill on the primary device: #188.
 - Image embedding: text only for now.
 - GPU backends.
