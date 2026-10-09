@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "apps/sapphire-bridge",
+    "apps/sapphire-bridge-embed",
     "crates/sapphire-framework-track",
     "crates/sapphire-framework-sync",
     "crates/sapphire-framework-session",
