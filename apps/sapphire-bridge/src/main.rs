@@ -39,7 +39,9 @@ async fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
     let command = cli.command.unwrap_or(BridgeCommand::Serve);
     match command
-        .dispatch_with(env!("CARGO_PKG_VERSION"), Some(embed::factory())).await {
+        .dispatch_with(env!("CARGO_PKG_VERSION"), Some(embed::factory()))
+        .await
+    {
         Ok(code) => std::process::ExitCode::from(code as u8),
         Err(err) => {
             eprintln!("sapphire-bridge: {err}");
