@@ -111,7 +111,8 @@ dimension = 768
 ```
 
 `<bridge dir>/embedding.key` (this device): the remote slot's key and nothing else, mode
-`0600` on Unix, created inside the bridge directory's private ACL on Windows.
+`0600` on Unix; on Windows it inherits the bridge directory's permissions, as `node.key`
+does.
 
 The #185 flat layout of `<bridge dir>/embedding.toml` was never released. A file in that
 layout fails to parse; the bridge logs it and treats the device settings as absent.

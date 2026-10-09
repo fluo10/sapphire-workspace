@@ -53,7 +53,9 @@ The fix is to move embedding into the bridge, which is the one per-host daemon:
 4. **REST stays as a provider**, for OpenAI-compatible endpoints. It gets the #194 fixes.
 5. **Settings live in `<bridge dir>/embedding.toml` for now.** The file is per device and not
    synced. #186 moves the shared part to the workgroup root and adds key storage, the CLI and
-   the GUI. This spec defines only the file and its reading.
+   the GUI. This spec defines only the file and its reading. *Superseded by
+   `2026-10-10-embedding-settings-design.md`: the layout below, `provider` and `api_key_env`
+   are gone.*
 6. **No embedding is a normal state.** A missing or disabled configuration, a stopped bridge
    or a model that failed to load all mean the app searches with FTS only. None of them is an
    error.
