@@ -205,11 +205,22 @@ pub trait RetrieveStore: Send + Sync {
 
     // ── embedding ──────────────────────────────────────────────────────────────
 
+    /// Make the store hold vectors from `model` with `dim` values. If it already holds vectors
+    /// from a different model or dimension, they are all dropped (and become pending).
+    /// Idempotent. Stores without vector support ignore it.
+    fn configure_vectors(&self, model: &str, dim: u32) -> Result<()> {
+        let _ = (model, dim);
+        Ok(())
+    }
+
     /// Generate and store embeddings for all documents without a vector.
     ///
     /// Returns the number of documents embedded. A document the embedder
-    /// rejects is logged and stays pending; the call fails only when nothing
-    /// could be embedded and the embedder returned an error.
+    /// rejects is logged and stays pending. The call fails when nothing could
+    /// be embedded and the embedder returned an error, and it also stops early
+    /// (with that error) as soon as a whole batch fails, including every
+    /// one-at-a-time retry: that is a provider outage, not a bad input, so the
+    /// remaining batches are not attempted.
     fn embed_pending(
         &self,
         embedder: &dyn Embedder,

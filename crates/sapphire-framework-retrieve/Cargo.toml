@@ -15,11 +15,10 @@ categories = ["database"]
 # resolves optional dependencies even when their feature is off, so an opt-in
 # SQLite backend would still collide on `links = "sqlite3"`; that is why the
 # legacy sqlite-store backend was removed outright rather than left optional.
-default = ["redb-store", "fastembed-embed"]
+default = ["redb-store"]
 # Pure-Rust cache backend: redb (record storage) + tantivy (full-text index) +
 # brute-force vector search. No C dependencies.
 redb-store      = ["dep:redb", "dep:tantivy"]
-fastembed-embed = ["dep:fastembed"]
 
 [dependencies]
 thiserror.workspace = true
@@ -28,9 +27,7 @@ tantivy    = { version = "0.26", optional = true }
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
-ureq = { version = "3.3", features = ["json"] }
-tokio = { workspace = true, features = ["rt-multi-thread"] }
-fastembed = { version = "6.0", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
+toml.workspace = true

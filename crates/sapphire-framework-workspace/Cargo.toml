@@ -12,7 +12,8 @@ categories = ["filesystem", "database"]
 default = ["redb-store", "fastembed-embed"]
 # Pure-Rust cache backend (redb + tantivy). Default; no SQLite/libsqlite3-sys.
 redb-store      = ["sapphire-retrieve/redb-store"]
-fastembed-embed = ["sapphire-retrieve/fastembed-embed"]
+# Placeholder until Task 6: retrieve no longer has this feature (embedding moved to the bridge).
+fastembed-embed = []
 
 [dependencies]
 sapphire-retrieve = { package = "sapphire-framework-retrieve", version = "0.14.0", path = "../sapphire-framework-retrieve", default-features = false }

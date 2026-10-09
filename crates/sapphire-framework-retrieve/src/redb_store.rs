@@ -13,7 +13,7 @@
 //!
 //! - **redb** holds the source-of-truth cache records. `documents` maps
 //!   `doc_id -> {path, text}`; `vectors` maps `doc_id -> f32[]`; `meta` holds
-//!   `embedding_dim` and `schema_version`.
+//!   `embedding_model`, `embedding_dim` and `schema_version`.
 //! - **tantivy** holds a trigram full-text index (BM25) with one document per
 //!   file. It is derived from redb and can be rebuilt at any time.
 //! - **Vector search is brute-force** over the `vectors` table (exact, no ANN).
@@ -55,7 +55,7 @@ use crate::{
 const DOCUMENTS: TableDefinition<i64, &[u8]> = TableDefinition::new("documents");
 /// `doc_id (i64 LE) -> little-endian f32 blob`.
 const VECTORS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("vectors");
-/// misc key/value metadata (`embedding_dim`, `schema_version`).
+/// misc key/value metadata (`embedding_model`, `embedding_dim`, `schema_version`).
 const META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
 
 /// The store's on-disk shape. 1: chunked records (no key). 2: one record per file.
@@ -218,11 +218,16 @@ pub struct RedbStore {
     writer: Mutex<IndexWriter>,
     reader: IndexReader,
     fields: Fields,
-    dim: Option<u32>,
+    /// The vector dimension; `None` while vector search is off. Interior-mutable
+    /// so [`RetrieveStore::configure_vectors`] can turn vectors on (or switch
+    /// model) on a store that is already open and shared.
+    dim: Mutex<Option<u32>>,
 }
 
 impl RedbStore {
-    /// Open (or create) a store at `dir`. `dim` enables vector search when set.
+    /// Open (or create) a store at `dir`. `dim` enables vector search when set
+    /// (it writes `embedding_dim` only; see [`RetrieveStore::configure_vectors`]
+    /// to also record the model).
     pub fn open(dir: &Path, dim: Option<u32>) -> Result<Self> {
         std::fs::create_dir_all(dir)?;
 
@@ -277,17 +282,14 @@ impl RedbStore {
             writer: Mutex::new(writer),
             reader,
             fields,
-            dim,
+            dim: Mutex::new(dim),
         };
 
         if let Some(d) = dim {
             store.set_meta_u32("embedding_dim", d)?;
         } else if let Some(d) = store.get_meta_u32("embedding_dim")? {
             // Re-open with a previously configured dim.
-            return Ok(Self {
-                dim: Some(d),
-                ..store
-            });
+            *store.dim.lock().unwrap() = Some(d);
         }
         Ok(store)
     }
@@ -310,7 +312,17 @@ impl RedbStore {
     }
 
     pub fn dim(&self) -> Option<u32> {
-        self.dim
+        *self.dim.lock().unwrap()
+    }
+
+    /// Turn vector search on with `dim`, in place, writing `embedding_dim` only
+    /// (the same as `open(dir, Some(dim))`, without opening the store again).
+    /// Prefer [`RetrieveStore::configure_vectors`], which also records the model.
+    pub fn set_dim(&self, dim: u32) -> Result<()> {
+        let mut cur = self.dim.lock().unwrap();
+        self.set_meta_u32("embedding_dim", dim)?;
+        *cur = Some(dim);
+        Ok(())
     }
 
     fn get_doc(&self, doc_id: i64) -> Result<Option<DocRecord>> {
@@ -427,12 +439,51 @@ impl RetrieveStore for RedbStore {
         t.len().map_err(redb_err)
     }
 
+    fn configure_vectors(&self, model: &str, dim: u32) -> Result<()> {
+        // Held across the transaction, so two concurrent calls cannot interleave.
+        let mut cur = self.dim.lock().unwrap();
+        let wtx = self.db.begin_write().map_err(redb_err)?;
+        let changed = {
+            let mut meta = wtx.open_table(META).map_err(redb_err)?;
+            let same_model = meta
+                .get("embedding_model")
+                .map_err(redb_err)?
+                .is_some_and(|g| g.value() == model.as_bytes());
+            let same_dim = meta
+                .get("embedding_dim")
+                .map_err(redb_err)?
+                .is_some_and(|g| g.value() == dim.to_le_bytes().as_slice());
+            let changed = !(same_model && same_dim);
+            if changed {
+                // Vectors from another model (or of another size) are not
+                // comparable with the new ones: drop them all, so every
+                // document becomes pending again.
+                wtx.open_table(VECTORS)
+                    .map_err(redb_err)?
+                    .retain(|_, _| false)
+                    .map_err(redb_err)?;
+                meta.insert("embedding_model", model.as_bytes())
+                    .map_err(redb_err)?;
+                meta.insert("embedding_dim", dim.to_le_bytes().as_slice())
+                    .map_err(redb_err)?;
+            }
+            changed
+        };
+        if changed {
+            wtx.commit().map_err(redb_err)?;
+        } else {
+            wtx.abort().map_err(redb_err)?;
+        }
+        *cur = Some(dim);
+        Ok(())
+    }
+
     fn embed_pending(
         &self,
         embedder: &dyn Embedder,
         on_progress: &dyn Fn(usize, usize),
     ) -> Result<usize> {
-        if self.dim.is_none() {
+        if self.dim().is_none() {
             return Ok(0);
         }
 
@@ -490,6 +541,14 @@ impl RetrieveStore for RedbStore {
                             }
                         }
                     }
+                    // Not one input of the batch went through on its own: the
+                    // provider is down, not one input bad. Stop here rather than
+                    // retrying every remaining document one at a time.
+                    if ok.is_empty()
+                        && let Some(e) = last_err.take()
+                    {
+                        return Err(e);
+                    }
                     ok
                 }
             };
@@ -506,7 +565,7 @@ impl RetrieveStore for RedbStore {
     }
 
     fn vec_info(&self) -> Result<VecInfo> {
-        let Some(dim) = self.dim else {
+        let Some(dim) = self.dim() else {
             return Ok(VecInfo {
                 embedding_dim: 0,
                 vector_count: 0,
@@ -588,7 +647,7 @@ impl RetrieveStore for RedbStore {
     }
 
     fn search_similar(&self, q: &VectorQuery<'_>) -> Result<Vec<FileSearchResult>> {
-        if self.dim.is_none() {
+        if self.dim().is_none() {
             return Ok(Vec::new());
         }
         let query_vecs = q.embedder.embed_texts(&[q.query])?;
@@ -964,6 +1023,129 @@ mod tests {
 
         assert!(err.to_string().contains("provider unreachable"), "{err}");
         assert_eq!(store.vec_info().unwrap().pending_count, 2);
+    }
+
+    #[test]
+    fn configure_vectors_on_a_new_model_drops_vectors() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RedbStore::open(dir.path(), None).unwrap();
+        store.configure_vectors("m", 3).unwrap();
+        store.upsert_document(&doc(1, "/w/a.md", "banana")).unwrap();
+        store.upsert_document(&doc(2, "/w/b.md", "cherry")).unwrap();
+        assert_eq!(store.embed_pending(&FakeEmbedder, &|_, _| {}).unwrap(), 2);
+
+        store.configure_vectors("other", 3).unwrap();
+
+        let info = store.vec_info().unwrap();
+        assert_eq!(info.vector_count, 0);
+        assert!(info.pending_count > 0);
+        assert_eq!(info.embedding_dim, 3);
+    }
+
+    #[test]
+    fn configure_vectors_with_a_new_dim_drops_vectors() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RedbStore::open(dir.path(), None).unwrap();
+        store.configure_vectors("m", 3).unwrap();
+        store.upsert_document(&doc(1, "/w/a.md", "banana")).unwrap();
+        store.embed_pending(&FakeEmbedder, &|_, _| {}).unwrap();
+
+        store.configure_vectors("m", 4).unwrap();
+
+        let info = store.vec_info().unwrap();
+        assert_eq!((info.embedding_dim, info.vector_count), (4, 0));
+        assert_eq!(store.dim(), Some(4));
+    }
+
+    #[test]
+    fn configure_vectors_with_the_same_model_keeps_vectors() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let store = RedbStore::open(dir.path(), None).unwrap();
+            store.configure_vectors("m", 3).unwrap();
+            store.upsert_document(&doc(1, "/w/a.md", "banana")).unwrap();
+            store.upsert_document(&doc(2, "/w/b.md", "cherry")).unwrap();
+            store.embed_pending(&FakeEmbedder, &|_, _| {}).unwrap();
+            store.configure_vectors("m", 3).unwrap();
+            assert_eq!(store.vec_info().unwrap().vector_count, 2);
+        }
+        // Across a reopen too: the model and the dim are kept in meta.
+        let store = RedbStore::open(dir.path(), None).unwrap();
+        store.configure_vectors("m", 3).unwrap();
+        let info = store.vec_info().unwrap();
+        assert_eq!((info.vector_count, info.pending_count), (2, 0));
+    }
+
+    #[test]
+    fn configure_vectors_enables_vectors_on_a_store_opened_without_a_dim() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RedbStore::open(dir.path(), None).unwrap();
+        assert_eq!(store.dim(), None);
+        store.upsert_document(&doc(1, "/w/a.md", "banana")).unwrap();
+        store.upsert_document(&doc(2, "/w/b.md", "cherry")).unwrap();
+
+        store.configure_vectors("m", 3).unwrap();
+
+        assert_eq!(store.dim(), Some(3));
+        assert_eq!(store.embed_pending(&FakeEmbedder, &|_, _| {}).unwrap(), 2);
+        let hits = store
+            .search_similar(&VectorQuery::new("cherry", &FakeEmbedder).limit(5))
+            .unwrap();
+        assert_eq!(hits[0].id, 2);
+    }
+
+    /// Fails every call and counts them.
+    struct CountingBrokenEmbedder(std::sync::atomic::AtomicUsize);
+    impl Embedder for CountingBrokenEmbedder {
+        fn embed_texts(&self, _: &[&str]) -> Result<Vec<Vec<f32>>> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(Error::Embed("provider unreachable".into()))
+        }
+    }
+
+    #[test]
+    fn embed_pending_stops_after_a_fully_failed_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RedbStore::open(dir.path(), Some(3)).unwrap();
+        for i in 0..150 {
+            store
+                .upsert_document(&doc(i, &format!("/w/{i}.md"), &format!("text {i}")))
+                .unwrap();
+        }
+        let embedder = CountingBrokenEmbedder(Default::default());
+
+        let err = store.embed_pending(&embedder, &|_, _| {}).unwrap_err();
+
+        assert!(err.to_string().contains("provider unreachable"), "{err}");
+        // One call for batch 1, then 100 single retries; batch 2 is never tried.
+        assert_eq!(
+            embedder.0.load(std::sync::atomic::Ordering::SeqCst),
+            1 + 100
+        );
+        assert_eq!(store.vec_info().unwrap().pending_count, 150);
+    }
+
+    #[test]
+    fn a_bad_item_in_a_working_batch_does_not_stop_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RedbStore::open(dir.path(), Some(3)).unwrap();
+        // 150 documents over 2 batches; the first batch holds one bad input.
+        for i in 0..150 {
+            let body = if i == 0 {
+                "POISON pill".to_owned()
+            } else {
+                format!("text {i}")
+            };
+            store
+                .upsert_document(&doc(i, &format!("/w/{i}.md"), &body))
+                .unwrap();
+        }
+
+        let embedded = store.embed_pending(&PoisonEmbedder, &|_, _| {}).unwrap();
+
+        assert_eq!(embedded, 149);
+        let info = store.vec_info().unwrap();
+        assert_eq!((info.vector_count, info.pending_count), (149, 1));
     }
 
     #[test]
