@@ -10,6 +10,8 @@
 //! `sapphire-bridge serve` and nothing else, described by [`bridge_service_spec`] through
 //! the command type the bridge re-exports.
 
+mod embed;
+
 use clap::Parser;
 use sapphire_bridge::{BridgeCommand, ServiceCommand, bridge_service_spec};
 
@@ -36,7 +38,8 @@ async fn main() -> std::process::ExitCode {
 
     let cli = Cli::parse();
     let command = cli.command.unwrap_or(BridgeCommand::Serve);
-    match command.dispatch(env!("CARGO_PKG_VERSION")).await {
+    match command
+        .dispatch_with(env!("CARGO_PKG_VERSION"), Some(embed::factory())).await {
         Ok(code) => std::process::ExitCode::from(code as u8),
         Err(err) => {
             eprintln!("sapphire-bridge: {err}");

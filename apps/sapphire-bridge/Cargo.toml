@@ -21,3 +21,10 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tracing.workspace = true
 # The `env-filter` feature is what makes `EnvFilter` exist at all; it is not a default.
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
+sapphire-bridge-api = { package = "sapphire-framework-bridge-api", path = "../../crates/sapphire-framework-bridge-api" }
+sapphire-framework-bridge-embed = { path = "../../crates/sapphire-framework-bridge-embed" }
+async-trait.workspace = true
+dirs.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

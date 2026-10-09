@@ -5499,8 +5499,13 @@ dependencies = [
 name = "sapphire-bridge"
 version = "0.14.0"
 dependencies = [
+ "async-trait",
  "clap",
+ "dirs",
  "sapphire-framework-bridge",
+ "sapphire-framework-bridge-api",
+ "sapphire-framework-bridge-embed",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
