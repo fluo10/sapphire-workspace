@@ -40,6 +40,10 @@ pub enum FrameworkCommand {
     /// List the workgroup's devices, invite one or retire one.
     #[command(subcommand)]
     Device(DeviceCommand),
+    /// Show or change the embedding models (the workgroup's local and remote one), this
+    /// device's switches, and its API key. Needs the running bridge.
+    #[command(subcommand)]
+    Embedding(sapphire_bridge_api::EmbeddingCommand),
 }
 
 impl FrameworkCommand {
@@ -65,6 +69,7 @@ impl FrameworkCommand {
             }
             FrameworkCommand::Workgroup(command) => command.dispatch(version).await,
             FrameworkCommand::Device(command) => command.dispatch(version).await,
+            FrameworkCommand::Embedding(command) => embedding(command, version).await,
         }
     }
 }
@@ -311,6 +316,17 @@ async fn connect_running(version: &str) -> Result<BridgeClient> {
     BridgeClient::connect_running("cli", version)
         .await
         .map_err(Error::from)
+}
+
+/// `embedding …`: always through the running bridge, whose files these are.
+async fn embedding(command: sapphire_bridge_api::EmbeddingCommand, version: &str) -> Result<i32> {
+    let request = command.request()?;
+    let client = connect_running(version).await?;
+    let report = client.embed_request(request).await?;
+    for line in sapphire_bridge_api::describe(&report) {
+        println!("{line}");
+    }
+    Ok(0)
 }
 
 /// `workspace init`: the server does the creating, over IPC.

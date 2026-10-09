@@ -8,7 +8,8 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use crate::rest::RestEmbedder;
-use crate::settings::{EmbeddingSettings, Provider};
+use sapphire_bridge_api::{ApiKey, LocalModel, RemoteModel};
+
 use crate::template::TEMPLATE_VERSION;
 use crate::{Error, Result};
 
@@ -51,34 +52,35 @@ pub struct EmbedService {
 }
 
 impl EmbedService {
-    /// The service for `s`, or `None` when embedding is disabled.
-    ///
-    /// `cache_dir` is where the local model's files are cached (hf-hub layout); the
-    /// settings' own `cache_dir`, when set, overrides it. The REST provider ignores it.
-    pub fn from_settings(s: &EmbeddingSettings, cache_dir: PathBuf) -> Option<EmbedService> {
-        if !s.enabled {
-            return None;
-        }
-        let settings = s.clone();
-        let (template_version, loader): (u32, Loader) = match s.provider {
-            Provider::Local => {
-                let cache_dir = s.cache_dir.clone().unwrap_or(cache_dir);
-                (TEMPLATE_VERSION, local_loader(settings, cache_dir))
-            }
-            Provider::Openai => (
-                0,
-                Box::new(move || Ok(Box::new(RestEmbedder::new(&settings)) as Box<dyn Embed>)),
-            ),
-        };
+    /// The local model, its files cached in `cache_dir` (hf-hub layout). The model loads
+    /// on the first request.
+    pub fn local(model: &LocalModel, cache_dir: PathBuf) -> EmbedService {
         let info = ModelInfo {
-            model: s.model.clone(),
-            dimension: s.dimension,
-            template_version,
+            model: model.model.clone(),
+            dimension: model.dimension,
+            template_version: TEMPLATE_VERSION,
         };
-        Some(Self::with_loader(info, loader, IDLE_UNLOAD, RETRY_BACKOFF))
+        let loader = local_loader(model.clone(), cache_dir);
+        Self::with_loader(info, loader, IDLE_UNLOAD, RETRY_BACKOFF)
     }
 
-    /// A service over `loader`. For tests and for [`from_settings`](Self::from_settings).
+    /// The remote model, sending `key` when there is one (a local endpoint may need none).
+    pub fn remote(model: &RemoteModel, key: Option<ApiKey>) -> EmbedService {
+        let info = ModelInfo {
+            model: model.model.clone(),
+            dimension: model.dimension,
+            template_version: 0,
+        };
+        let model = model.clone();
+        let loader: Loader =
+            Box::new(
+                move || Ok(Box::new(RestEmbedder::new(&model, key.clone())) as Box<dyn Embed>),
+            );
+        Self::with_loader(info, loader, IDLE_UNLOAD, RETRY_BACKOFF)
+    }
+
+    /// A service over `loader`: what [`local`](Self::local) and [`remote`](Self::remote) build on,
+    /// and what tests use.
     pub fn with_loader(
         info: ModelInfo,
         loader: Loader,
@@ -122,14 +124,14 @@ impl EmbedService {
 }
 
 #[cfg(feature = "local")]
-fn local_loader(settings: EmbeddingSettings, cache_dir: PathBuf) -> Loader {
+fn local_loader(settings: LocalModel, cache_dir: PathBuf) -> Loader {
     Box::new(move || {
         Ok(Box::new(crate::local::LocalQwen::load(&settings, &cache_dir)?) as Box<dyn Embed>)
     })
 }
 
 #[cfg(not(feature = "local"))]
-fn local_loader(_settings: EmbeddingSettings, _cache_dir: PathBuf) -> Loader {
+fn local_loader(_settings: LocalModel, _cache_dir: PathBuf) -> Loader {
     Box::new(|| {
         Err(Error::Load(
             "this bridge was built without the `local` embedding feature".into(),
@@ -445,28 +447,33 @@ mod tests {
     }
 
     #[test]
-    fn disabled_settings_give_no_service() {
-        let s = EmbeddingSettings {
-            enabled: false,
-            provider: crate::Provider::Local,
-            model: crate::settings::LOCAL_MODEL.into(),
-            dimension: 1024,
-            max_tokens: 1024,
-            endpoint: None,
-            api_key_env: None,
-            cache_dir: None,
-        };
-        assert!(EmbedService::from_settings(&s, PathBuf::from("unused")).is_none());
-        let on = EmbeddingSettings { enabled: true, ..s };
-        let svc = EmbedService::from_settings(&on, PathBuf::from("unused")).unwrap();
+    fn each_slot_reports_its_model_without_loading() {
+        let local = EmbedService::local(&LocalModel::default(), PathBuf::from("unused"));
         assert_eq!(
-            svc.info(),
+            local.info(),
             ModelInfo {
-                model: crate::settings::LOCAL_MODEL.into(),
+                model: crate::LOCAL_MODEL.into(),
                 dimension: 1024,
                 template_version: crate::TEMPLATE_VERSION,
             }
         );
-        assert!(!svc.loaded());
+        assert!(!local.loaded());
+
+        let remote = EmbedService::remote(
+            &RemoteModel {
+                endpoint: "http://127.0.0.1:9".into(),
+                model: "m".into(),
+                dimension: 8,
+            },
+            None,
+        );
+        assert_eq!(
+            remote.info(),
+            ModelInfo {
+                model: "m".into(),
+                dimension: 8,
+                template_version: 0,
+            }
+        );
     }
 }

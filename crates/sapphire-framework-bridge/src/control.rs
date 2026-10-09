@@ -10,9 +10,11 @@ use std::sync::{Arc, Mutex};
 
 use sapphire_bridge_api::{
     Ack, BRIDGE_NAME, DEVICE_PRIORITY_SET, DEVICE_RETIRE, DevicePrioritySetParams,
-    DevicePrioritySetResult, DeviceRetireParams, DeviceRetireResult, EMBED, EMBED_INFO,
-    EmbedInfoResult, EmbedParams, EmbedResult, INVITE, InviteParams, InviteResult, JOIN,
-    JoinParams, JoinResult, PEERS, PeerInfo, PeersResult, REGISTER, RegisterParams, RegisterResult,
+    DevicePrioritySetResult, DeviceRetireParams, DeviceRetireResult, EMBED, EMBED_DEVICE_SET,
+    EMBED_INFO, EMBED_KEY_CLEAR, EMBED_KEY_SET, EMBED_MODEL_SET, EMBED_SETTINGS,
+    EmbedDeviceSetParams, EmbedInfoResult, EmbedKeySetParams, EmbedModelSetParams, EmbedParams,
+    EmbedResult, EmbedSettingsResult, INVITE, InviteParams, InviteResult, JOIN, JoinParams,
+    JoinResult, PEERS, PeerInfo, PeersResult, REGISTER, RegisterParams, RegisterResult,
     RouteStatus, STATUS, StatusResult, UNREGISTER, UnregisterParams, WORKGROUP_CREATE, WORKSPACES,
     WorkgroupCreateParams, WorkgroupCreateResult, WorkgroupStatus, WorkgroupWorkspaceInfo,
     WorkspaceRoles, WorkspacesResult,
@@ -215,6 +217,69 @@ fn router(bridge: Arc<Bridge>, session: Arc<Session>) -> Router {
                 async move { embed(&bridge, ctx).await }
             }
         })
+        .method(EMBED_SETTINGS, {
+            let bridge = Arc::clone(&bridge);
+            move |_| {
+                let bridge = Arc::clone(&bridge);
+                async move {
+                    embed_settings_report(&bridge)
+                        .map_err(failed)
+                        .and_then(encode)
+                }
+            }
+        })
+        .method(EMBED_MODEL_SET, {
+            let bridge = Arc::clone(&bridge);
+            move |ctx| {
+                let bridge = Arc::clone(&bridge);
+                async move {
+                    let params: EmbedModelSetParams = parse(ctx, "embed.model_set")?;
+                    crate::embed_settings::set_model(&bridge.dir, params).map_err(failed)?;
+                    embed_settings_report(&bridge)
+                        .map_err(failed)
+                        .and_then(encode)
+                }
+            }
+        })
+        .method(EMBED_DEVICE_SET, {
+            let bridge = Arc::clone(&bridge);
+            move |ctx| {
+                let bridge = Arc::clone(&bridge);
+                async move {
+                    let params: EmbedDeviceSetParams = parse(ctx, "embed.device_set")?;
+                    crate::embed_settings::set_device(&bridge.dir, params.slot, params.enabled)
+                        .map_err(failed)?;
+                    embed_settings_report(&bridge)
+                        .map_err(failed)
+                        .and_then(encode)
+                }
+            }
+        })
+        .method(EMBED_KEY_SET, {
+            let bridge = Arc::clone(&bridge);
+            move |ctx| {
+                let bridge = Arc::clone(&bridge);
+                async move {
+                    let params: EmbedKeySetParams = parse(ctx, "embed.key_set")?;
+                    crate::embed_settings::set_key(&bridge.dir, &params.key).map_err(failed)?;
+                    embed_settings_report(&bridge)
+                        .map_err(failed)
+                        .and_then(encode)
+                }
+            }
+        })
+        .method(EMBED_KEY_CLEAR, {
+            let bridge = Arc::clone(&bridge);
+            move |_| {
+                let bridge = Arc::clone(&bridge);
+                async move {
+                    crate::embed_settings::clear_key(&bridge.dir).map_err(failed)?;
+                    embed_settings_report(&bridge)
+                        .map_err(failed)
+                        .and_then(encode)
+                }
+            }
+        })
         .method(INVITE, {
             let bridge = Arc::clone(&bridge);
             move |ctx| {
@@ -394,13 +459,30 @@ pub(crate) fn peer_infos(bridge: &Bridge, workgroup: &Workgroup) -> Result<Vec<P
 
 /// `embed.info` — whether this host embeds, and with which model.
 pub(crate) fn embed_info(bridge: &Bridge) -> EmbedInfoResult {
-    let info = bridge.embedder().and_then(|p| p.info());
+    let provider = bridge.embedder();
+    let info = provider.as_ref().and_then(|p| p.info());
     EmbedInfoResult {
         enabled: info.is_some(),
-        loaded: info.is_some() && bridge.embedder().is_some_and(|p| p.loaded()),
+        loaded: info.is_some() && provider.is_some_and(|p| p.loaded()),
         model: info,
-        note: None,
+        note: bridge.embed_note(),
     }
+}
+
+/// Every `embed.*` settings method's answer: the settings read again, the provider rebuilt
+/// if they changed, and what `embed.info` says now.
+fn embed_settings_report(bridge: &Bridge) -> Result<EmbedSettingsResult> {
+    let resolved = bridge.reload_embed()?;
+    Ok(resolved.report(embed_info(bridge)))
+}
+
+/// A method's parameters, or the error that says they are malformed.
+fn parse<T: serde::de::DeserializeOwned>(
+    ctx: RequestCtx,
+    method: &str,
+) -> std::result::Result<T, RpcError> {
+    serde_json::from_value(ctx.params)
+        .map_err(|e| RpcError::invalid_params(format!("malformed {method}: {e}")))
 }
 
 /// `embed.embed` — one vector per text, in order. A provider failure travels with its own
@@ -408,7 +490,10 @@ pub(crate) fn embed_info(bridge: &Bridge) -> EmbedInfoResult {
 async fn embed(bridge: &Bridge, ctx: RequestCtx) -> std::result::Result<Value, RpcError> {
     let params: EmbedParams = serde_json::from_value(ctx.params)
         .map_err(|e| RpcError::invalid_params(format!("malformed embed request: {e}")))?;
-    let (provider, info) = match bridge.embedder().map(|p| (p, p.info())) {
+    let (provider, info) = match bridge.embedder().map(|p| {
+        let info = p.info();
+        (p, info)
+    }) {
         Some((p, Some(info))) => (p, info),
         _ => {
             return Err(failed(Error::Config(
@@ -1195,5 +1280,201 @@ mod tests {
         let reported: StatusResult =
             serde_json::from_value(call(&client, STATUS, serde_json::json!({})).await).unwrap();
         assert!(!reported.embedding.expect("always reported").enabled);
+    }
+
+    /// Reports the model of the configuration it was built for.
+    struct ConfiguredProvider(sapphire_bridge_api::EmbedModelInfo);
+
+    #[async_trait::async_trait]
+    impl crate::EmbedProvider for ConfiguredProvider {
+        fn info(&self) -> Option<sapphire_bridge_api::EmbedModelInfo> {
+            Some(self.0.clone())
+        }
+        fn loaded(&self) -> bool {
+            false
+        }
+        async fn embed(&self, texts: Vec<String>) -> std::result::Result<Vec<Vec<f32>>, String> {
+            Ok(texts
+                .iter()
+                .map(|_| vec![0.0; self.0.dimension as usize])
+                .collect())
+        }
+    }
+
+    /// As [`bridge`], building providers from the settings; the counter counts builds.
+    fn settings_bridge(
+        tmp: &tempfile::TempDir,
+        avx2: bool,
+    ) -> (Arc<Bridge>, Arc<std::sync::atomic::AtomicUsize>) {
+        let builds = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&builds);
+        let factory: crate::EmbedFactory = Arc::new(move |config, _dir| {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let (model, dimension) = match config {
+                crate::EmbedConfig::Local { model, .. } => (model.model.clone(), model.dimension),
+                crate::EmbedConfig::Remote { model, .. } => (model.model.clone(), model.dimension),
+            };
+            Some(
+                Arc::new(ConfiguredProvider(sapphire_bridge_api::EmbedModelInfo {
+                    model,
+                    dimension,
+                    template_version: 0,
+                })) as Arc<dyn crate::EmbedProvider>,
+            )
+        });
+        let dir = BridgeDir::at(tmp.path().join("bridge")).unwrap();
+        crate::workgroup::Workgroup::create(&dir, "test", "host-a", "aaaa").unwrap();
+        let bridge = Bridge::new(
+            dir,
+            Arc::new(LoopbackNetwork::new().transport("aaaa")),
+            "0.0.0",
+        )
+        .unwrap()
+        .net(NetConfig::default())
+        .embed_factory(factory)
+        .assume_avx2(avx2);
+        (Arc::new(bridge), builds)
+    }
+
+    fn remote_model(model: &str) -> sapphire_bridge_api::RemoteModel {
+        sapphire_bridge_api::RemoteModel {
+            endpoint: "https://api.example.com".into(),
+            model: model.into(),
+            dimension: 8,
+        }
+    }
+
+    #[tokio::test]
+    async fn settings_calls_rebuild_the_provider_only_when_they_change() {
+        use sapphire_bridge_api::{EmbedNote, EmbedSettingsResult, Slot, SlotModel};
+        use std::sync::atomic::Ordering;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let (bridge, builds) = settings_bridge(&tmp, true);
+        bridge.reload_embed().unwrap();
+        let (client, _serving) = connect(&bridge).await;
+
+        let info: EmbedInfoResult =
+            serde_json::from_value(call(&client, EMBED_INFO, serde_json::json!({})).await).unwrap();
+        assert!(!info.enabled);
+        assert_eq!(info.note, Some(EmbedNote::NotConfigured));
+
+        let set: EmbedSettingsResult = serde_json::from_value(
+            call(
+                &client,
+                EMBED_MODEL_SET,
+                serde_json::to_value(EmbedModelSetParams {
+                    slot: Slot::Remote,
+                    model: Some(SlotModel::Remote(remote_model("m1"))),
+                })
+                .unwrap(),
+            )
+            .await,
+        )
+        .unwrap();
+        assert_eq!(set.active, Some(Slot::Remote));
+        assert_eq!(set.info.model.as_ref().unwrap().model, "m1");
+        assert_eq!(set.info.note, Some(EmbedNote::KeyMissing));
+        assert_eq!(builds.load(Ordering::SeqCst), 1);
+
+        // Reading changes nothing, and neither does a reload over the same files.
+        call(&client, EMBED_SETTINGS, serde_json::json!({})).await;
+        bridge.reload_embed().unwrap();
+        assert_eq!(builds.load(Ordering::SeqCst), 1);
+
+        // A key is part of the configuration: storing one rebuilds.
+        let keyed: EmbedSettingsResult = serde_json::from_value(
+            call(
+                &client,
+                EMBED_KEY_SET,
+                serde_json::json!({ "key": "sk-secret" }),
+            )
+            .await,
+        )
+        .unwrap();
+        assert!(keyed.key_set);
+        assert_eq!(keyed.info.note, None);
+        assert_eq!(builds.load(Ordering::SeqCst), 2);
+
+        // Switched off on this device: no provider, and embed.embed says so.
+        call(
+            &client,
+            EMBED_DEVICE_SET,
+            serde_json::json!({ "slot": "remote", "enabled": false }),
+        )
+        .await;
+        let info: EmbedInfoResult =
+            serde_json::from_value(call(&client, EMBED_INFO, serde_json::json!({})).await).unwrap();
+        assert!(!info.enabled);
+        assert_eq!(info.note, Some(EmbedNote::DisabledOnDevice));
+        assert!(
+            client
+                .call::<_, Value>(EMBED, serde_json::json!({ "texts": ["a"] }))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_model_synced_into_the_workgroup_root_is_picked_up_on_reload() {
+        use sapphire_bridge_api::ModelSettings;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let (bridge, _builds) = settings_bridge(&tmp, true);
+        bridge.reload_embed().unwrap();
+        assert!(!embed_info(&bridge).enabled);
+
+        // What arrives from another device: the workgroup's file, written by its sync.
+        let wg = bridge.workgroup().unwrap().unwrap();
+        let models = ModelSettings {
+            local: None,
+            remote: Some(remote_model("from-another-device")),
+        };
+        std::fs::write(wg.embedding_toml(), toml::to_string(&models).unwrap()).unwrap();
+        bridge.reload_embed().unwrap();
+
+        let info = embed_info(&bridge);
+        assert!(info.enabled);
+        assert_eq!(info.model.unwrap().model, "from-another-device");
+    }
+
+    #[tokio::test]
+    async fn without_avx2_a_local_only_workgroup_does_not_embed() {
+        use sapphire_bridge_api::{EmbedNote, LocalModel, Slot, SlotModel};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let (bridge, builds) = settings_bridge(&tmp, false);
+        crate::embed_settings::set_model(
+            &bridge.dir,
+            EmbedModelSetParams {
+                slot: Slot::Local,
+                model: Some(SlotModel::Local(LocalModel::default())),
+            },
+        )
+        .unwrap();
+        bridge.reload_embed().unwrap();
+        let info = embed_info(&bridge);
+        assert!(!info.enabled);
+        assert_eq!(info.note, Some(EmbedNote::NoAvx2));
+        assert_eq!(builds.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn status_and_settings_never_carry_the_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (bridge, _builds) = settings_bridge(&tmp, true);
+        let (client, _serving) = connect(&bridge).await;
+        call(
+            &client,
+            EMBED_KEY_SET,
+            serde_json::json!({ "key": "sk-very-secret" }),
+        )
+        .await;
+        for method in [STATUS, EMBED_SETTINGS, EMBED_INFO] {
+            let answer = call(&client, method, serde_json::json!({}))
+                .await
+                .to_string();
+            assert!(!answer.contains("sk-very-secret"), "{method}: {answer}");
+        }
     }
 }

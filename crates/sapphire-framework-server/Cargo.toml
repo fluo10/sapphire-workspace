@@ -22,7 +22,7 @@ required-features = ["test-util"]
 
 [dependencies]
 sapphire-backend = { package = "sapphire-framework-backend", version = "0.14.0", path = "../sapphire-framework-backend", default-features = false }
-sapphire-bridge-api = { package = "sapphire-framework-bridge-api", version = "2", path = "../sapphire-framework-bridge-api" }
+sapphire-bridge-api = { package = "sapphire-framework-bridge-api", version = "2.3.0", path = "../sapphire-framework-bridge-api", features = ["cli"] }
 sapphire-framework-session = { version = "0.14.0", path = "../sapphire-framework-session" }
 sapphire-framework-service = { version = "0.14.0", path = "../sapphire-framework-service" }
 sapphire-ipc = { package = "sapphire-framework-ipc", version = "0.14.0", path = "../sapphire-framework-ipc" }
