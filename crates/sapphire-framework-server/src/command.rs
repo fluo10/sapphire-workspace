@@ -320,8 +320,9 @@ async fn connect_running(version: &str) -> Result<BridgeClient> {
 
 /// `embedding …`: always through the running bridge, whose files these are.
 async fn embedding(command: sapphire_bridge_api::EmbeddingCommand, version: &str) -> Result<i32> {
-    let request = command.request()?;
+    // Connect first: `key set` asks for the key, which is pointless with no bridge to take it.
     let client = connect_running(version).await?;
+    let request = command.request()?;
     let report = client.embed_request(request).await?;
     for line in sapphire_bridge_api::describe(&report) {
         println!("{line}");
