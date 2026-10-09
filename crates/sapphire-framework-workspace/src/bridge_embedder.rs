@@ -312,6 +312,7 @@ pub(crate) mod testing {
                         template_version: 1,
                     }),
                     loaded: true,
+                    note: None,
                 },
             )
         }

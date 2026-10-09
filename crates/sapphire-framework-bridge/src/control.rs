@@ -399,6 +399,7 @@ pub(crate) fn embed_info(bridge: &Bridge) -> EmbedInfoResult {
         enabled: info.is_some(),
         loaded: info.is_some() && bridge.embedder().is_some_and(|p| p.loaded()),
         model: info,
+        note: None,
     }
 }
 

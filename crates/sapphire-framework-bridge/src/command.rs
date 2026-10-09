@@ -949,6 +949,7 @@ mod status_fallback_tests {
                         template_version: 1,
                     }),
                     loaded: true,
+                    note: None,
                 }),
                 relays: vec![],
             };
@@ -989,6 +990,7 @@ mod status_fallback_tests {
                 template_version: 1,
             }),
             loaded: true,
+            note: None,
         };
         assert_eq!(
             embedding_line(&enabled),
