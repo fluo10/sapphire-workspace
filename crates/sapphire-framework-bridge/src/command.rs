@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::io::Write as _;
 
 use sapphire_bridge_api::{
-    BRIDGE_NAME, BridgeClient, InviteParams, JoinParams, PeerInfo, StatusResult,
+    BRIDGE_NAME, BridgeClient, EmbedInfoResult, InviteParams, JoinParams, PeerInfo, StatusResult,
 };
 use sapphire_framework_service::{Environment, ServiceCommand, ServiceSpec, SystemManager};
 use sapphire_ipc::Endpoint;
@@ -312,6 +312,12 @@ async fn status(version: &str) -> Result<i32> {
         ),
         None => println!("no workgroup"),
     }
+    // One embedding line, whatever the source: disabled, or the model and dimension and
+    // whether it is in memory. A snapshot from before the line existed has nothing to say,
+    // and prints nothing rather than claiming the host does not embed.
+    if let Some(embedding) = &report.status.embedding {
+        println!("{}", embedding_line(embedding));
+    }
     for peer in report.peers {
         println!(
             "  {} {} {}{}",
@@ -335,6 +341,36 @@ async fn status(version: &str) -> Result<i32> {
         );
     }
     Ok(0)
+}
+
+/// The one `bridge status` embedding line: disabled, or the model, its dimension and
+/// whether it is loaded.
+fn embedding_line(embedding: &EmbedInfoResult) -> String {
+    if !embedding.enabled {
+        return "embedding disabled".to_owned();
+    }
+    match &embedding.model {
+        Some(model) => format!(
+            "embedding {} ({} dimension(s)), {}",
+            model.model,
+            model.dimension,
+            if embedding.loaded {
+                "loaded"
+            } else {
+                "not loaded"
+            }
+        ),
+        // An enabled embedding with no model is a provider that is up but has nothing to
+        // say; report it as such rather than inventing a model.
+        None => format!(
+            "embedding enabled, {}",
+            if embedding.loaded {
+                "loaded"
+            } else {
+                "not loaded"
+            }
+        ),
+    }
 }
 
 /// What `bridge status` prints: the control plane's answer, or the last snapshot.
@@ -380,7 +416,9 @@ fn read_status_report() -> Result<Option<StatusReport>> {
                 node_id: snapshot.node_id,
                 workgroup: snapshot.workgroup,
                 routes: snapshot.routes,
-                embedding: None,
+                // The last snapshot recorded what the bridge was embedding; a snapshot
+                // written before the line existed simply has none.
+                embedding: snapshot.embedding,
             },
             stale: true,
         })),
@@ -798,6 +836,15 @@ mod status_fallback_tests {
                     last_error: None,
                 }],
                 routes: vec![],
+                embedding: Some(sapphire_bridge_api::EmbedInfoResult {
+                    enabled: true,
+                    model: Some(sapphire_bridge_api::EmbedModelInfo {
+                        model: "all-minilm".into(),
+                        dimension: 384,
+                        template_version: 1,
+                    }),
+                    loaded: true,
+                }),
                 relays: vec![],
             };
             std::fs::write(
@@ -806,10 +853,52 @@ mod status_fallback_tests {
             )
             .unwrap();
 
+            // The fallback report carries the embedding the snapshot recorded, so a
+            // stopped bridge still says what it was embedding.
+            let report = read_status_report().unwrap().expect("the snapshot");
+            assert!(report.stale);
+            let embedding = report.status.embedding.expect("an embedding line");
+            assert!(embedding.enabled);
+            assert_eq!(embedding.model.expect("a model").dimension, 384);
+
             BridgeCommand::Status.dispatch("0.0.0").await.unwrap()
         })
         .await;
         assert_eq!(code, 0, "a stopped bridge still has a story worth telling");
+    }
+
+    #[test]
+    fn the_embedding_line_names_the_model_dimension_and_loaded_state() {
+        use sapphire_bridge_api::{EmbedInfoResult, EmbedModelInfo};
+
+        assert_eq!(
+            embedding_line(&EmbedInfoResult::default()),
+            "embedding disabled"
+        );
+
+        let enabled = EmbedInfoResult {
+            enabled: true,
+            model: Some(EmbedModelInfo {
+                model: "all-minilm".into(),
+                dimension: 384,
+                template_version: 1,
+            }),
+            loaded: true,
+        };
+        assert_eq!(
+            embedding_line(&enabled),
+            "embedding all-minilm (384 dimension(s)), loaded"
+        );
+
+        // A model that is enabled but not yet in memory says so.
+        let cold = EmbedInfoResult {
+            loaded: false,
+            ..enabled
+        };
+        assert_eq!(
+            embedding_line(&cold),
+            "embedding all-minilm (384 dimension(s)), not loaded"
+        );
     }
 
     #[tokio::test]

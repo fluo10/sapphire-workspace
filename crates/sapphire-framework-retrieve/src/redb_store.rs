@@ -539,6 +539,9 @@ impl RetrieveStore for RedbStore {
         let mut done = 0;
         let mut embedded = 0;
         let mut last_err = None;
+        // Set when the loop broke on a fully-failed batch: the caller is told,
+        // even if earlier batches embedded (#194).
+        let mut broke_early = false;
         for batch in pending.chunks(100) {
             let texts: Vec<&str> = batch.iter().map(|(_, t)| t.as_str()).collect();
             let (vectors, outage): (Vec<(i64, Vec<f32>)>, bool) = match embedder.embed_texts(&texts)
@@ -579,12 +582,24 @@ impl RetrieveStore for RedbStore {
             on_progress(done, total);
             if outage {
                 // Stop rather than retry every remaining document one at a
-                // time; they stay pending for the next run (#194).
+                // time; they stay pending for the next run (#194). The batch
+                // loop's `last_err` is the provider's own error, from the
+                // per-item retries above.
+                broke_early = true;
                 break;
             }
         }
-        // Nothing embedded in this run: report it, so a broken configuration
-        // or a provider outage is not silent.
+        // The loop broke on a fully-failed batch: a provider outage, whether
+        // or not earlier batches embedded. The caller must hear it (#194), so
+        // it is an error even when `embedded` is not zero. The vectors the
+        // earlier batches stored are already committed; the rest stay pending.
+        if broke_early {
+            return Err(
+                last_err.unwrap_or_else(|| Error::Embed("the embedding provider went down".into()))
+            );
+        }
+        // Nothing embedded in this run and the loop did not break: report the
+        // last failure, so a broken configuration is not silent.
         match last_err {
             Some(e) if embedded == 0 => Err(e),
             _ => Ok(embedded),
@@ -1168,11 +1183,45 @@ mod tests {
                 .unwrap();
         }
 
-        let embedded = store.embed_pending(&PoisonEmbedder, &|_, _| {}).unwrap();
+        // The last batch failed as a whole: the call reports it (#194), even though the
+        // first batch embedded.
+        let err = store
+            .embed_pending(&PoisonEmbedder, &|_, _| {})
+            .unwrap_err();
+        assert!(err.to_string().contains("input rejected"), "{err}");
 
-        assert_eq!(embedded, 100);
+        // The 100 documents the first batch embedded are stored, not re-pended; only the
+        // one bad input stays pending.
         let info = store.vec_info().unwrap();
         assert_eq!((info.vector_count, info.pending_count), (100, 1));
+    }
+
+    #[test]
+    fn a_mid_run_outage_is_reported_and_leaves_the_later_batch_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RedbStore::open(dir.path(), Some(3)).unwrap();
+        // 150 documents over 2 batches. Every document of batch 2 carries "POISON", so the
+        // provider fails that whole batch — and every per-item retry — while batch 1's
+        // documents all embed.
+        for i in 0..150 {
+            let body = if i >= 100 {
+                "POISON pill".to_owned()
+            } else {
+                format!("text {i}")
+            };
+            store
+                .upsert_document(&doc(i, &format!("/w/{i}.md"), &body))
+                .unwrap();
+        }
+
+        let err = store
+            .embed_pending(&PoisonEmbedder, &|_, _| {})
+            .unwrap_err();
+        assert!(err.to_string().contains("input rejected"), "{err}");
+
+        // Batch 1's 100 documents are embedded; batch 2's 50 stay pending for the next run.
+        let info = store.vec_info().unwrap();
+        assert_eq!((info.vector_count, info.pending_count), (100, 50));
     }
 
     #[test]

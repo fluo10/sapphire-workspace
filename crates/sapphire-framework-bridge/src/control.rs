@@ -370,7 +370,7 @@ pub(crate) fn peer_infos(bridge: &Bridge, workgroup: &Workgroup) -> Result<Vec<P
 }
 
 /// `embed.info` — whether this host embeds, and with which model.
-fn embed_info(bridge: &Bridge) -> EmbedInfoResult {
+pub(crate) fn embed_info(bridge: &Bridge) -> EmbedInfoResult {
     let info = bridge.embedder().and_then(|p| p.info());
     EmbedInfoResult {
         enabled: info.is_some(),

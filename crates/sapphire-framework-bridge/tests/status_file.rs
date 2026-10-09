@@ -150,6 +150,7 @@ async fn the_writer_writes_to_the_bridge_directory_it_is_handed() {
         workgroup: None,
         peers: vec![],
         routes: vec![],
+        embedding: None,
         relays: vec!["https://relay.example".into()],
     };
     let writer =

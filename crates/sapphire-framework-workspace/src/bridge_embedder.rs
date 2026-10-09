@@ -11,6 +11,15 @@ use sapphire_retrieve::{Embedder, Error, Result};
 /// The `kind` this embedder introduces itself as, for the bridge's client table.
 const CLIENT_KIND: &str = "workspace";
 
+/// How long to wait for the bridge to answer `embed.info` before treating it as "no
+/// embedder".
+///
+/// A local IPC call answers in milliseconds; a bridge that accepts the connection and then
+/// stalls must not hang [`BridgeEmbedder::connect`] — and through it `load_embedder` —
+/// for ever. Two seconds is far more than a healthy bridge needs and short enough that a
+/// stalled one is a hiccup rather than a hang.
+const EMBED_INFO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// One unit of work for the embedder's thread.
 enum Job {
     /// Embed `texts` and reply with the vectors, or the reason there are none.
@@ -49,8 +58,12 @@ impl BridgeEmbedder {
             .expect("spawning the embedder thread");
 
         // The thread reports the model, `None` (no bridge / embedding off), or nothing at
-        // all if it panicked. All three but the first mean "no embedder".
-        match info_rx.recv() {
+        // all if it panicked. Every one but the first means "no embedder". The wait is
+        // bounded: a bridge that connects and then stalls must not hang this caller, which
+        // is on the path of `load_embedder`. The worker's own `embed_info` timeout usually
+        // fires first; this is the belt-and-braces guard for a worker stuck before it can
+        // even send.
+        match info_rx.recv_timeout(EMBED_INFO_TIMEOUT) {
             Ok(Some(info)) => {
                 let embedder = BridgeEmbedder {
                     tx: Mutex::new(jobs_tx),
@@ -87,10 +100,21 @@ fn serve(
         let _ = info_tx.send(None);
         return;
     };
-    let info = match rt.block_on(client.embed_info()) {
-        Ok(info) => info,
-        Err(err) => {
+    // Bounded: a bridge that accepted the connection and then stalls on `embed.info` must
+    // be treated as "no embedder", not waited on for ever.
+    // The whole probe runs inside the runtime: `embed_info` builds a future that needs
+    // the reactor, so it must be constructed inside `block_on`, not passed to it.
+    let info = match rt
+        .block_on(async { tokio::time::timeout(EMBED_INFO_TIMEOUT, client.embed_info()).await })
+    {
+        Ok(Ok(info)) => info,
+        Ok(Err(err)) => {
             tracing::debug!("the bridge did not answer embed.info: {err}");
+            let _ = info_tx.send(None);
+            return;
+        }
+        Err(_elapsed) => {
+            tracing::debug!("the bridge did not answer embed.info within {EMBED_INFO_TIMEOUT:?}");
             let _ = info_tx.send(None);
             return;
         }
@@ -302,6 +326,67 @@ pub(crate) mod testing {
         }
     }
 
+    /// A fake bridge that accepts a connection and then answers nothing.
+    ///
+    /// Every accepted connection is held open, never read or written: a client that
+    /// connects here waits on the handshake for ever, which is exactly the stall a bounded
+    /// [`BridgeEmbedder::connect`] must survive.
+    pub(crate) struct StallingBridge {
+        pub(crate) endpoint: Endpoint,
+        rt: Option<tokio::runtime::Runtime>,
+    }
+
+    impl StallingBridge {
+        /// Bind at `<dir>/bridge` and accept connections without answering them.
+        pub(crate) fn start(dir: &std::path::Path) -> StallingBridge {
+            let endpoint = Endpoint::in_dir("bridge", dir.to_path_buf());
+            let (rt_tx, rt_rx) = std::sync::mpsc::channel();
+            let ep = endpoint.clone();
+            std::thread::Builder::new()
+                .name("stalling-bridge".to_owned())
+                .spawn(move || {
+                    let rt = tokio::runtime::Builder::new_multi_thread()
+                        .worker_threads(1)
+                        .enable_all()
+                        .build()
+                        .expect("stalling bridge runtime");
+                    rt.block_on(async move {
+                        #[cfg(unix)]
+                        let listener = sapphire_ipc::bind(&ep)
+                            .await
+                            .expect("bind the stalling bridge");
+                        #[cfg(windows)]
+                        let mut listener =
+                            sapphire_ipc::bind(&ep).expect("bind the stalling bridge");
+                        tokio::spawn(async move {
+                            // Hold every connection open and answer nothing.
+                            let mut held = Vec::new();
+                            while let Ok(conn) = listener.accept().await {
+                                held.push(conn);
+                            }
+                        });
+                    });
+                    let _ = rt_tx.send(rt);
+                })
+                .expect("spawn the stalling bridge thread");
+            let rt = rt_rx
+                .recv()
+                .expect("the stalling bridge bound its endpoint");
+            StallingBridge {
+                endpoint,
+                rt: Some(rt),
+            }
+        }
+    }
+
+    impl Drop for StallingBridge {
+        fn drop(&mut self) {
+            if let Some(rt) = self.rt.take() {
+                rt.shutdown_background();
+            }
+        }
+    }
+
     impl Drop for FakeBridge {
         fn drop(&mut self) {
             // `shutdown_background`, not a plain drop: a test may drop this inside a runtime.
@@ -314,7 +399,7 @@ pub(crate) mod testing {
 
 #[cfg(test)]
 mod tests {
-    use super::testing::FakeBridge;
+    use super::testing::{FakeBridge, StallingBridge};
     use super::*;
     use sapphire_bridge_api::EmbedInfoResult;
 
@@ -364,6 +449,28 @@ mod tests {
         assert_eq!(vectors, vec![vec![0.0, 1.0]]);
         drop(embedder);
         drop(bridge);
+    }
+
+    /// A bridge that accepts the connection and then stalls must not hang `connect`: the
+    /// `embed.info` probe is bounded, and a timeout is "no embedder", the same path as a
+    /// failed connection.
+    #[test]
+    fn connect_gives_up_on_a_bridge_that_accepts_but_never_answers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bridge = StallingBridge::start(tmp.path());
+
+        let began = std::time::Instant::now();
+        let connected = BridgeEmbedder::connect(Some(bridge.endpoint.clone()));
+        let elapsed = began.elapsed();
+
+        assert!(
+            connected.is_none(),
+            "a bridge that never answers embed.info is no embedder"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "connect must time out rather than hang: took {elapsed:?}"
+        );
     }
 
     #[test]
