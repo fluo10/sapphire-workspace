@@ -14,7 +14,6 @@ documents. Concurrent editing is handled by the central remote server
 | Feature flag | What it enables | Default |
 |---|---|---|
 | `redb-store` | redb records + tantivy full-text index + brute-force vectors | yes |
-| `fastembed-embed` | On-device embedding via FastEmbed | yes |
 
 ## Quick start
 
@@ -124,26 +123,16 @@ Place `config.toml` inside the marker directory
 ```toml
 [retrieve]
 db = "redb"   # "none" | "redb"
-
-[retrieve.embedding]
-enabled     = true
-provider    = "openai"
-model       = "text-embedding-3-small"
-api_key_env = "OPENAI_API_KEY"
-dimension   = 1536
 ```
+
+Embedding is not configured here: the bridge embeds (`<bridge dir>/embedding.toml`), and
+`WorkspaceState::load_embedder()` asks it. Without a bridge that embeds, search is FTS only.
 
 Environment variable overrides:
 
 | Variable | Values |
 |---|---|
 | `SAPPHIRE_WORKSPACE_RETRIEVE_DB` | `none` / `redb` |
-| `SAPPHIRE_WORKSPACE_EMBEDDING_ENABLED` | `1` / `true` / `yes` |
-| `SAPPHIRE_WORKSPACE_EMBEDDING_PROVIDER` | string |
-| `SAPPHIRE_WORKSPACE_EMBEDDING_MODEL` | string |
-| `SAPPHIRE_WORKSPACE_EMBEDDING_API_KEY_ENV` | env-var name |
-| `SAPPHIRE_WORKSPACE_EMBEDDING_BASE_URL` | URL |
-| `SAPPHIRE_WORKSPACE_EMBEDDING_DIMENSION` | integer |
 
 ## Supported file types
 

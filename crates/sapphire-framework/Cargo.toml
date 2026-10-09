@@ -36,12 +36,11 @@ service = ["dep:sapphire-framework-service"]
 # Everything usable on a native host.
 native = ["workspace", "backend", "server", "bridge", "registry", "service"]
 
-# ── store / embedding passthrough (apply to whichever crates are enabled) ─────
+# ── store passthrough (apply to whichever crates are enabled) ───────────────
 redb-store = [
     "sapphire-framework-workspace?/redb-store",
     "sapphire-framework-backend?/redb-store",
 ]
-fastembed-embed = ["sapphire-framework-workspace?/fastembed-embed"]
 
 [dependencies]
 sapphire-framework-workspace = { version = "0.14.0", path = "../sapphire-framework-workspace", optional = true, default-features = false }
