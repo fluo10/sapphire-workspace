@@ -317,7 +317,8 @@ impl RedbStore {
 
     /// Turn vector search on with `dim`, in place, writing `embedding_dim` only
     /// (the same as `open(dir, Some(dim))`, without opening the store again).
-    /// Prefer [`RetrieveStore::configure_vectors`], which also records the model.
+    /// Legacy: it does not clear vectors of another model or size; callers should
+    /// use [`RetrieveStore::configure_vectors`], which also records the model.
     pub fn set_dim(&self, dim: u32) -> Result<()> {
         let mut cur = self.dim.lock().unwrap();
         self.set_meta_u32("embedding_dim", dim)?;
@@ -333,20 +334,42 @@ impl RedbStore {
     }
 
     /// Store one vector per document in a single write transaction.
-    fn put_vectors(&self, vectors: &[(i64, Vec<f32>)]) -> Result<()> {
+    ///
+    /// A vector whose length is not the store's current dimension is dropped
+    /// with a warning (the document stays pending): it comes from a run that
+    /// overlapped a [`RetrieveStore::configure_vectors`] switch to another model.
+    /// Returns how many vectors were stored.
+    fn put_vectors(&self, vectors: &[(i64, Vec<f32>)]) -> Result<usize> {
         if vectors.is_empty() {
-            return Ok(());
+            return Ok(0);
         }
+        // Held through the commit, so a concurrent `configure_vectors` cannot
+        // change the dimension between the check and the write.
+        let dim = self.dim.lock().unwrap();
+        let Some(want) = *dim else {
+            return Ok(0);
+        };
+        let mut stored = 0;
         let wtx = self.db.begin_write().map_err(redb_err)?;
         {
             let mut vecs = wtx.open_table(VECTORS).map_err(redb_err)?;
             for (doc_id, emb) in vectors {
+                if emb.len() != want as usize {
+                    tracing::warn!(
+                        doc_id,
+                        got = emb.len(),
+                        want,
+                        "embedding has the wrong dimension (the model changed?); not stored"
+                    );
+                    continue;
+                }
                 vecs.insert(vkey(*doc_id).as_slice(), vec_serialize(emb).as_slice())
                     .map_err(redb_err)?;
+                stored += 1;
             }
         }
         wtx.commit().map_err(redb_err)?;
-        Ok(())
+        Ok(stored)
     }
 
     /// Log a document that could not be embedded; it stays pending.
@@ -518,8 +541,12 @@ impl RetrieveStore for RedbStore {
         let mut last_err = None;
         for batch in pending.chunks(100) {
             let texts: Vec<&str> = batch.iter().map(|(_, t)| t.as_str()).collect();
-            let vectors: Vec<(i64, Vec<f32>)> = match embedder.embed_texts(&texts) {
-                Ok(embeddings) => batch.iter().map(|(id, _)| *id).zip(embeddings).collect(),
+            let (vectors, outage): (Vec<(i64, Vec<f32>)>, bool) = match embedder.embed_texts(&texts)
+            {
+                Ok(embeddings) => (
+                    batch.iter().map(|(id, _)| *id).zip(embeddings).collect(),
+                    false,
+                ),
                 // One bad input must not block the rest: retry the batch one
                 // document at a time, and leave each one that still fails pending.
                 Err(_) => {
@@ -542,22 +569,22 @@ impl RetrieveStore for RedbStore {
                         }
                     }
                     // Not one input of the batch went through on its own: the
-                    // provider is down, not one input bad. Stop here rather than
-                    // retrying every remaining document one at a time.
-                    if ok.is_empty()
-                        && let Some(e) = last_err.take()
-                    {
-                        return Err(e);
-                    }
-                    ok
+                    // provider is down, not one input bad.
+                    let outage = ok.is_empty();
+                    (ok, outage)
                 }
             };
-            self.put_vectors(&vectors)?;
-            embedded += vectors.len();
+            embedded += self.put_vectors(&vectors)?;
             done += batch.len();
             on_progress(done, total);
+            if outage {
+                // Stop rather than retry every remaining document one at a
+                // time; they stay pending for the next run (#194).
+                break;
+            }
         }
-        // Nothing embedded at all: report it, so a broken configuration is not silent.
+        // Nothing embedded in this run: report it, so a broken configuration
+        // or a provider outage is not silent.
         match last_err {
             Some(e) if embedded == 0 => Err(e),
             _ => Ok(embedded),
@@ -1123,6 +1150,51 @@ mod tests {
             1 + 100
         );
         assert_eq!(store.vec_info().unwrap().pending_count, 150);
+    }
+
+    #[test]
+    fn a_fully_failed_last_batch_keeps_the_earlier_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RedbStore::open(dir.path(), Some(3)).unwrap();
+        // 101 documents: batch 1 is fine, batch 2 is one bad input.
+        for i in 0..101 {
+            let body = if i == 100 {
+                "POISON pill".to_owned()
+            } else {
+                format!("text {i}")
+            };
+            store
+                .upsert_document(&doc(i, &format!("/w/{i}.md"), &body))
+                .unwrap();
+        }
+
+        let embedded = store.embed_pending(&PoisonEmbedder, &|_, _| {}).unwrap();
+
+        assert_eq!(embedded, 100);
+        let info = store.vec_info().unwrap();
+        assert_eq!((info.vector_count, info.pending_count), (100, 1));
+    }
+
+    #[test]
+    fn vectors_of_the_wrong_size_are_not_stored() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RedbStore::open(dir.path(), None).unwrap();
+        store.configure_vectors("old", 3).unwrap();
+        store.upsert_document(&doc(1, "/w/a.md", "banana")).unwrap();
+        store.upsert_document(&doc(2, "/w/b.md", "cherry")).unwrap();
+        // A run that started under the old model finishes after the switch.
+        store.configure_vectors("new", 4).unwrap();
+
+        let stored = store
+            .put_vectors(&[(1, vec![1.0, 0.0, 0.0]), (2, vec![0.0, 1.0, 0.0, 0.0])])
+            .unwrap();
+
+        assert_eq!(stored, 1);
+        let info = store.vec_info().unwrap();
+        assert_eq!((info.vector_count, info.pending_count), (1, 1));
+        // Through embed_pending too: a 3-value embedder stores nothing in a 4-dim store.
+        assert_eq!(store.embed_pending(&FakeEmbedder, &|_, _| {}).unwrap(), 0);
+        assert_eq!(store.vec_info().unwrap().vector_count, 1);
     }
 
     #[test]

@@ -216,11 +216,11 @@ pub trait RetrieveStore: Send + Sync {
     /// Generate and store embeddings for all documents without a vector.
     ///
     /// Returns the number of documents embedded. A document the embedder
-    /// rejects is logged and stays pending. The call fails when nothing could
-    /// be embedded and the embedder returned an error, and it also stops early
-    /// (with that error) as soon as a whole batch fails, including every
-    /// one-at-a-time retry: that is a provider outage, not a bad input, so the
-    /// remaining batches are not attempted.
+    /// rejects is logged and stays pending. As soon as a whole batch fails,
+    /// including every one-at-a-time retry, the call stops: that is a provider
+    /// outage, not a bad input, so the remaining batches are not attempted and
+    /// stay pending. The call fails only when nothing was embedded in this run
+    /// and the embedder returned an error.
     fn embed_pending(
         &self,
         embedder: &dyn Embedder,
