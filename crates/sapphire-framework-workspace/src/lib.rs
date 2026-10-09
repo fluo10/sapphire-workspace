@@ -4,6 +4,7 @@ pub mod bridge_embedder;
 pub mod config;
 pub mod context;
 pub mod indexer;
+pub mod logging;
 pub mod workspace;
 pub mod workspace_state;
 

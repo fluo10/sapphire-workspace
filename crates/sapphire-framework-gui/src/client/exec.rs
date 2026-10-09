@@ -1,7 +1,9 @@
 //! Carrying out one [`Command`].
 
 use sapphire_backend::protocol as proto;
-use sapphire_bridge_api::{DeviceRetireParams, InviteParams, JoinParams, WorkgroupCreateParams};
+use sapphire_bridge_api::{
+    DevicePrioritySetParams, DeviceRetireParams, InviteParams, JoinParams, WorkgroupCreateParams,
+};
 
 use super::conn::{Connections, unanswered};
 use super::types::{ClientConfig, Command, CommandOutput, ServiceTarget};
@@ -36,7 +38,8 @@ pub(crate) async fn execute(
         Command::WorkgroupCreate { .. }
         | Command::WorkgroupJoin { .. }
         | Command::DeviceInvite { .. }
-        | Command::DeviceRetire { .. } => {
+        | Command::DeviceRetire { .. }
+        | Command::DevicePrioritySet { .. } => {
             let result = tokio::time::timeout(limit, bridge_command(cfg, conns, command))
                 .await
                 .unwrap_or_else(|_| Err(unanswered("sapphire-bridge", limit)));
@@ -92,6 +95,10 @@ async fn bridge_command(
             .map(|r| CommandOutput::Ticket(r.ticket)),
         Command::DeviceRetire { selector } => c
             .device_retire(DeviceRetireParams { selector })
+            .await
+            .map(|_| CommandOutput::Done),
+        Command::DevicePrioritySet { selector, priority } => c
+            .device_priority_set(DevicePrioritySetParams { selector, priority })
             .await
             .map(|_| CommandOutput::Done),
         _ => unreachable!("execute routes only bridge commands here"),

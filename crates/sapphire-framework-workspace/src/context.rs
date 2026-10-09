@@ -143,6 +143,12 @@ impl AppContext {
         self.set_cache_dir(cache_app);
         self.set_data_dir(data_app);
         self.set_config_dir(config_app);
+
+        // The process prints through the framework's subscriber from here on
+        // (see [`crate::logging`]): first writer wins there too, so a second
+        // `init` — or a context initialised after this one already installed
+        // the subscriber — changes nothing.
+        crate::logging::install_console(self.app_name);
     }
 
     /// Resolve one category's platform root: the category's env override
@@ -227,6 +233,29 @@ impl AppContext {
             .get()
             .map(|p| p.as_path())
             .expect("AppContext data dir not initialised: init() failed for this category or was never called")
+    }
+
+    /// Return the directory the app's log file lives in (`{data_dir}/logs`).
+    ///
+    /// The same shape the bridge's own directory has: the log is part of the
+    /// app's persistent state on this host, so it rides in the data tree.
+    /// See [`crate::logging`].
+    ///
+    /// # Panics
+    /// Panics if neither [`init`](Self::init) nor [`set_data_dir`](Self::set_data_dir)
+    /// has been called.
+    pub fn log_dir(&self) -> PathBuf {
+        self.data_dir().join("logs")
+    }
+
+    /// Return the app's log directory if the data directory has been resolved,
+    /// and `None` while it has not (see [`log_dir`](Self::log_dir)).
+    ///
+    /// This is what [`crate::logging::install`] asks: a context whose directories
+    /// were never resolved has nowhere to put a log, and a server started that way
+    /// serves with the console layer alone rather than failing over it.
+    pub fn try_log_dir(&self) -> Option<PathBuf> {
+        self.data_dir.get().map(|p| p.join("logs"))
     }
 
     /// Set the app config directory directly (see

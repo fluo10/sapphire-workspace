@@ -6,12 +6,12 @@ use sapphire_ipc::{Client, ClientInfo, Endpoint, connect_or_absent};
 use tokio::sync::broadcast;
 
 use crate::{
-    Ack, BRIDGE_DATA_NAME, BRIDGE_NAME, DEVICE_RETIRE, DataHeader, DeviceRetireParams,
-    DeviceRetireResult, EMBED, EMBED_INFO, EmbedInfoResult, EmbedParams, EmbedResult, GrainId,
-    INVITE, IncomingParams, InviteParams, InviteResult, JOIN, JoinParams, JoinResult, PEERS,
-    PeersResult, REGISTER, RegisterParams, RegisterResult, STATUS, StatusResult, UNREGISTER,
-    UnregisterParams, WORKGROUP_CREATE, WORKSPACES, WorkgroupCreateParams, WorkgroupCreateResult,
-    WorkspacesResult,
+    Ack, BRIDGE_DATA_NAME, BRIDGE_NAME, DEVICE_PRIORITY_SET, DEVICE_RETIRE, DataHeader,
+    DevicePrioritySetParams, DevicePrioritySetResult, DeviceRetireParams, DeviceRetireResult,
+    EMBED, EMBED_INFO, EmbedInfoResult, EmbedParams, EmbedResult, GrainId, INVITE, IncomingParams,
+    InviteParams, InviteResult, JOIN, JoinParams, JoinResult, PEERS, PeersResult, REGISTER,
+    RegisterParams, RegisterResult, STATUS, StatusResult, UNREGISTER, UnregisterParams,
+    WORKGROUP_CREATE, WORKSPACES, WorkgroupCreateParams, WorkgroupCreateResult, WorkspacesResult,
 };
 
 /// How many pending incoming announcements a subscriber may fall behind by.
@@ -136,6 +136,14 @@ impl BridgeClient {
         params: DeviceRetireParams,
     ) -> sapphire_ipc::Result<DeviceRetireResult> {
         self.client.call(DEVICE_RETIRE, params).await
+    }
+
+    /// Set a device's election priority.
+    pub async fn device_priority_set(
+        &self,
+        params: DevicePrioritySetParams,
+    ) -> sapphire_ipc::Result<DevicePrioritySetResult> {
+        self.client.call(DEVICE_PRIORITY_SET, params).await
     }
 
     /// Stop owning one workspace.

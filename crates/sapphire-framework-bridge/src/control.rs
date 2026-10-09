@@ -9,12 +9,13 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use sapphire_bridge_api::{
-    Ack, BRIDGE_NAME, DEVICE_RETIRE, DeviceRetireParams, DeviceRetireResult, EMBED, EMBED_INFO,
+    Ack, BRIDGE_NAME, DEVICE_PRIORITY_SET, DEVICE_RETIRE, DevicePrioritySetParams,
+    DevicePrioritySetResult, DeviceRetireParams, DeviceRetireResult, EMBED, EMBED_INFO,
     EmbedInfoResult, EmbedParams, EmbedResult, INVITE, InviteParams, InviteResult, JOIN,
     JoinParams, JoinResult, PEERS, PeerInfo, PeersResult, REGISTER, RegisterParams, RegisterResult,
     RouteStatus, STATUS, StatusResult, UNREGISTER, UnregisterParams, WORKGROUP_CREATE, WORKSPACES,
     WorkgroupCreateParams, WorkgroupCreateResult, WorkgroupStatus, WorkgroupWorkspaceInfo,
-    WorkspacesResult,
+    WorkspaceRoles, WorkspacesResult,
 };
 use sapphire_ipc::{
     Connection, Endpoint, PeerHandle, RequestCtx, Router, RpcError, ServerInfo, serve,
@@ -49,7 +50,6 @@ impl Owners {
     }
 
     /// Is this app's server connected right now?
-    #[cfg(any(test, feature = "test-util"))]
     pub fn is_online(&self, app_name: &str) -> bool {
         self.by_app.lock().expect("owners").contains_key(app_name)
     }
@@ -247,6 +247,17 @@ fn router(bridge: Arc<Bridge>, session: Arc<Session>) -> Router {
                 async move { device_retire(&bridge, ctx).map_err(failed).and_then(encode) }
             }
         })
+        .method(DEVICE_PRIORITY_SET, {
+            let bridge = Arc::clone(&bridge);
+            move |ctx| {
+                let bridge = Arc::clone(&bridge);
+                async move {
+                    device_priority_set(&bridge, ctx)
+                        .map_err(failed)
+                        .and_then(encode)
+                }
+            }
+        })
         .method(WORKSPACES, {
             let bridge = Arc::clone(&bridge);
             move |_| {
@@ -340,8 +351,18 @@ async fn unregister(bridge: &Bridge, ctx: RequestCtx) -> std::result::Result<Val
 /// `bridge.peers` — the workgroup's devices, and which are reachable.
 fn peers(bridge: &Bridge) -> Result<PeersResult> {
     let workgroup = bridge.workgroup()?.ok_or(Error::NoWorkgroup)?;
+    let roles = bridge
+        .roles()
+        .into_iter()
+        .map(|(workspace_id, r)| WorkspaceRoles {
+            workspace_id,
+            designated: r.designated,
+            backup: r.backup,
+        })
+        .collect();
     Ok(PeersResult {
         peers: peer_infos(bridge, &workgroup)?,
+        roles,
     })
 }
 
@@ -363,6 +384,8 @@ pub(crate) fn peer_infos(bridge: &Bridge, workgroup: &Workgroup) -> Result<Vec<P
                 device_id: d.id,
                 name: d.name.clone(),
                 connected: !node_id.is_empty() && bridge.transport().is_connected(&node_id),
+                priority: d.priority,
+                availability: bridge.neighbours().get(d.id).and_then(|h| h.availability),
                 node_id,
             }
         })
@@ -544,6 +567,22 @@ fn device_retire(bridge: &Bridge, ctx: RequestCtx) -> Result<DeviceRetireResult>
     })
 }
 
+/// `bridge.device_priority_set` — set a device's election priority.
+///
+/// Refuses a retired device. Takes effect at this host's next election round; peers learn
+/// it when the ledger change syncs to them.
+fn device_priority_set(bridge: &Bridge, ctx: RequestCtx) -> Result<DevicePrioritySetResult> {
+    let params: DevicePrioritySetParams = serde_json::from_value(ctx.params)
+        .map_err(|e| Error::Config(format!("malformed device_priority_set: {e}")))?;
+    let workgroup = bridge.workgroup()?.ok_or(Error::NoWorkgroup)?;
+    let device = workgroup.set_priority(&params.selector, params.priority)?;
+    Ok(DevicePrioritySetResult {
+        device_id: device.id,
+        name: device.name,
+        priority: device.priority,
+    })
+}
+
 /// `bridge.workspaces` — what the workgroup holds.
 ///
 /// The bridge is the app server of the workgroup's own workspace, so this is the list it
@@ -704,6 +743,119 @@ mod tests {
         let peers: PeersResult =
             serde_json::from_value(call(&client, PEERS, serde_json::json!({})).await).unwrap();
         assert!(peers.peers.iter().all(|p| p.name != "laptop"));
+    }
+
+    #[tokio::test]
+    async fn device_priority_set_changes_the_ledger_and_peers_reports_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bridge = bridge(&tmp);
+        let (client, _serving) = connect(&bridge).await;
+
+        let set: sapphire_bridge_api::DevicePrioritySetResult = serde_json::from_value(
+            call(
+                &client,
+                sapphire_bridge_api::DEVICE_PRIORITY_SET,
+                serde_json::json!({ "selector": "host-a", "priority": 7 }),
+            )
+            .await,
+        )
+        .unwrap();
+        assert_eq!(set.priority, 7);
+
+        let peers: PeersResult =
+            serde_json::from_value(call(&client, PEERS, serde_json::json!({})).await).unwrap();
+        assert_eq!(
+            peers
+                .peers
+                .iter()
+                .find(|p| p.name == "host-a")
+                .unwrap()
+                .priority,
+            7
+        );
+    }
+
+    #[tokio::test]
+    async fn device_priority_set_refuses_a_retired_device() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bridge = bridge(&tmp);
+        let wg = bridge.workgroup().unwrap().unwrap();
+        wg.devices()
+            .unwrap()
+            .add("laptop", Some("bbbb".into()), None)
+            .unwrap();
+        wg.retire_device("laptop", "aaaa").unwrap();
+        let (client, _serving) = connect(&bridge).await;
+
+        let err = client
+            .call::<_, Value>(
+                sapphire_bridge_api::DEVICE_PRIORITY_SET,
+                serde_json::json!({ "selector": "laptop", "priority": 3 }),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("retired"), "{err}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn two_bridges_elect_the_same_designated_device() {
+        let net = LoopbackNetwork::new();
+        let (ta, tb) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let dir_a = BridgeDir::at(ta.path().join("bridge")).unwrap();
+        let dir_b = BridgeDir::at(tb.path().join("bridge")).unwrap();
+        let wa = crate::workgroup::Workgroup::create(&dir_a, "test", "host-a", "aaaa").unwrap();
+        wa.devices()
+            .unwrap()
+            .add("host-b", Some("bbbb".into()), None)
+            .unwrap();
+        wa.set_priority("host-a", 5).unwrap();
+        crate::testing::adopt_workgroup(&dir_b, &wa).unwrap();
+        let timing = crate::hello::HelloTiming {
+            interval: std::time::Duration::from_millis(50),
+            dead: std::time::Duration::from_millis(300),
+        };
+        let make = |dir: BridgeDir, node: &str| {
+            Arc::new(
+                Bridge::new(dir, Arc::new(net.transport(node)), "0.0.0")
+                    .unwrap()
+                    .net(NetConfig::default())
+                    .hello_timing(timing),
+            )
+        };
+        let (a, b) = (make(dir_a, "aaaa"), make(dir_b, "bbbb"));
+        let ws = grain_id::GrainId::random();
+        let mut keep = Vec::new();
+        for bridge in [&a, &b] {
+            tokio::spawn(crate::hello::run(Arc::clone(bridge)));
+            tokio::spawn(crate::data::inbound(
+                Arc::clone(bridge),
+                NetConfig::default(),
+            ));
+            let (client, serving) = connect(bridge).await;
+            call(
+                &client,
+                REGISTER,
+                serde_json::to_value(registration(ws)).unwrap(),
+            )
+            .await;
+            keep.push((client, serving)); // the registration lasts as long as the connection
+        }
+        let a_id = wa.this_device("aaaa").unwrap().id;
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let (ra, rb) = (a.roles(), b.roles());
+            if ra.get(&ws).and_then(|r| r.designated) == Some(a_id)
+                && rb.get(&ws).and_then(|r| r.designated) == Some(a_id)
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no agreement: {ra:?} / {rb:?}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
     }
 
     fn registration(ws: grain_id::GrainId) -> RegisterParams {

@@ -156,6 +156,11 @@ impl LivePeers {
     pub(crate) async fn drop_connections(&self) {
         self.sessions.lock().await.clear();
     }
+
+    /// Close every session whose device `keep` rejects, as `drop_connections` does for all.
+    pub(crate) async fn retain(&self, keep: impl Fn(&GrainId) -> bool) {
+        self.sessions.lock().await.retain(|device, _| keep(device));
+    }
 }
 
 #[cfg(test)]

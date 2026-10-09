@@ -13,8 +13,10 @@ mod command;
 mod control;
 mod data;
 mod dir;
+mod election;
 mod embed;
 mod error;
+mod hello;
 mod invite;
 #[cfg(feature = "node")]
 mod iroh;
@@ -43,6 +45,7 @@ pub use command::{BridgeCommand, bridge_service_spec};
 pub use dir::{BRIDGE_DIR_ENV, BRIDGE_FORMAT_VERSION, BridgeDir, InstanceLock};
 pub use embed::{EmbedFactory, EmbedProvider};
 pub use error::{Error, Result};
+pub use hello::{HELLO_ALPN, HelloTiming};
 pub use invite::{DEFAULT_TTL, Invite, Invites, TICKET_PREFIX, Ticket};
 #[cfg(feature = "node")]
 pub use iroh::{IrohTransport, NodeAddr};
@@ -107,6 +110,14 @@ pub struct Bridge {
     workgroup_driver: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Answers `embed.*`; `None` when this host has no embedding.
     embed: Option<Arc<dyn EmbedProvider>>,
+    /// How often this bridge says Hello, and how long silence means gone.
+    hello_timing: hello::HelloTiming,
+    /// The peers this bridge has heard Hellos from, and the Hello links it holds.
+    neighbours: Arc<hello::Neighbours>,
+    /// This bridge's current Hello, sent on every link. `None` until the first election.
+    hello_tx: tokio::sync::watch::Sender<Option<hello::Hello>>,
+    /// The roles this bridge last computed, per workspace it hosts.
+    roles: Mutex<std::collections::BTreeMap<GrainId, election::Roles>>,
 }
 
 impl Bridge {
@@ -135,6 +146,10 @@ impl Bridge {
             workgroup_replica: Mutex::new(None),
             workgroup_driver: Mutex::new(None),
             embed: None,
+            hello_timing: hello::HelloTiming::default(),
+            neighbours: Arc::default(),
+            hello_tx: tokio::sync::watch::channel(None).0,
+            roles: Mutex::default(),
         })
     }
 
@@ -164,6 +179,12 @@ impl Bridge {
 
     pub(crate) fn embedder(&self) -> Option<&Arc<dyn EmbedProvider>> {
         self.embed.as_ref()
+    }
+
+    /// How often this bridge says Hello, and how long silence means gone.
+    pub fn hello_timing(mut self, timing: hello::HelloTiming) -> Bridge {
+        self.hello_timing = timing;
+        self
     }
 
     /// The endpoints this bridge serves on: the control plane first, the data plane second.
@@ -290,6 +311,7 @@ impl Bridge {
         let result = tokio::select! {
             result = control::listen(Arc::clone(&bridge), control_endpoint, info) => result,
             result = data::listen(Arc::clone(&bridge), data_endpoint) => result,
+            result = hello::run(Arc::clone(&bridge)) => result,
             result = data::inbound(bridge, net) => result,
         };
         drop(status);
@@ -377,6 +399,16 @@ impl Bridge {
     #[cfg(any(test, feature = "test-util"))]
     pub fn is_app_online(&self, app_name: &str) -> bool {
         self.owners().is_online(app_name)
+    }
+
+    /// The roles this bridge last computed, per workspace it hosts.
+    pub(crate) fn roles(&self) -> std::collections::BTreeMap<GrainId, election::Roles> {
+        self.roles.lock().expect("roles").clone()
+    }
+
+    /// The peers this bridge has heard Hellos from.
+    pub(crate) fn neighbours(&self) -> &Arc<hello::Neighbours> {
+        &self.neighbours
     }
 
     /// Inbound streams waiting for their owner.

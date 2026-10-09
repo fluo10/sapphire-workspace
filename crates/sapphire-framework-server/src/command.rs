@@ -5,7 +5,8 @@ use std::path::PathBuf;
 
 use sapphire_backend::protocol as proto;
 use sapphire_bridge_api::{
-    BridgeClient, DeviceRetireParams, InviteParams, JoinParams, WorkgroupCreateParams,
+    BridgeClient, DevicePrioritySetParams, DeviceRetireParams, InviteParams, JoinParams,
+    WorkgroupCreateParams,
 };
 use sapphire_framework_service::{Environment, ServiceCommand, SystemManager};
 use sapphire_ipc::{ClientInfo, Endpoint};
@@ -212,6 +213,14 @@ pub enum DeviceCommand {
         /// The device's name or id.
         selector: String,
     },
+    /// Show or set a device's election priority (0-255; 0 = never designated or backup).
+    /// The election is non-preemptive: raising a priority does not move a role already held.
+    Priority {
+        /// The device's name or id.
+        selector: String,
+        /// The new priority. Omit to show the current one.
+        priority: Option<u8>,
+    },
 }
 
 impl DeviceCommand {
@@ -259,6 +268,34 @@ impl DeviceCommand {
                     .device_retire(DeviceRetireParams { selector })
                     .await?;
                 println!("retired device {} ({})", retired.name, retired.device_id);
+                Ok(0)
+            }
+            DeviceCommand::Priority { selector, priority } => {
+                let client = connect_running(version).await?;
+                match priority {
+                    Some(priority) => {
+                        let set = client
+                            .device_priority_set(DevicePrioritySetParams { selector, priority })
+                            .await?;
+                        println!("{} ({}) priority {}", set.name, set.device_id, set.priority);
+                    }
+                    None => {
+                        let peers = client.peers().await?;
+                        match peers
+                            .peers
+                            .iter()
+                            .find(|p| p.name == selector || p.device_id.to_string() == selector)
+                        {
+                            Some(p) => {
+                                println!("{} ({}) priority {}", p.name, p.device_id, p.priority)
+                            }
+                            None => {
+                                println!("no device {selector:?}");
+                                return Ok(1);
+                            }
+                        }
+                    }
+                }
                 Ok(0)
             }
         }
@@ -370,7 +407,12 @@ pub async fn render_workspace_list(client: &sapphire_ipc::Client, out: &mut Stri
         } else {
             "not synced"
         };
-        writeln!(out, "{} {} {state}", row.id, row.root.display())
+        let star = if matches!(row.sync.topology, proto::Topology::Star { .. }) {
+            " (star)"
+        } else {
+            ""
+        };
+        writeln!(out, "{} {} {state}{star}", row.id, row.root.display())
             .expect("writing to a String cannot fail");
     }
     Ok(0)

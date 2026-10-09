@@ -73,6 +73,7 @@ pub fn migrate_single_file(file: &Path, dir: &Path) -> Result<MigrationReport> {
             name: entry.name,
             node_id: entry.node_id,
             description: entry.description,
+            priority: crate::DEFAULT_PRIORITY,
             created_at: entry.created_at.unwrap_or_else(Utc::now),
             retired_at: entry.retired_at,
         };

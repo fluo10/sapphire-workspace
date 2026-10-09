@@ -353,6 +353,22 @@ pub struct SyncEnableResult {
     pub workspace_id: grain_id::GrainId,
 }
 
+/// How a synced workspace is wired to its peers right now.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Topology {
+    /// Every device syncs with every other. Also the answer when no device was elected.
+    #[default]
+    Mesh,
+    /// Devices that are neither designated nor backup sync only with those two.
+    Star {
+        /// The designated device.
+        designated: grain_id::GrainId,
+        /// The backup device, if there is a second candidate.
+        backup: Option<grain_id::GrainId>,
+    },
+}
+
 /// Result of [`SYNC_STATUS`].
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SyncStatusResult {
@@ -368,6 +384,9 @@ pub struct SyncStatusResult {
     pub last_error: Option<String>,
     /// Whether the bridge is reachable. `false` does not mean the app server is down.
     pub bridge_available: bool,
+    /// How the workspace is wired to its peers. Absent from older servers: a mesh.
+    #[serde(default)]
+    pub topology: Topology,
 }
 
 /// List this application's workspaces on this host, with their sync state.
@@ -416,6 +435,7 @@ impl SyncStatusResult {
             paused: None,
             last_error: None,
             bridge_available: false,
+            topology: Topology::Mesh,
         }
     }
 }

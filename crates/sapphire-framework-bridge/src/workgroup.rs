@@ -205,6 +205,11 @@ impl Workgroup {
         Ok(devices.retire(selector)?)
     }
 
+    /// Set a device's election priority in the ledger.
+    pub fn set_priority(&self, selector: &str, priority: u8) -> Result<Device> {
+        Ok(self.devices()?.set_priority(selector, priority)?)
+    }
+
     /// Join the workgroup a ticket names, and write it into this bridge directory.
     ///
     /// Dials the ticket's address over the pairing protocol
