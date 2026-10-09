@@ -39,7 +39,8 @@ pub(crate) async fn execute(
         | Command::WorkgroupJoin { .. }
         | Command::DeviceInvite { .. }
         | Command::DeviceRetire { .. }
-        | Command::DevicePrioritySet { .. } => {
+        | Command::DevicePrioritySet { .. }
+        | Command::Embedding(_) => {
             let result = tokio::time::timeout(limit, bridge_command(cfg, conns, command))
                 .await
                 .unwrap_or_else(|_| Err(unanswered("sapphire-bridge", limit)));
@@ -101,6 +102,7 @@ async fn bridge_command(
             .device_priority_set(DevicePrioritySetParams { selector, priority })
             .await
             .map(|_| CommandOutput::Done),
+        Command::Embedding(request) => c.embed_request(request).await.map(|_| CommandOutput::Done),
         _ => unreachable!("execute routes only bridge commands here"),
     };
     out.map_err(|e| e.to_string())

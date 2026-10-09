@@ -5,7 +5,10 @@ use std::path::{Path, PathBuf};
 
 use grain_id::GrainId;
 use sapphire_backend::protocol::{Topology, WorkspaceListEntry};
-use sapphire_bridge_api::{PeerInfo, WorkgroupWorkspaceInfo, WorkspaceRoles};
+use sapphire_bridge_api::{
+    EmbedSettingsResult, LOCAL_MODEL, LocalModel, ModelSettings, PeerInfo, RemoteModel, Slot,
+    WorkgroupWorkspaceInfo, WorkspaceRoles,
+};
 
 /// A workspace row's state, as one badge.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -210,6 +213,130 @@ pub fn short_id(id: &GrainId) -> String {
 /// The row's title: its name, else its registry id.
 pub fn display_name(entry: &WorkspaceListEntry) -> String {
     entry.name.clone().unwrap_or_else(|| entry.id.clone())
+}
+
+// ── embedding ───────────────────────────────────────────────────────────────
+
+/// The embedding screen's status line, and whether it is a warning.
+pub fn embedding_status(s: &EmbedSettingsResult) -> (String, bool) {
+    let note = s.info.note.as_ref();
+    match (s.active, &s.info.model) {
+        (Some(slot), Some(model)) => {
+            let state = if s.info.loaded {
+                "loaded"
+            } else {
+                "not loaded"
+            };
+            let line = format!(
+                "Embedding with the {slot} model {} ({} dimensions), {state}",
+                model.model, model.dimension
+            );
+            match note {
+                Some(n) => (format!("{line} — {n}"), true),
+                None => (line, false),
+            }
+        }
+        (Some(slot), None) => (
+            format!("The {slot} model is configured, but this bridge cannot run it"),
+            true,
+        ),
+        (None, _) => (
+            format!(
+                "Embedding is off{}",
+                note.map(|n| format!(": {n}")).unwrap_or_default()
+            ),
+            matches!(note, Some(sapphire_bridge_api::EmbedNote::Invalid(_))),
+        ),
+    }
+}
+
+/// A slot's three-way switch on this device: `None` is Auto.
+pub const SWITCH_CHOICES: [(&str, Option<bool>); 3] =
+    [("Auto", None), ("On", Some(true)), ("Off", Some(false))];
+
+/// What Auto resolves to for `slot`, and why, for the label beside the switch.
+pub fn auto_resolution(s: &EmbedSettingsResult, slot: Slot) -> &'static str {
+    match slot {
+        Slot::Local if !s.avx2 => "Auto: off — this CPU has no AVX2",
+        Slot::Local => "Auto: on",
+        Slot::Remote => "Auto: on",
+    }
+}
+
+/// The local slot's form, as typed.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LocalForm {
+    pub dimension: String,
+    pub max_tokens: String,
+}
+
+/// The remote slot's form, as typed.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RemoteForm {
+    pub endpoint: String,
+    pub model: String,
+    pub dimension: String,
+}
+
+impl LocalForm {
+    /// The form for `model`, or the defaults when the slot is empty.
+    pub fn from(model: Option<&LocalModel>) -> LocalForm {
+        let m = model.cloned().unwrap_or_default();
+        LocalForm {
+            dimension: m.dimension.to_string(),
+            max_tokens: m.max_tokens.to_string(),
+        }
+    }
+
+    /// The model this form describes, checked as the bridge would.
+    pub fn parse(&self) -> Result<LocalModel, String> {
+        let model = LocalModel {
+            model: LOCAL_MODEL.to_owned(),
+            dimension: number(&self.dimension, "dimension")?,
+            max_tokens: number(&self.max_tokens, "max tokens")?,
+        };
+        ModelSettings {
+            local: Some(model.clone()),
+            remote: None,
+        }
+        .validate()?;
+        Ok(model)
+    }
+}
+
+impl RemoteForm {
+    /// The form for `model`, empty when the slot is.
+    pub fn from(model: Option<&RemoteModel>) -> RemoteForm {
+        match model {
+            Some(m) => RemoteForm {
+                endpoint: m.endpoint.clone(),
+                model: m.model.clone(),
+                dimension: m.dimension.to_string(),
+            },
+            None => RemoteForm::default(),
+        }
+    }
+
+    /// The model this form describes, checked as the bridge would.
+    pub fn parse(&self) -> Result<RemoteModel, String> {
+        let model = RemoteModel {
+            endpoint: self.endpoint.trim().to_owned(),
+            model: self.model.trim().to_owned(),
+            dimension: number(&self.dimension, "dimension")?,
+        };
+        ModelSettings {
+            local: None,
+            remote: Some(model.clone()),
+        }
+        .validate()?;
+        Ok(model)
+    }
+}
+
+fn number<T: std::str::FromStr>(text: &str, what: &str) -> Result<T, String> {
+    text.trim()
+        .parse()
+        .map_err(|_| format!("{what}: `{}` is not a number", text.trim()))
 }
 
 #[cfg(test)]
@@ -517,5 +644,83 @@ mod tests {
             badge(&entry("a", None, true, s)).label(),
             "syncing · 2 peers · star"
         );
+    }
+
+    // ── embedding ───────────────────────────────────────────────────────────
+
+    fn embed_settings() -> sapphire_bridge_api::EmbedSettingsResult {
+        sapphire_bridge_api::EmbedSettingsResult {
+            avx2: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn embedding_status_names_the_model_or_why_it_is_off() {
+        use sapphire_bridge_api::{EmbedInfoResult, EmbedModelInfo, EmbedNote};
+
+        let mut s = embed_settings();
+        s.info.note = Some(EmbedNote::NotConfigured);
+        assert_eq!(
+            embedding_status(&s),
+            ("Embedding is off: no model is configured".to_owned(), false)
+        );
+
+        s.active = Some(Slot::Remote);
+        s.info = EmbedInfoResult {
+            enabled: true,
+            model: Some(EmbedModelInfo {
+                model: "m".into(),
+                dimension: 8,
+                template_version: 0,
+            }),
+            loaded: true,
+            note: Some(EmbedNote::KeyMissing),
+        };
+        let (line, warn) = embedding_status(&s);
+        assert!(warn);
+        assert!(line.starts_with("Embedding with the remote model m (8 dimensions), loaded"));
+        assert!(
+            line.ends_with("no API key is set for the remote model"),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn auto_says_why_the_local_slot_is_off() {
+        let mut s = embed_settings();
+        assert_eq!(auto_resolution(&s, Slot::Local), "Auto: on");
+        s.avx2 = false;
+        assert_eq!(
+            auto_resolution(&s, Slot::Local),
+            "Auto: off — this CPU has no AVX2"
+        );
+        assert_eq!(auto_resolution(&s, Slot::Remote), "Auto: on");
+    }
+
+    #[test]
+    fn the_forms_parse_and_validate_like_the_bridge() {
+        let local = LocalForm::from(None);
+        assert_eq!(local.parse().unwrap(), LocalModel::default());
+        let too_big = LocalForm {
+            dimension: "4096".into(),
+            ..local.clone()
+        };
+        assert!(too_big.parse().unwrap_err().contains("dimension"));
+        let nan = LocalForm {
+            max_tokens: "lots".into(),
+            ..local
+        };
+        assert!(nan.parse().unwrap_err().contains("not a number"));
+
+        let remote = RemoteForm {
+            endpoint: " https://e ".into(),
+            model: "m".into(),
+            dimension: "8".into(),
+        };
+        let parsed = remote.parse().unwrap();
+        assert_eq!(parsed.endpoint, "https://e");
+        assert_eq!(RemoteForm::from(Some(&parsed)).dimension, "8");
+        assert!(RemoteForm::default().parse().is_err());
     }
 }
