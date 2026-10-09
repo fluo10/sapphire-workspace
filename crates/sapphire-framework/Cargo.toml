@@ -25,6 +25,9 @@ ipc = ["dep:sapphire-framework-ipc"]
 server = ["dep:sapphire-framework-server", "backend"]
 registry = ["dep:sapphire-framework-registry"]
 bridge = ["dep:sapphire-framework-bridge"]
+# The bridge's embedding component (local Qwen3-VL via candle, or REST). For apps that embed
+# the bridge in-process (mobile). Heavy, so not in `native`.
+bridge-embed = ["bridge", "dep:sapphire-framework-bridge-embed"]
 backend = ["dep:sapphire-framework-backend", "workspace"]
 gui = ["dep:sapphire-framework-gui", "backend"]
 keys = ["dep:sapphire-framework-keys", "sapphire-framework-keys/axum"]
@@ -50,6 +53,7 @@ sapphire-framework-ipc = { version = "0.14.0", path = "../sapphire-framework-ipc
 sapphire-framework-server = { version = "0.14.0", path = "../sapphire-framework-server", optional = true }
 sapphire-framework-registry = { version = "0.14.0", path = "../sapphire-framework-registry", optional = true }
 sapphire-framework-bridge = { version = "0.14.0", path = "../sapphire-framework-bridge", optional = true }
+sapphire-framework-bridge-embed = { version = "0.14.0", path = "../sapphire-framework-bridge-embed", optional = true }
 sapphire-framework-backend = { version = "0.14.0", path = "../sapphire-framework-backend", optional = true, default-features = false }
 sapphire-framework-gui = { version = "0.14.0", path = "../sapphire-framework-gui", optional = true }
 sapphire-framework-keys = { version = "0.14.0", path = "../sapphire-framework-keys", optional = true }

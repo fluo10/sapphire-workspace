@@ -3,7 +3,7 @@
 - Date: 2026-10-09
 - Issues: #185 (main), #194 (REST fixes folded in); tracking: #189
 - Scope:
-  - new crate `apps/sapphire-bridge-embed`, a bridge-only component;
+  - new crate `crates/sapphire-framework-bridge-embed`, the bridge's embedding component;
   - `sapphire-framework-bridge` (an `EmbedProvider` hook, two control-plane methods);
   - `apps/sapphire-bridge`, the binary, which wires the provider in and reads `embedding.toml`;
   - `sapphire-framework-bridge-api` (method types, client, own version → 2.2.0);
@@ -58,23 +58,23 @@ The fix is to move embedding into the bridge, which is the one per-host daemon:
    or a model that failed to load all mean the app searches with FTS only. None of them is an
    error.
 
-## `sapphire-bridge-embed` (a bridge component)
+## `sapphire-framework-bridge-embed` (the bridge's embedding component)
 
-The crate lives at `apps/sapphire-bridge-embed/`, beside the bridge binary. Only that binary
-depends on it.
+The crate lives at `crates/sapphire-framework-bridge-embed/`. The bridge binary
+and apps that embed the bridge in-process depend on it.
 
-**Naming.** `sapphire-bridge` is an application, the per-host daemon. Components private to it
-carry its prefix, `sapphire-bridge-`, just as journal's private crates carry
-`sapphire-journal-`. That fits the rule against occupying the general `sapphire-*`
-namespace. The `sapphire-framework-` prefix is kept for crates that belong to the
-framework and can be re-exported by the `sapphire-framework` facade. That includes
-`sapphire-framework-bridge` (the daemon library, re-exported under the facade's `bridge`
-feature) and `sapphire-framework-bridge-api`.
+**Naming.** The bridge stays in the framework (`sapphire-framework-bridge`) on purpose: mobile
+apps cannot run a separate background server, so they embed the whole bridge in-process and
+talk to it over tokio channels. Its embedding component is therefore a framework crate too,
+`sapphire-framework-bridge-embed`. The facade re-exports it as `bridge_embed` under the
+non-default feature `bridge-embed`, which is not part of `native` because fastembed and
+candle are heavy.
 
-**Dependency direction.** The facade re-exports `sapphire-framework-bridge`, so that library
-must not depend on this crate. Otherwise fastembed and candle would follow the facade's
-`bridge` feature into every app. The library defines the hook (`EmbedProvider`, below); the
-binary implements it with this crate and injects it.
+**Dependency direction.** The facade re-exports `sapphire-framework-bridge` under `bridge`,
+so that library must not depend on this crate. Otherwise fastembed and candle would follow
+the `bridge` feature into every app. The library defines the hook (`EmbedProvider`, below);
+the host implements it with this crate and injects it: the bridge binary, or a mobile app
+that enables `bridge-embed`.
 
 Its dependencies:
 
@@ -193,7 +193,7 @@ impl Bridge { pub fn embed_provider(self, p: Arc<dyn EmbedProvider>) -> Bridge; 
 
   A bridge built without a provider answers `embed.info` with `{ enabled: false }`, and
   `embed.embed` is an error. That is the facade's bridge, and every test fixture's bridge.
-- **The binary, `apps/sapphire-bridge`.** It depends on `sapphire-bridge-embed`. At start it
+- **The binary, `apps/sapphire-bridge`.** It depends on `sapphire-framework-bridge-embed`. At start it
   reads `<bridge dir>/embedding.toml`, starts `EmbedService`, and injects it through
   `embed_provider`. `EmbedService` implements `EmbedProvider`, through a thin adapter in the
   binary or in the embed crate. A change to the file takes effect on restart; #186 adds live

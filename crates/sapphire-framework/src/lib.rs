@@ -32,6 +32,7 @@
 //! | `keys` | [`keys`] | `sapphire-framework-keys` |
 //! | `registry` | [`registry`] | `sapphire-framework-registry` |
 //! | `bridge` | [`bridge`] | `sapphire-framework-bridge` |
+//! | `bridge-embed` | [`bridge_embed`] | `sapphire-framework-bridge-embed` (for apps that embed the bridge in-process, e.g. mobile; not in `native`) |
 //! | `backend` | [`backend`] | `sapphire-framework-backend` |
 //! | `gui` | [`gui`] | `sapphire-framework-gui` |
 //! | `service` | [`service`] | `sapphire-framework-service` |
@@ -72,6 +73,9 @@ pub use sapphire_framework_registry as registry;
 
 #[cfg(feature = "bridge")]
 pub use sapphire_framework_bridge as bridge;
+
+#[cfg(feature = "bridge-embed")]
+pub use sapphire_framework_bridge_embed as bridge_embed;
 
 #[cfg(feature = "backend")]
 pub use sapphire_backend as backend;

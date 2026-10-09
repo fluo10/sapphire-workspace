@@ -1,8 +1,9 @@
-//! Text embedding for `sapphire-bridge`, the per-host daemon.
+//! Text embedding for the sapphire bridge, the per-host daemon.
 //!
-//! This is a bridge-only component: only the bridge binary depends on it. The daemon library
-//! (`sapphire-framework-bridge`) defines an `EmbedProvider` hook, and the binary implements it
-//! with [`EmbedService`].
+//! This is the bridge's embedding component, shipped with the framework so that apps which
+//! embed the bridge in-process (mobile) can use it too. The daemon library
+//! (`sapphire-framework-bridge`) does not depend on it: it defines an `EmbedProvider` hook,
+//! and the host (the bridge binary, or an embedding app) implements it with [`EmbedService`].
 //!
 //! - [`settings`]: `<bridge dir>/embedding.toml`.
 //! - [`template`]: the prompt template, token truncation and MRL helpers (pure).

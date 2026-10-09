@@ -7,7 +7,7 @@
 **Architecture:**
 - **bridge-api.** `sapphire-framework-bridge-api` gains `embed.info` / `embed.embed`.
 - **bridge library.** `sapphire-framework-bridge` serves those methods through an injectable `EmbedProvider` and does not depend on any model code.
-- **embed crate.** A new bridge-only crate, `apps/sapphire-bridge-embed`, implements the local and REST providers behind a single-worker `EmbedService`.
+- **embed crate.** A new crate, the bridge's embedding component, `crates/sapphire-framework-bridge-embed`, implements the local and REST providers behind a single-worker `EmbedService`.
 - **bridge binary.** The `apps/sapphire-bridge` binary reads `embedding.toml` and injects the service.
 - **retrieve.** `sapphire-framework-retrieve` keeps only the `Embedder` trait. Its store learns `configure_vectors(model, dim)`, which replaces reopening with a dimension (#195).
 - **workspace.** `sapphire-framework-workspace` gets a thread-owning `BridgeEmbedder` and drops app-side embedding config.
@@ -19,8 +19,8 @@
 ## Global Constraints
 
 - **Crate naming and dependency direction.**
-  - The new crate is `sapphire-bridge-embed` at `apps/sapphire-bridge-embed/`.
-  - Only `apps/sapphire-bridge` depends on it.
+  - The new crate is `sapphire-framework-bridge-embed` at `crates/sapphire-framework-bridge-embed/`. It ships with the framework because mobile apps embed the bridge in-process. The facade re-exports it as `bridge_embed` under the non-default feature `bridge-embed` (not in `native`).
+  - `apps/sapphire-bridge` depends on it, and so does the facade through that feature.
   - `sapphire-framework-bridge`, which the facade re-exports, must not depend on it, directly or through a feature.
 - **bridge-api.** `sapphire-framework-bridge-api` version is `2.2.0`. `API_VERSION` stays `2`. Every new field is `#[serde(default)]`.
 - **Method names.** `EMBED_INFO = "embed.info"`, `EMBED = "embed.embed"`.
@@ -58,9 +58,9 @@
 | `crates/sapphire-framework-bridge-api/{Cargo.toml,src/lib.rs,src/client.rs}` | modify | 2.2.0; embed method types; client methods |
 | `crates/sapphire-framework-bridge/src/embed.rs` | **create** | `EmbedProvider` trait, `EmbedStatus` |
 | `crates/sapphire-framework-bridge/src/{lib.rs,control.rs,status.rs,command.rs}` | modify | builder, the two methods, status line, `dispatch_with` |
-| `apps/sapphire-bridge-embed/` | **create** | settings, template/truncate/MRL helpers, REST provider, local provider, `EmbedService` |
+| `crates/sapphire-framework-bridge-embed/` | **create** | settings, template/truncate/MRL helpers, REST provider, local provider, `EmbedService` |
 | `apps/sapphire-bridge/{Cargo.toml,src/main.rs}` | modify | read settings, start service, inject |
-| `Cargo.toml` (workspace) | modify | add member `apps/sapphire-bridge-embed` |
+| `Cargo.toml` (workspace) | modify | add member `crates/sapphire-framework-bridge-embed` |
 | `crates/sapphire-framework-retrieve/` | modify | trait-only `embed.rs`; config without embedding; `configure_vectors`; #194 stop rule |
 | `crates/sapphire-framework-workspace/src/bridge_embedder.rs` | **create** | `BridgeEmbedder` |
 | `crates/sapphire-framework-workspace/src/{workspace_state.rs,lib.rs,config.rs,Cargo.toml}` | modify | `load_embedder()` via the bridge; drop embedding config and the fastembed feature |
@@ -169,16 +169,16 @@ impl crate::EmbedProvider for FakeProvider {
 
 ---
 
-### Task 3: `apps/sapphire-bridge-embed` — settings, helpers, REST, local, service
+### Task 3: `crates/sapphire-framework-bridge-embed` — settings, helpers, REST, local, service
 
 **Files:**
-- Create `apps/sapphire-bridge-embed/Cargo.toml` and `src/{lib.rs,settings.rs,template.rs,rest.rs,local.rs,service.rs}`.
+- Create `crates/sapphire-framework-bridge-embed/Cargo.toml` and `src/{lib.rs,settings.rs,template.rs,rest.rs,local.rs,service.rs}`.
 - Add the crate as a member of the root `Cargo.toml`.
 
 `Cargo.toml`:
 ```toml
 [package]
-name = "sapphire-bridge-embed"
+name = "sapphire-framework-bridge-embed"
 version.workspace = true
 edition.workspace = true
 description = "Text embedding for sapphire-bridge: a local Qwen3-VL-Embedding model or an OpenAI-compatible endpoint"
@@ -278,7 +278,7 @@ The worker design:
 - Require `data.len() == group.len()`. Order the results by `index`.
 - Apply `mrl` when a vector is longer than `dimension`.
 
-- [ ] **Step 1: Failing tests.** Run every test with `cargo test -p sapphire-bridge-embed`.
+- [ ] **Step 1: Failing tests.** Run every test with `cargo test -p sapphire-framework-bridge-embed`.
   - **settings:**
     - a missing file gives `None`;
     - a minimal `enabled = true` gets the defaults (local, the Qwen model, 1024, 1024);
@@ -305,18 +305,18 @@ The worker design:
   - **local**, `#[ignore]`: one real embedding gives 1024 values with norm ≈ 1. The sentences 「今日は雨が降っている」 and 「雨の日です」 are closer to each other than either is to 「請求書の支払い期限」.
 - [ ] **Step 2: Run them** and confirm they fail.
 - [ ] **Step 3: Implement** the modules described above.
-- [ ] **Step 4: Run.** `cargo test -p sapphire-bridge-embed`. Run `cargo test -p sapphire-bridge-embed -- --ignored` once if the machine can (the spike host can; it downloads about 4 GB). Report whether it ran.
+- [ ] **Step 4: Run.** `cargo test -p sapphire-framework-bridge-embed`. Run `cargo test -p sapphire-framework-bridge-embed -- --ignored` once if the machine can (the spike host can; it downloads about 4 GB). Report whether it ran.
 - [ ] **Step 5: Commit.** `feat(bridge-embed): local Qwen3-VL embedding and an OpenAI-compatible provider behind one worker` (Refs #185, #194).
 
 ---
 
 ### Task 4: bridge binary wiring
 
-**Files:** `apps/sapphire-bridge/Cargo.toml` (dependency `sapphire-bridge-embed = { path = "../sapphire-bridge-embed" }`), `apps/sapphire-bridge/src/main.rs`
+**Files:** `apps/sapphire-bridge/Cargo.toml` (dependency `sapphire-framework-bridge-embed = { path = "../../crates/sapphire-framework-bridge-embed" }`), `apps/sapphire-bridge/src/main.rs`
 
 - [ ] **Step 1: Write the adapter and the factory.** They go in a new `apps/sapphire-bridge/src/embed.rs`, which `main.rs` includes with `mod embed;`.
 ```rust
-pub struct ServiceProvider(sapphire_bridge_embed::EmbedService);
+pub struct ServiceProvider(sapphire_framework_bridge_embed::EmbedService);
 #[async_trait::async_trait]
 impl sapphire_bridge::EmbedProvider for ServiceProvider {
     fn info(&self) -> Option<sapphire_bridge_api::EmbedModelInfo> { let i = self.0.info(); Some(EmbedModelInfo { model: i.model, dimension: i.dimension, template_version: i.template_version }) }
@@ -325,9 +325,9 @@ impl sapphire_bridge::EmbedProvider for ServiceProvider {
 }
 pub fn factory() -> sapphire_bridge::EmbedFactory {
     Box::new(|dir| {
-        let path = dir.root().join(sapphire_bridge_embed::EmbeddingSettings::FILE);
-        match sapphire_bridge_embed::EmbeddingSettings::load(&path) {
-            Ok(Some(s)) => sapphire_bridge_embed::EmbedService::from_settings(&s).map(|svc| std::sync::Arc::new(ServiceProvider(svc)) as _),
+        let path = dir.root().join(sapphire_framework_bridge_embed::EmbeddingSettings::FILE);
+        match sapphire_framework_bridge_embed::EmbeddingSettings::load(&path) {
+            Ok(Some(s)) => sapphire_framework_bridge_embed::EmbedService::from_settings(&s).map(|svc| std::sync::Arc::new(ServiceProvider(svc)) as _),
             Ok(None) => None,
             Err(err) => { tracing::error!("embedding.toml: {err}; embedding is disabled"); None }
         }
@@ -449,20 +449,20 @@ pub fn embed_pending(&self, on_progress: impl Fn(usize, usize)) -> Result<usize>
 ### Task 7: docs, dependency check, whole-workspace tests
 
 - [ ] **Step 1: Check the dependency graph.**
-  - `cargo tree -p sapphire-framework --all-features -e normal -i fastembed` must report nothing.
+  - `cargo tree -p sapphire-framework --features native -e normal -i fastembed` must report nothing (and `--features bridge-embed` must show `sapphire-framework-bridge-embed`).
   - So must `cargo tree -p sapphire-framework-bridge -e normal -i candle-core`.
-  - `cargo tree -p sapphire-bridge -e normal -i fastembed` must show `sapphire-bridge-embed`.
+  - `cargo tree -p sapphire-bridge -e normal -i fastembed` must show `sapphire-framework-bridge-embed`.
 - [ ] **Step 2: Update the CHANGELOG** (Unreleased → Breaking, plus Added):
   - **Breaking:** embedding moved to the bridge.
   - **Breaking:** `RetrieveConfig.embedding`, `EmbeddingConfig`, `build_embedder` and the `fastembed-embed` feature were removed. Configure embedding in `<bridge dir>/embedding.toml` (fields as in the spec).
   - **Breaking:** journal follow-up needed.
-  - **Added:** `sapphire-bridge-embed`, the default model Qwen3-VL-Embedding-2B at 1024 dimensions, and bridge-api 2.2.0.
+  - **Added:** `sapphire-framework-bridge-embed`, the default model Qwen3-VL-Embedding-2B at 1024 dimensions, and bridge-api 2.2.0.
 - [ ] **Step 3: Update `docs/ARCHITECTURE.md`** (Japanese):
   - In the bridge section, the bridge now also embeds.
   - In the retrieve section, the embedder comes from the bridge, and `configure_vectors` is described.
-  - The crate table gains `sapphire-bridge-embed` (bridge-only). Note the naming rule: bridge-only components carry the `sapphire-bridge-` prefix, and only facade-reexportable crates carry `sapphire-framework-`.
+  - The crate table gains `sapphire-framework-bridge-embed` (the bridge's embedding component; facade feature `bridge-embed`, not in `native`). Note why: mobile apps embed the bridge in-process, so the component is a framework crate.
 - [ ] **Step 4: Run the final checks.**
   - `cargo fmt --all --check`
   - `cargo clippy --workspace --all-targets -- -D warnings`
   - `cargo test --workspace`. This should now run on this host, because fastembed lives only in the bridge-embed crate with dynamic ORT. Report any target that still crashes.
-- [ ] **Step 5: Commit.** `docs: embedding in the bridge; naming rule for bridge-only crates` (Closes #185, Closes #194).
+- [ ] **Step 5: Commit.** `docs: embedding in the bridge; bridge-embed is a framework crate` (Closes #185, Closes #194).

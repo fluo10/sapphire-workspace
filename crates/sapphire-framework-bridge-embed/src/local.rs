@@ -196,7 +196,8 @@ mod tests {
     }
 
     /// Downloads about 4 GB on first run and needs about 10 GB of RAM. The cache is
-    /// `SAPPHIRE_EMBED_TEST_CACHE`, else `<crate>/.fastembed_cache` (gitignored).
+    /// `SAPPHIRE_EMBED_TEST_CACHE`, else the default model cache,
+    /// `dirs::cache_dir()/sapphire-bridge/models`.
     #[test]
     #[ignore]
     fn real_model_embeds_japanese_sensibly() {
@@ -212,7 +213,12 @@ mod tests {
         };
         let cache = std::env::var("SAPPHIRE_EMBED_TEST_CACHE")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| Path::new(env!("CARGO_MANIFEST_DIR")).join(".fastembed_cache"));
+            .unwrap_or_else(|_| {
+                dirs::cache_dir()
+                    .expect("no platform cache dir")
+                    .join("sapphire-bridge")
+                    .join("models")
+            });
         let mut model = LocalQwen::load(&settings, &cache).unwrap();
         let texts: Vec<String> = ["今日は雨が降っている", "雨の日です", "請求書の支払い期限"]
             .iter()

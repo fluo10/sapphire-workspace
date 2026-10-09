@@ -1,11 +1,12 @@
 [package]
-name = "sapphire-bridge-embed"
+name = "sapphire-framework-bridge-embed"
 version.workspace = true
 edition.workspace = true
-description = "Text embedding for sapphire-bridge: a local Qwen3-VL-Embedding model or an OpenAI-compatible endpoint"
+description = "Text embedding component of the sapphire bridge: a local Qwen3-VL-Embedding model or an OpenAI-compatible endpoint"
 license.workspace = true
 repository.workspace = true
-publish = false
+keywords = ["embedding", "bridge", "local-first", "qwen3"]
+categories = ["science"]
 
 [features]
 default = ["local"]
@@ -29,5 +30,6 @@ tracing.workspace = true
 tokio = { workspace = true, features = ["sync", "rt"] }
 
 [dev-dependencies]
+dirs.workspace = true
 tempfile = "3"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

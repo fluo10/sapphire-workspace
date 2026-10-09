@@ -5507,30 +5507,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "sapphire-bridge-embed"
-version = "0.14.0"
-dependencies = [
- "candle-core",
- "candle-nn",
- "fastembed 7.1.1",
- "hf-hub",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.20",
- "tokenizers 0.23.2",
- "tokio",
- "toml",
- "tracing",
- "ureq",
-]
-
-[[package]]
 name = "sapphire-framework"
 version = "0.14.0"
 dependencies = [
  "sapphire-framework-backend",
  "sapphire-framework-bridge",
+ "sapphire-framework-bridge-embed",
  "sapphire-framework-gui",
  "sapphire-framework-ipc",
  "sapphire-framework-keys",
@@ -5613,6 +5595,26 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "sapphire-framework-bridge-embed"
+version = "0.14.0"
+dependencies = [
+ "candle-core",
+ "candle-nn",
+ "dirs",
+ "fastembed 7.1.1",
+ "hf-hub",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokenizers 0.23.2",
+ "tokio",
+ "toml",
+ "tracing",
+ "ureq",
 ]
 
 [[package]]
