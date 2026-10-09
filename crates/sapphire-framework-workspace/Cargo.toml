@@ -9,14 +9,18 @@ keywords = ["workspace", "markdown", "search", "index"]
 categories = ["filesystem", "database"]
 
 [features]
-default = ["redb-store", "fastembed-embed"]
+default = ["redb-store"]
 # Pure-Rust cache backend (redb + tantivy). Default; no SQLite/libsqlite3-sys.
-redb-store      = ["sapphire-retrieve/redb-store"]
-fastembed-embed = ["sapphire-retrieve/fastembed-embed"]
+redb-store = ["sapphire-retrieve/redb-store"]
+# `WorkspaceState::set_embedder_for_test`, for other crates' tests.
+test-util = []
 
 [dependencies]
 sapphire-retrieve = { package = "sapphire-framework-retrieve", version = "0.14.0", path = "../sapphire-framework-retrieve", default-features = false }
 sapphire-track    = { package = "sapphire-framework-track", version = "0.14.0", path = "../sapphire-framework-track" }
+# Embedding is the bridge's: `BridgeEmbedder` asks it over the control plane (no iroh here).
+sapphire-bridge-api = { package = "sapphire-framework-bridge-api", version = "2.2.0", path = "../sapphire-framework-bridge-api" }
+sapphire-ipc        = { package = "sapphire-framework-ipc", version = "0.14.0", path = "../sapphire-framework-ipc" }
 thiserror.workspace = true
 clap.workspace = true
 serde.workspace = true
@@ -34,3 +38,4 @@ md-5 = "0.11"
 
 [dev-dependencies]
 tempfile = "3"
+serde_json.workspace = true

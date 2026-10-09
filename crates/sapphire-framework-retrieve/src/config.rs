@@ -1,19 +1,17 @@
-use crate::embed::EmbedderConfig;
 use serde::{Deserialize, Serialize};
 
 /// Top-level retrieve configuration (`[retrieve]` section).
 ///
-/// Controls which vector database backend to use and, optionally, text
-/// embedding settings for approximate semantic search.
+/// Controls which vector database backend to use and how hybrid search is
+/// merged. The embedding provider is configured by the bridge, not here.
+///
+/// Unknown keys are ignored (no `deny_unknown_fields`), so an older config
+/// that still has a `[retrieve.embedding]` table keeps loading.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RetrieveConfig {
     /// Vector database backend (default: `none` — vector search disabled).
     #[serde(default)]
     pub db: VectorDb,
-    /// Text embedding settings.  When absent, embedding is disabled even
-    /// if `db` is set to a non-`none` value.
-    #[serde(default)]
-    pub embedding: Option<EmbeddingConfig>,
     /// Hybrid search tuning (FTS + semantic merged via Reciprocal Rank Fusion).
     #[serde(default)]
     pub hybrid: HybridConfig,
@@ -76,49 +74,32 @@ impl VectorDb {
     }
 }
 
-/// Text embedding provider configuration (`[retrieve.embedding]` subsection).
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct EmbeddingConfig {
-    /// Enable embedding and vector search.
-    #[serde(default)]
-    pub enabled: bool,
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    /// Embedding provider identifier: `"openai"`, `"ollama"`, or `"fastembed"`.
-    #[serde(default)]
-    pub provider: String,
+    #[derive(Deserialize)]
+    struct Root {
+        retrieve: RetrieveConfig,
+    }
 
-    /// Model name understood by the provider.
-    #[serde(default)]
-    pub model: String,
+    #[test]
+    fn an_old_config_with_an_embedding_table_still_loads() {
+        let toml = r#"
+[retrieve]
+db = "redb"
 
-    /// Name of the environment variable holding the API key.
-    /// Used by OpenAI-compatible providers; defaults to `OPENAI_API_KEY`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub api_key_env: Option<String>,
+[retrieve.embedding]
+enabled = true
+provider = "fastembed"
+model = "all-MiniLM-L6-v2"
+dimension = 384
 
-    /// Base URL of the embedding API endpoint.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub base_url: Option<String>,
-
-    /// Output vector dimension of the model.
-    /// Required when `db` selects a vector backend (`redb`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub dimension: Option<u32>,
-}
-
-impl EmbeddingConfig {
-    /// Convert to the runtime [`EmbedderConfig`] used by [`crate::build_embedder`].
-    /// Convert to the runtime [`EmbedderConfig`].
-    ///
-    /// `cache_dir` is left as `None`; callers should set it to the
-    /// app-provided model cache directory before calling [`crate::build_embedder`].
-    pub fn to_embedder_config(&self) -> EmbedderConfig {
-        EmbedderConfig {
-            provider: self.provider.clone(),
-            model: self.model.clone(),
-            api_key_env: self.api_key_env.clone(),
-            base_url: self.base_url.clone(),
-            cache_dir: None,
-        }
+[retrieve.hybrid]
+rrf_k = 30
+"#;
+        let root: Root = toml::from_str(toml).unwrap();
+        assert_eq!(root.retrieve.db, VectorDb::Redb);
+        assert_eq!(root.retrieve.hybrid.rrf_k, 30);
     }
 }

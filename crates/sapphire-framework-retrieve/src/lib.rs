@@ -8,12 +8,12 @@ pub mod retrieve_store;
 pub mod snippet;
 pub mod vector_store;
 
-pub use config::{EmbeddingConfig, HybridConfig, RetrieveConfig, VectorDb};
+pub use config::{HybridConfig, RetrieveConfig, VectorDb};
 pub use db::open_in_memory;
 pub use db::{RetrieveDb, default_hybrid, merge_rrf_files};
 #[cfg(feature = "redb-store")]
 pub use db::{open_redb, open_redb_vec};
-pub use embed::{Embedder, EmbedderConfig, build_embedder};
+pub use embed::Embedder;
 pub use error::{Error, Result};
 pub use retrieve_store::{
     Document, FileSearchResult, FtsQuery, HybridQuery, RetrieveStore, VectorQuery,

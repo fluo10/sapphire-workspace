@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use grain_id::GrainId;
-use sapphire_bridge_api::{RouteStatus, WorkgroupStatus};
+use sapphire_bridge_api::{EmbedInfoResult, RouteStatus, WorkgroupStatus};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
@@ -50,6 +50,11 @@ pub struct StatusFile {
     pub peers: Vec<PeerStatus>,
     /// Every workspace an app server of this host owns.
     pub routes: Vec<RouteStatus>,
+    /// The embedding service, when this bridge reports one — the same line the control
+    /// plane's `embed.info` answers with, so a stopped bridge's snapshot still says what it
+    /// was embedding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding: Option<EmbedInfoResult>,
     /// The relay URLs this host's endpoint uses.
     pub relays: Vec<String>,
 }
@@ -190,6 +195,9 @@ impl StatusSource for BridgeSource {
             workgroup: workgroup_status,
             peers,
             routes: crate::control::route_statuses(&self.bridge),
+            // The same source the control plane's `embed.info` handler reads, so a stopped
+            // bridge's snapshot records what it was embedding when it stopped.
+            embedding: Some(crate::control::embed_info(&self.bridge)),
             relays,
         }
     }
@@ -282,8 +290,82 @@ mod tests {
             workgroup: None,
             peers: vec![],
             routes: vec![],
+            embedding: None,
             relays: vec![],
         }
+    }
+
+    /// An embedding provider that reports a 2-dimensional "fake" model.
+    struct FakeProvider;
+
+    #[async_trait::async_trait]
+    impl crate::EmbedProvider for FakeProvider {
+        fn info(&self) -> Option<sapphire_bridge_api::EmbedModelInfo> {
+            Some(sapphire_bridge_api::EmbedModelInfo {
+                model: "fake".into(),
+                dimension: 2,
+                template_version: 1,
+            })
+        }
+        fn loaded(&self) -> bool {
+            true
+        }
+        async fn embed(&self, texts: Vec<String>) -> std::result::Result<Vec<Vec<f32>>, String> {
+            Ok(texts.iter().map(|t| vec![t.len() as f32, 1.0]).collect())
+        }
+    }
+
+    /// The status file is filled from the bridge's own provider — the same source
+    /// `embed.info` answers from — so a stopped bridge's snapshot still records what it was
+    /// embedding.
+    #[test]
+    fn the_snapshot_records_what_the_bridge_is_embedding() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = crate::BridgeDir::at(tmp.path().join("bridge")).unwrap();
+        crate::workgroup::Workgroup::create(&dir, "test", "host-a", "aaaa").unwrap();
+        let bridge = Arc::new(
+            crate::Bridge::new(
+                dir,
+                Arc::new(crate::LoopbackNetwork::new().transport("aaaa")),
+                "0.0.0",
+            )
+            .unwrap()
+            .net(NetConfig::default())
+            .embed_provider(Arc::new(FakeProvider)),
+        );
+
+        let source = BridgeSource::new(bridge, NetConfig::default(), chrono::Utc::now());
+        let snapshot = source.snapshot();
+
+        let embedding = snapshot.embedding.expect("an embedding line");
+        assert!(embedding.enabled);
+        assert!(embedding.loaded);
+        assert_eq!(embedding.model.expect("a model").model, "fake");
+    }
+
+    /// A bridge with no provider still carries the line, disabled — the file always answers
+    /// "does this host embed".
+    #[test]
+    fn the_snapshot_reports_embedding_disabled_without_a_provider() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = crate::BridgeDir::at(tmp.path().join("bridge")).unwrap();
+        crate::workgroup::Workgroup::create(&dir, "test", "host-a", "aaaa").unwrap();
+        let bridge = Arc::new(
+            crate::Bridge::new(
+                dir,
+                Arc::new(crate::LoopbackNetwork::new().transport("aaaa")),
+                "0.0.0",
+            )
+            .unwrap()
+            .net(NetConfig::default()),
+        );
+
+        let source = BridgeSource::new(bridge, NetConfig::default(), chrono::Utc::now());
+        let snapshot = source.snapshot();
+
+        let embedding = snapshot.embedding.expect("an embedding line");
+        assert!(!embedding.enabled);
+        assert!(embedding.model.is_none());
     }
 
     #[tokio::test(flavor = "multi_thread")]

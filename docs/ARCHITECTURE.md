@@ -62,7 +62,7 @@ arrow の更新がこちらの都合では進められない状態だった。`l
 **構成**（`sapphire-framework-retrieve`）:
 
 - **`RetrieveStore` trait**（同期）が統一インターフェース（`upsert_document`/`remove_document`/`rebuild_fts`/
-  `document_ids`/`document_count`/`embed_pending`/`vec_info`/`search_fts`/`search_similar`/`search_hybrid`）。
+  `document_ids`/`document_count`/`configure_vectors`/`embed_pending`/`vec_info`/`search_fts`/`search_similar`/`search_hybrid`）。
   mtime 追跡は責務外（`sapphire-framework-track` の `TrackStore` が持つ）。
 - **唯一の永続実装 = `RedbStore`（redb + tantivy + brute-force vectors）**。C依存ゼロ・純Rust。
   `redb-store` を切ると揮発する in-memory ストアにフォールバックするだけなので、
@@ -73,7 +73,17 @@ arrow の更新がこちらの都合では進められない状態だった。`l
   - **ベクトル検索は brute-force**（redb 上の全ベクトルを L2 距離でスキャン）。数万件までミリ秒未満で厳密。
     規模が要求したら HNSW（`instant-distance` 等の純Rust）に差し替え可能。
   - **VectorStore を別 trait に切らず redb に統合**（vectors は同期対象外。非同期性は sync 層＝Change がドキュメントのみ運ぶことで担保）。
-- **feature**: `redb-store`（既定）/ `fastembed-embed`。`sqlite-store` / `lancedb-store` は削除済み（上記参照）。
+- **埋め込み器は bridge から来る**。この crate が持つのは `Embedder` trait だけで、実装（ローカル推論・
+  OpenAI 互換 REST）は bridge の埋め込みコンポーネント（`sapphire-framework-bridge-embed`）にある。
+  `configure_vectors(model, dim)` は「このストアは `model` の `dim` 次元ベクトルを持つ」と宣言する:
+  `meta` の `embedding_model` / `embedding_dim` に記録し、model か dim が変われば既存ベクトルを全部
+  捨てて全ドキュメントを pending に戻す（冪等）。#195 の「次元を変えて開き直す」旧挙動を置き換える。
+- **`RetrieveConfig`** は `db` と `hybrid` だけを残す（`embedding`、`EmbeddingConfig`、`build_embedder` は
+  撤去。アプリは埋め込みを設定しない — `WorkspaceState::load_embedder()` が bridge に聞き、返ってきた
+  model / dimension で `configure_vectors` する。アプリは `VectorDb` の種別だけを
+  `WorkspaceState::set_vector_db(RetrieveConfig.db)` で渡す）。
+- **feature**: `redb-store`（既定）。`fastembed-embed` / `sqlite-store` / `lancedb-store` は削除済み
+  （埋め込みの実装は bridge 側の `sapphire-framework-bridge-embed` に移った）。
   `VectorDb` config enum は `None` / `Redb`（既定のブルートフォース）。
 
 ストア分離の共有ヘルパー（`vec_serialize` / `vec_deserialize` / `l2_distance`）は
@@ -94,7 +104,8 @@ Cargo workspace（モノレポ）。削除済みの crate も削除線で残す 
 | `sapphire-framework-ipc` | ローカル IPC（UDS / 名前付きパイプ / プロセス内チャネル上の NDJSON JSON-RPC、ルータ、`connect` / `probe`） |
 | `sapphire-framework-server` | アプリサーバ骨格（`workspace.*` 名前空間・多重管理・`FrameworkCommand` — `serve` / `status` / `service` / `workspace` / `workgroup` / `device` フラット語彙・同期ランタイム） |
 | `sapphire-framework-bridge-api` | bridge 制御プレーンのプロトコルとクライアント（serde のみ・iroh 非依存）。**単独でバージョン管理**（2.0.0 — メジャー == 制御面 `API_VERSION`。`version.workspace` ではない） |
-| `sapphire-framework-bridge` | ホスト常駐デーモン本体（デバイス同一性・workgroup 認可・ペアリング・交換台・iroh） |
+| `sapphire-framework-bridge` | ホスト常駐デーモン本体（デバイス同一性・workgroup 認可・ペアリング・交換台・iroh）。埋め込みは `EmbedProvider` フック越しに受け取り、この crate 自体は埋め込みコンポーネントに依存しない |
+| `sapphire-framework-bridge-embed` | bridge の埋め込みコンポーネント（ローカル Qwen3-VL-Embedding-2B を candle で、または OpenAI 互換 REST）。ファサード feature は `bridge-embed`（既定ではなく `native` にも入らない — fastembed / candle が重いため）。**bridge をプロセス内に持つモバイルアプリがあるため framework crate に残す** |
 | `apps/sapphire-bridge` | 上記のバイナリと CLI（`serve` / `status` / `log` / `service` / `workspace` / `workgroup` / `device`） |
 | `sapphire-framework-registry` | デバイス台帳（`<dir>/<grain-id>.toml` を 1 デバイス 1 ファイル。`node_id` を保持。users は撤去） |
 | `sapphire-framework-keys` | `KeyStore` / `AuthConfig` / `protect`。**非同期 HTTP エンドポイント**の認証用 |
@@ -210,7 +221,17 @@ CLI は全アプリ共通のフラット語彙 `serve` / `status` / `service` / 
    新規登録（`Service`）では起動しない — Service 管理の所有者は自身の service manager が
    起動するもので、bridge も CLI もその manager ではない。よってオフライン報告になる。
    spawn 機構自体の再設計は Phase 2 の後続 issue で扱う。
-4. **選出** — Hello を交換し、ワークスペースごとに代表 / 予備デバイスを選ぶ。
+4. **埋め込み** — ホストに 1 つだけモデルを持つ。制御面の `embed.info` / `embed.embed` で
+   bridge の埋め込みコンポーネント（`sapphire-framework-bridge-embed`、Qwen3-VL-Embedding-2B を
+   CPU で、または OpenAI 互換 REST）がベクトルを作る。設定は `<bridge dir>/embedding.toml`
+   （`enabled` / `provider` / `model` / `dimension` / `max_tokens`、`provider = "openai"` は
+   `endpoint` / `api_key_env`）。ワーカーは 1 本で、最初の要求でモデルをロードし、10 分間要求が
+   無ければアンロードする。埋め込みが無効・モデルのロード失敗・bridge 停止はいずれも異常ではなく、
+   アプリは FTS のみで検索する。**bridge ライブラリ（`sapphire-framework-bridge`）はこの
+   コンポーネントに依存しない** — 定義するのは `EmbedProvider` フックだけで、実装を注入するのは
+   bridge バイナリか、bridge をプロセス内に持つアプリである。プロバイダ無しの bridge は
+   `embed.info` に `enabled: false` を返す。
+5. **選出** — Hello を交換し、ワークスペースごとに代表 / 予備デバイスを選ぶ。
 
 workgroup のメタ（デバイス台帳・ワークスペース一覧）はそれ自体が同期されるワークスペースなので、
 **bridge はそのアプリのサーバでもある**（アプリ名 `sapphire-bridge`、マーカー `.bridge/`）。
@@ -335,7 +356,9 @@ clap alias として受け付ける。解決順序は `Workspace::resolve` が�
 
 1. 同期→非同期の波及は Backend trait のみ async 化で封じる（`ops::update_entry(&Connection,...)` の `&Connection` を trait から外す破壊的変更）。
 2. egui native の async: `?Send` により `dyn` は跨スレッド不可 → 具象型保持 + `runtime.spawn`。
-3. 非互換 crate（git2・fastembed・sqlx-postgres・tantivy/redb・iroh）は native 専用バイナリで隔離。
+3. 非互換 crate（git2・sqlx-postgres・tantivy/redb・iroh）は native 専用バイナリで隔離。fastembed / candle は
+   bridge の埋め込みコンポーネント（`sapphire-framework-bridge-embed`、ファサード feature `bridge-embed`）に
+   隔離し、ORT を動的ロードにして AVX 非対応 CPU でも `cargo test --workspace` が走るようにした。
    プラットフォーム差（UDS / named pipe / チャネル、systemd / LaunchAgent / タスクスケジューラ）
    は各層が吸収する。
 4. tantivy trigram FTS の挙動同等性（BM25・prefix フィルタ・短いクエリ<3文字は無マッチ＝FTS5同等）。

@@ -10,7 +10,6 @@
 | 機能フラグ | 有効にするもの | デフォルト |
 |---|---|---|
 | `redb-store` | redbレコード＋tantivy全文インデックス＋総当たりベクトル | 有効 |
-| `fastembed-embed` | FastEmbedによるオンデバイス埋め込み | 有効 |
 
 ## クイックスタート
 
@@ -110,26 +109,16 @@ println!("{}", sapphire_workspace::path_uuid(Path::new("/my/workspace")));
 ```toml
 [retrieve]
 db = "redb"   # "none" | "redb"
-
-[retrieve.embedding]
-enabled     = true
-provider    = "openai"
-model       = "text-embedding-3-small"
-api_key_env = "OPENAI_API_KEY"
-dimension   = 1536
 ```
+
+埋め込みはここでは設定しません。ブリッジが埋め込みを行い（`<bridge dir>/embedding.toml`）、
+`WorkspaceState::load_embedder()`がブリッジに問い合わせます。埋め込むブリッジがなければ検索はFTSのみです。
 
 環境変数による上書き：
 
 | 変数 | 値 |
 |---|---|
 | `SAPPHIRE_WORKSPACE_RETRIEVE_DB` | `none` / `redb` |
-| `SAPPHIRE_WORKSPACE_EMBEDDING_ENABLED` | `1` / `true` / `yes` |
-| `SAPPHIRE_WORKSPACE_EMBEDDING_PROVIDER` | 文字列 |
-| `SAPPHIRE_WORKSPACE_EMBEDDING_MODEL` | 文字列 |
-| `SAPPHIRE_WORKSPACE_EMBEDDING_API_KEY_ENV` | 環境変数名 |
-| `SAPPHIRE_WORKSPACE_EMBEDDING_BASE_URL` | URL |
-| `SAPPHIRE_WORKSPACE_EMBEDDING_DIMENSION` | 整数 |
 
 ## サポートするファイルタイプ
 

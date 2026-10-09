@@ -119,6 +119,7 @@ impl StubBridge {
                         node_id: "stub".into(),
                         workgroup: None,
                         routes: vec![],
+                        embedding: None,
                     })
                     .map_err(|e| sapphire_ipc::RpcError::internal(e.to_string()))
                 }),

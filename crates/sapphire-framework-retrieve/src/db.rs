@@ -195,14 +195,28 @@ impl RetrieveDb {
     }
 
     /// Initialise the pure-Rust redb backend with vector search enabled.
+    ///
+    /// An open redb store is switched on in place rather than opened a second
+    /// time, so handles from [`Self::shared`] keep pointing at the same store.
     #[cfg(feature = "redb-store")]
     pub fn init_redb_vec(&self, embedding_dim: u32) -> Result<()> {
         let mut guard = self.backend.lock().unwrap();
         if guard.needs_init() {
-            let store = RedbStore::open(&redb_dir_for(&self.db_path), Some(embedding_dim))?;
-            *guard = BackendState::Redb(Arc::new(store));
+            match &*guard {
+                BackendState::Redb(s) => s.set_dim(embedding_dim)?,
+                BackendState::InMemory(_) => {
+                    let store = RedbStore::open(&redb_dir_for(&self.db_path), Some(embedding_dim))?;
+                    *guard = BackendState::Redb(Arc::new(store));
+                }
+            }
         }
         Ok(())
+    }
+
+    /// Make the store hold vectors from `model` with `dim` values; see
+    /// [`RetrieveStore::configure_vectors`].
+    pub fn configure_vectors(&self, model: &str, dim: u32) -> Result<()> {
+        self.store().configure_vectors(model, dim)
     }
 
     fn store(&self) -> Arc<dyn RetrieveStore> {
@@ -393,6 +407,20 @@ mod tests {
 
         // 同じバックエンドを指しているので、共有ハンドル側からも見える。
         assert_eq!(shared.document_count().unwrap(), 1);
+    }
+
+    #[cfg(feature = "redb-store")]
+    #[test]
+    fn turning_vectors_on_keeps_the_shared_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = RetrieveDb::open(&tmp.path().join("retrieve.db")).unwrap();
+        let shared = db.shared();
+
+        db.init_redb_vec(3).unwrap();
+        assert_eq!(shared.vec_info().unwrap().embedding_dim, 3);
+
+        db.configure_vectors("m", 4).unwrap();
+        assert_eq!(shared.vec_info().unwrap().embedding_dim, 4);
     }
 
     #[test]

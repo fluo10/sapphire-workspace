@@ -1,0 +1,35 @@
+[package]
+name = "sapphire-framework-bridge-embed"
+version.workspace = true
+edition.workspace = true
+description = "Text embedding component of the sapphire bridge: a local Qwen3-VL-Embedding model or an OpenAI-compatible endpoint"
+license.workspace = true
+repository.workspace = true
+keywords = ["embedding", "bridge", "local-first", "qwen3"]
+categories = ["science"]
+
+[features]
+default = ["local"]
+# The local model. ORT is loaded dynamically (never at start), so CPUs without AVX still run.
+local = ["dep:fastembed", "dep:candle-core", "dep:candle-nn", "dep:tokenizers", "dep:hf-hub"]
+
+[dependencies]
+fastembed = { version = "=7.1.1", default-features = false, features = ["qwen3", "hf-hub-native-tls", "ort-load-dynamic"], optional = true }
+candle-core = { version = "0.11.0", optional = true }
+candle-nn = { version = "0.11.0", optional = true }
+tokenizers = { version = "0.23.2", default-features = false, features = ["onig"], optional = true }
+# The hf-hub fastembed uses, with the same TLS. The model is fetched through it into an
+# explicit cache directory (fastembed's `from_hf` would use the working directory).
+hf-hub = { version = "0.5.0", default-features = false, features = ["ureq", "native-tls"], optional = true }
+ureq = { version = "3.3", features = ["json"] }
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio = { workspace = true, features = ["sync", "rt"] }
+
+[dev-dependencies]
+dirs.workspace = true
+tempfile = "3"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

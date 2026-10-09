@@ -136,6 +136,7 @@ mod tests {
                         devices: 2,
                     }),
                     routes: vec![],
+                    embedding: None,
                 },
                 peers: vec![
                     PeerInfo {

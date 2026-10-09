@@ -10,11 +10,12 @@ use std::sync::{Arc, Mutex};
 
 use sapphire_bridge_api::{
     Ack, BRIDGE_NAME, DEVICE_PRIORITY_SET, DEVICE_RETIRE, DevicePrioritySetParams,
-    DevicePrioritySetResult, DeviceRetireParams, DeviceRetireResult, INVITE, InviteParams,
-    InviteResult, JOIN, JoinParams, JoinResult, PEERS, PeerInfo, PeersResult, REGISTER,
-    RegisterParams, RegisterResult, RouteStatus, STATUS, StatusResult, UNREGISTER,
-    UnregisterParams, WORKGROUP_CREATE, WORKSPACES, WorkgroupCreateParams, WorkgroupCreateResult,
-    WorkgroupStatus, WorkgroupWorkspaceInfo, WorkspaceRoles, WorkspacesResult,
+    DevicePrioritySetResult, DeviceRetireParams, DeviceRetireResult, EMBED, EMBED_INFO,
+    EmbedInfoResult, EmbedParams, EmbedResult, INVITE, InviteParams, InviteResult, JOIN,
+    JoinParams, JoinResult, PEERS, PeerInfo, PeersResult, REGISTER, RegisterParams, RegisterResult,
+    RouteStatus, STATUS, StatusResult, UNREGISTER, UnregisterParams, WORKGROUP_CREATE, WORKSPACES,
+    WorkgroupCreateParams, WorkgroupCreateResult, WorkgroupStatus, WorkgroupWorkspaceInfo,
+    WorkspaceRoles, WorkspacesResult,
 };
 use sapphire_ipc::{
     Connection, Endpoint, PeerHandle, RequestCtx, Router, RpcError, ServerInfo, serve,
@@ -200,6 +201,20 @@ fn router(bridge: Arc<Bridge>, session: Arc<Session>) -> Router {
                 async move { status(&bridge).map_err(failed).and_then(encode) }
             }
         })
+        .method(EMBED_INFO, {
+            let bridge = Arc::clone(&bridge);
+            move |_| {
+                let bridge = Arc::clone(&bridge);
+                async move { encode(embed_info(&bridge)) }
+            }
+        })
+        .method(EMBED, {
+            let bridge = Arc::clone(&bridge);
+            move |ctx| {
+                let bridge = Arc::clone(&bridge);
+                async move { embed(&bridge, ctx).await }
+            }
+        })
         .method(INVITE, {
             let bridge = Arc::clone(&bridge);
             move |ctx| {
@@ -377,6 +392,40 @@ pub(crate) fn peer_infos(bridge: &Bridge, workgroup: &Workgroup) -> Result<Vec<P
         .collect())
 }
 
+/// `embed.info` — whether this host embeds, and with which model.
+pub(crate) fn embed_info(bridge: &Bridge) -> EmbedInfoResult {
+    let info = bridge.embedder().and_then(|p| p.info());
+    EmbedInfoResult {
+        enabled: info.is_some(),
+        loaded: info.is_some() && bridge.embedder().is_some_and(|p| p.loaded()),
+        model: info,
+    }
+}
+
+/// `embed.embed` — one vector per text, in order. A provider failure travels with its own
+/// message.
+async fn embed(bridge: &Bridge, ctx: RequestCtx) -> std::result::Result<Value, RpcError> {
+    let params: EmbedParams = serde_json::from_value(ctx.params)
+        .map_err(|e| RpcError::invalid_params(format!("malformed embed request: {e}")))?;
+    let (provider, info) = match bridge.embedder().map(|p| (p, p.info())) {
+        Some((p, Some(info))) => (p, info),
+        _ => {
+            return Err(failed(Error::Config(
+                "embedding is not enabled on this host".to_owned(),
+            )));
+        }
+    };
+    let vectors = provider
+        .embed(params.texts)
+        .await
+        .map_err(RpcError::internal)?;
+    encode(EmbedResult {
+        model: info.model,
+        dimension: info.dimension,
+        vectors,
+    })
+}
+
 /// `bridge.status` — what this bridge knows about itself.
 fn status(bridge: &Bridge) -> Result<StatusResult> {
     let workgroup = bridge.workgroup()?;
@@ -384,6 +433,7 @@ fn status(bridge: &Bridge) -> Result<StatusResult> {
         version: bridge.version().to_owned(),
         node_id: bridge.transport().node_id(),
         workgroup: workgroup.as_ref().map(workgroup_status).transpose()?,
+        embedding: Some(embed_info(bridge)),
         routes: route_statuses(bridge),
     })
 }
@@ -991,5 +1041,158 @@ mod tests {
             "the refusal must name the app that owns it: {err}"
         );
         assert!(!bridge.owners().is_online("other-app"));
+    }
+
+    struct FakeProvider;
+
+    #[async_trait::async_trait]
+    impl crate::EmbedProvider for FakeProvider {
+        fn info(&self) -> Option<sapphire_bridge_api::EmbedModelInfo> {
+            Some(sapphire_bridge_api::EmbedModelInfo {
+                model: "fake".into(),
+                dimension: 2,
+                template_version: 1,
+            })
+        }
+        fn loaded(&self) -> bool {
+            true
+        }
+        async fn embed(&self, texts: Vec<String>) -> std::result::Result<Vec<Vec<f32>>, String> {
+            if texts.iter().any(|t| t == "boom") {
+                return Err("model failed".into());
+            }
+            Ok(texts.iter().map(|t| vec![t.len() as f32, 1.0]).collect())
+        }
+    }
+
+    /// As [`bridge`], with the fake embedding provider installed.
+    fn embedding_bridge(tmp: &tempfile::TempDir) -> Arc<Bridge> {
+        let dir = BridgeDir::at(tmp.path().join("bridge")).unwrap();
+        crate::workgroup::Workgroup::create(&dir, "test", "host-a", "aaaa").unwrap();
+        Arc::new(
+            Bridge::new(
+                dir,
+                Arc::new(LoopbackNetwork::new().transport("aaaa")),
+                "0.0.0",
+            )
+            .unwrap()
+            .net(NetConfig::default())
+            .embed_provider(Arc::new(FakeProvider)),
+        )
+    }
+
+    #[tokio::test]
+    async fn embed_info_without_a_provider_is_disabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bridge = bridge(&tmp);
+        let (client, _serving) = connect(&bridge).await;
+        let info: sapphire_bridge_api::EmbedInfoResult = serde_json::from_value(
+            call(
+                &client,
+                sapphire_bridge_api::EMBED_INFO,
+                serde_json::json!({}),
+            )
+            .await,
+        )
+        .unwrap();
+        assert!(!info.enabled);
+        assert!(info.model.is_none());
+        assert!(!info.loaded);
+    }
+
+    #[tokio::test]
+    async fn embed_without_a_provider_is_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bridge = bridge(&tmp);
+        let (client, _serving) = connect(&bridge).await;
+        let err = client
+            .call::<_, Value>(
+                sapphire_bridge_api::EMBED,
+                serde_json::json!({"texts": ["a"]}),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("embedding is not enabled"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn embed_info_reports_the_provider_model() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bridge = embedding_bridge(&tmp);
+        let (client, _serving) = connect(&bridge).await;
+        let info: sapphire_bridge_api::EmbedInfoResult = serde_json::from_value(
+            call(
+                &client,
+                sapphire_bridge_api::EMBED_INFO,
+                serde_json::json!({}),
+            )
+            .await,
+        )
+        .unwrap();
+        assert!(info.enabled);
+        assert!(info.loaded);
+        let model = info.model.unwrap();
+        assert_eq!(model.model, "fake");
+        assert_eq!(model.dimension, 2);
+        assert_eq!(model.template_version, 1);
+    }
+
+    #[tokio::test]
+    async fn embed_returns_one_vector_per_text_in_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bridge = embedding_bridge(&tmp);
+        let (client, _serving) = connect(&bridge).await;
+        let result: sapphire_bridge_api::EmbedResult = serde_json::from_value(
+            call(
+                &client,
+                sapphire_bridge_api::EMBED,
+                serde_json::json!({"texts": ["a", "abc", ""]}),
+            )
+            .await,
+        )
+        .unwrap();
+        assert_eq!(result.model, "fake");
+        assert_eq!(result.dimension, 2);
+        assert_eq!(
+            result.vectors,
+            vec![vec![1.0, 1.0], vec![3.0, 1.0], vec![0.0, 1.0]]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_provider_error_is_an_rpc_error_with_its_message() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bridge = embedding_bridge(&tmp);
+        let (client, _serving) = connect(&bridge).await;
+        let err = client
+            .call::<_, Value>(
+                sapphire_bridge_api::EMBED,
+                serde_json::json!({"texts": ["ok", "boom"]}),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("model failed"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn status_reports_embedding() {
+        let tmp = tempfile::tempdir().unwrap();
+        let with_embed = embedding_bridge(&tmp);
+        let (client, _serving) = connect(&with_embed).await;
+        let reported: StatusResult =
+            serde_json::from_value(call(&client, STATUS, serde_json::json!({})).await).unwrap();
+        let embedding = reported.embedding.expect("an embedding line");
+        assert!(embedding.enabled);
+        assert_eq!(embedding.model.unwrap().model, "fake");
+
+        let tmp2 = tempfile::tempdir().unwrap();
+        let plain = bridge(&tmp2);
+        let (client, _serving) = connect(&plain).await;
+        let reported: StatusResult =
+            serde_json::from_value(call(&client, STATUS, serde_json::json!({})).await).unwrap();
+        assert!(!reported.embedding.expect("always reported").enabled);
     }
 }
