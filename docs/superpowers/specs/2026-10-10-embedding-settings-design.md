@@ -52,7 +52,7 @@ edited by hand. That was a stopgap:
    that is off is off for both, and synced vectors (#187) do not change that. A device
    with no usable slot answers `embed.info` with `enabled: false`, so its apps search
    with FTS only, and it never downloads the local model.
-6. **What #186 serves: one model.** Until the follow-up issue lets a device hold vectors
+6. **What #186 serves: one model.** Until #206 lets a device hold vectors
    of both models and fall back between them, the bridge serves a single *active*
    model: the remote slot when it is configured and on for this device, the local slot
    otherwise. The choice is static — it does not follow reachability yet — so a device
@@ -149,7 +149,7 @@ pub struct DeviceSettings {
 The bridge's hook becomes reusable: `EmbedFactory` is an
 `Arc<dyn Fn(&EmbedConfig) -> Option<Arc<dyn EmbedProvider>> + Send + Sync>`, where
 `EmbedConfig` names the active slot with its model, the cache directory and the key.
-`Bridge.embed` becomes swappable (`RwLock<Option<Arc<dyn EmbedProvider>>>`). The follow-up
+`Bridge.embed` becomes swappable (`RwLock<Option<Arc<dyn EmbedProvider>>>`). #206
 issue turns it into one provider per slot.
 
 ## Control plane (bridge-api 2.3.0, additive; `API_VERSION` stays 2)
@@ -202,9 +202,10 @@ embedding key clear
 ```
 
 `set` replaces the slot: options not given take their defaults, so the result never mixes
-an old endpoint with a new model. When the bridge is not running, the CLI writes the
-files directly, so a device can be prepared before its bridge starts; a running bridge
-picks the change up as in decision 7.
+an old endpoint with a new model. When the bridge is not running, the bridge's own CLI
+writes the files directly, so a device can be prepared before its bridge starts; a running
+bridge picks the change up as in decision 7. An app's CLI only talks to a running bridge:
+the files are the bridge's, and the app does not link the code that writes them.
 
 `show` prints both slots, their source, each switch with the reason (`auto: off, no
 AVX2`), which slot is active, whether a key is set, and the model's state (`loaded`,
@@ -232,7 +233,7 @@ In #186 a change of the active model reconfigures each app's store on its next s
 drops the old model's vectors and re-embeds what the app holds locally — the behaviour
 `configure_vectors` has today.
 
-The follow-up issue changes that: vectors are kept per model, a file holds vectors of both
+#206 changes that: vectors are kept per model, a file holds vectors of both
 slots, search falls back from remote to local when the endpoint cannot be reached, and
 vectors of a model no slot names any more are removed only by an explicit command, so a
 model can be tried and then reverted without re-embedding. Once vectors sync (#187),
@@ -241,7 +242,7 @@ re-embedding the workgroup's documents is the primary device's backfill (#188).
 ## Out of scope
 
 - Serving both slots at once, falling back between them, keeping vectors per model and
-  removing unused ones explicitly: the follow-up issue.
+  removing unused ones explicitly: #206.
 - Syncing vectors (#187) and backfill (#188).
 - A configurable REST timeout and `HF_ENDPOINT` (the #185 leftovers). They fit
   `ModelSettings` and `DeviceSettings` later without changing this design.
