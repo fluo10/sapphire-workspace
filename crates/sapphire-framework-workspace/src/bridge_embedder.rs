@@ -4,7 +4,7 @@ use std::sync::Mutex;
 use std::sync::mpsc::{Receiver, Sender};
 use std::thread;
 
-use sapphire_bridge_api::{BridgeClient, EmbedModelInfo};
+use sapphire_bridge_api::{BridgeClient, EmbedInfoResult, EmbedModelInfo, EmbedResult};
 use sapphire_ipc::Endpoint;
 use sapphire_retrieve::{Embedder, Error, Result};
 
@@ -22,12 +22,18 @@ const EMBED_INFO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2
 
 /// One unit of work for the embedder's thread.
 enum Job {
-    /// Embed `texts` and reply with the vectors, or the reason there are none.
+    /// Embed `texts` and reply with the bridge's answer, or the reason there is none.
     Embed {
         /// The texts to embed, in the caller's order.
         texts: Vec<String>,
         /// Where the answer goes.
-        reply: Sender<Result<Vec<Vec<f32>>>>,
+        reply: Sender<Result<EmbedResult>>,
+    },
+    /// Ask `embed.info` again and reply with the model now served (`None`: embedding is
+    /// off), or an error when the bridge cannot be reached.
+    Info {
+        /// Where the answer goes.
+        reply: Sender<Result<Option<EmbedModelInfo>>>,
     },
 }
 
@@ -41,8 +47,9 @@ pub struct BridgeEmbedder {
     /// The jobs channel. A `Mutex` because a `std` `Sender` is `Send` but not `Sync`,
     /// and an [`Embedder`] must be both.
     tx: Mutex<Sender<Job>>,
-    /// The model the bridge answered with, kept for [`info`](Self::info).
-    info: EmbedModelInfo,
+    /// The model this embedder's vectors are for: what the bridge answered when it was last
+    /// asked. An `embed.embed` answer from another model is an error.
+    info: Mutex<EmbedModelInfo>,
 }
 
 impl BridgeEmbedder {
@@ -67,7 +74,7 @@ impl BridgeEmbedder {
             Ok(Some(info)) => {
                 let embedder = BridgeEmbedder {
                     tx: Mutex::new(jobs_tx),
-                    info: info.clone(),
+                    info: Mutex::new(info.clone()),
                 };
                 Some((embedder, info))
             }
@@ -75,10 +82,34 @@ impl BridgeEmbedder {
         }
     }
 
-    /// The model this embedder was connected for.
-    pub fn info(&self) -> &EmbedModelInfo {
-        &self.info
+    /// The model this embedder's vectors are for.
+    pub fn info(&self) -> EmbedModelInfo {
+        self.info.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
+
+    /// Accept vectors of `info` from now on: the caller has reconfigured its store for it.
+    pub(crate) fn set_info(&self, info: EmbedModelInfo) {
+        *self.info.lock().unwrap_or_else(|e| e.into_inner()) = info;
+    }
+
+    /// Ask the bridge, on this embedder's connection, which model it serves now. `Ok(None)`
+    /// when it no longer embeds; an error when it cannot be reached. Blocks the caller.
+    pub fn current(&self) -> Result<Option<EmbedModelInfo>> {
+        let (reply, rx) = std::sync::mpsc::channel();
+        self.send(Job::Info { reply })?;
+        rx.recv().map_err(|_| gone())?
+    }
+
+    /// Hand a job to the thread. The lock is held only that long: the thread answers
+    /// through the job's own channel, so callers never contend on the reply.
+    fn send(&self, job: Job) -> Result<()> {
+        let tx = self.tx.lock().unwrap_or_else(|e| e.into_inner());
+        tx.send(job).map_err(|_| gone())
+    }
+}
+
+fn gone() -> Error {
+    Error::Embed("the bridge embedder thread is gone".to_owned())
 }
 
 /// The embedder thread: connect once, report the model, then answer jobs until the
@@ -100,51 +131,72 @@ fn serve(
         let _ = info_tx.send(None);
         return;
     };
-    // Bounded: a bridge that accepted the connection and then stalls on `embed.info` must
-    // be treated as "no embedder", not waited on for ever.
-    // The whole probe runs inside the runtime: `embed_info` builds a future that needs
-    // the reactor, so it must be constructed inside `block_on`, not passed to it.
-    let info = match rt
-        .block_on(async { tokio::time::timeout(EMBED_INFO_TIMEOUT, client.embed_info()).await })
-    {
-        Ok(Ok(info)) => info,
-        Ok(Err(err)) => {
-            tracing::debug!("the bridge did not answer embed.info: {err}");
-            let _ = info_tx.send(None);
-            return;
-        }
-        Err(_elapsed) => {
-            tracing::debug!("the bridge did not answer embed.info within {EMBED_INFO_TIMEOUT:?}");
-            let _ = info_tx.send(None);
-            return;
-        }
-    };
-    match info.model {
-        Some(model) if info.enabled => {
-            let _ = info_tx.send(Some(model));
-        }
-        _ => {
+    match probe(&rt, &client) {
+        Ok(info) => match served(info) {
+            Some(model) => {
+                let _ = info_tx.send(Some(model));
+            }
+            None => {
+                let _ = info_tx.send(None);
+                return;
+            }
+        },
+        Err(err) => {
+            tracing::debug!("{err}");
             let _ = info_tx.send(None);
             return;
         }
     }
 
     while let Ok(job) = jobs.recv() {
-        let Job::Embed { texts, reply } = job;
-        let mut result = rt.block_on(client.embed(texts.clone()));
-        if result.as_ref().is_err_and(is_connection_error) {
-            // The bridge restarted, or this connection went stale: reconnect once and
-            // retry the same batch. A second failure is reported to the caller.
-            if let Some(fresh) = rt.block_on(connect_client(endpoint.as_ref())) {
-                client = fresh;
-                result = rt.block_on(client.embed(texts));
+        match job {
+            Job::Embed { texts, reply } => {
+                let mut result = rt.block_on(client.embed(texts.clone()));
+                if result.as_ref().is_err_and(is_connection_error) {
+                    // The bridge restarted, or this connection went stale: reconnect once
+                    // and retry the same batch. A second failure is reported to the caller.
+                    if let Some(fresh) = rt.block_on(connect_client(endpoint.as_ref())) {
+                        client = fresh;
+                        result = rt.block_on(client.embed(texts));
+                    }
+                }
+                let _ = reply.send(result.map_err(|e| Error::Embed(e.to_string())));
+            }
+            Job::Info { reply } => {
+                let mut result = probe(&rt, &client);
+                if result.is_err()
+                    && let Some(fresh) = rt.block_on(connect_client(endpoint.as_ref()))
+                {
+                    client = fresh;
+                    result = probe(&rt, &client);
+                }
+                let _ = reply.send(result.map(served).map_err(Error::Embed));
             }
         }
-        let out = result
-            .map(|r| r.vectors)
-            .map_err(|e| Error::Embed(e.to_string()));
-        let _ = reply.send(out);
     }
+}
+
+/// Ask `embed.info`, bounded: a bridge that accepted the connection and then stalls must be
+/// treated as "no answer", not waited on for ever.
+fn probe(
+    rt: &tokio::runtime::Runtime,
+    client: &BridgeClient,
+) -> std::result::Result<EmbedInfoResult, String> {
+    // The whole probe runs inside the runtime: `embed_info` builds a future that needs the
+    // reactor, so it must be constructed inside `block_on`, not passed to it.
+    match rt.block_on(async { tokio::time::timeout(EMBED_INFO_TIMEOUT, client.embed_info()).await })
+    {
+        Ok(Ok(info)) => Ok(info),
+        Ok(Err(err)) => Err(format!("the bridge did not answer embed.info: {err}")),
+        Err(_elapsed) => Err(format!(
+            "the bridge did not answer embed.info within {EMBED_INFO_TIMEOUT:?}"
+        )),
+    }
+}
+
+/// The model an `embed.info` answer says is served, if embedding is on.
+fn served(info: EmbedInfoResult) -> Option<EmbedModelInfo> {
+    info.model.filter(|_| info.enabled)
 }
 
 /// Whether the bridge connection itself is broken, rather than the call having failed.
@@ -180,20 +232,21 @@ impl Embedder for BridgeEmbedder {
             return Ok(Vec::new());
         }
         let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-        let job = Job::Embed {
+        self.send(Job::Embed {
             texts: texts.iter().map(|t| (*t).to_owned()).collect(),
             reply: reply_tx,
-        };
-        {
-            // The lock is held only long enough to hand the job over: the thread answers
-            // through this job's own channel, so callers never contend on the reply.
-            let tx = self.tx.lock().unwrap_or_else(|e| e.into_inner());
-            tx.send(job)
-                .map_err(|_| Error::Embed("the bridge embedder thread is gone".to_owned()))?;
+        })?;
+        let answer = reply_rx.recv().map_err(|_| gone())??;
+        // The bridge switched models since this embedder was configured: these vectors
+        // cannot be compared with the stored ones. The next sync reconfigures the store.
+        let info = self.info();
+        if answer.model != info.model || answer.dimension != info.dimension {
+            return Err(Error::Embed(format!(
+                "the bridge now embeds with {} ({} dimensions), not {} ({} dimensions)",
+                answer.model, answer.dimension, info.model, info.dimension
+            )));
         }
-        reply_rx
-            .recv()
-            .map_err(|_| Error::Embed("the bridge embedder thread is gone".to_owned()))?
+        Ok(answer.vectors)
     }
 }
 
@@ -213,6 +266,8 @@ pub(crate) mod testing {
     /// Its vectors are `[index, text length]`, so a test can see the order was kept.
     pub(crate) struct FakeBridge {
         pub(crate) endpoint: Endpoint,
+        /// What `embed.info` answers, and which model `embed.embed` uses; changeable.
+        info: Arc<std::sync::Mutex<EmbedInfoResult>>,
         rt: Option<tokio::runtime::Runtime>,
     }
 
@@ -220,18 +275,19 @@ pub(crate) mod testing {
         /// Serve `embed.info` with `info` at `<dir>/bridge`.
         pub(crate) fn start(dir: &std::path::Path, info: EmbedInfoResult) -> FakeBridge {
             let endpoint = Endpoint::in_dir("bridge", dir.to_path_buf());
-            let model = info.model.clone();
+            let info = Arc::new(std::sync::Mutex::new(info));
+            let (for_info, for_embed) = (Arc::clone(&info), Arc::clone(&info));
             let router = Arc::new(
                 Router::new()
                     .method(EMBED_INFO, move |_| {
-                        let info = info.clone();
+                        let info = for_info.lock().unwrap().clone();
                         async move {
                             serde_json::to_value(info)
                                 .map_err(|e| RpcError::internal(e.to_string()))
                         }
                     })
                     .method(EMBED, move |ctx| {
-                        let model = model.clone();
+                        let model = for_embed.lock().unwrap().model.clone();
                         async move {
                             let params: EmbedParams = serde_json::from_value(ctx.params)
                                 .map_err(|e| RpcError::invalid_params(e.to_string()))?;
@@ -242,7 +298,12 @@ pub(crate) mod testing {
                                 .texts
                                 .iter()
                                 .enumerate()
-                                .map(|(i, t)| vec![i as f32, t.len() as f32])
+                                .map(|(i, t)| {
+                                    let mut v = vec![0.0; model.dimension as usize];
+                                    v[0] = i as f32;
+                                    v[1] = t.len() as f32;
+                                    v
+                                })
                                 .collect();
                             serde_json::to_value(EmbedResult {
                                 model: model.model,
@@ -296,8 +357,14 @@ pub(crate) mod testing {
 
             FakeBridge {
                 endpoint,
+                info,
                 rt: Some(rt),
             }
+        }
+
+        /// Answer with `info` from now on, as a bridge whose settings changed.
+        pub(crate) fn set_info(&self, info: EmbedInfoResult) {
+            *self.info.lock().unwrap() = info;
         }
 
         /// A bridge that embeds with a 2-dimensional model.
@@ -472,6 +539,41 @@ mod tests {
             elapsed < std::time::Duration::from_secs(10),
             "connect must time out rather than hang: took {elapsed:?}"
         );
+    }
+
+    #[test]
+    fn a_vector_from_another_model_is_an_error_until_the_embedder_follows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bridge = FakeBridge::enabled(tmp.path());
+        let (embedder, _) =
+            BridgeEmbedder::connect(Some(bridge.endpoint.clone())).expect("embedding is enabled");
+        let other = EmbedModelInfo {
+            model: "other-3d".into(),
+            dimension: 3,
+            template_version: 0,
+        };
+        bridge.set_info(EmbedInfoResult {
+            enabled: true,
+            model: Some(other.clone()),
+            ..EmbedInfoResult::default()
+        });
+
+        let err = embedder.embed_texts(&["x"]).unwrap_err();
+        assert!(
+            err.to_string().contains("now embeds with other-3d"),
+            "{err}"
+        );
+
+        // Asking again on the same connection sees the new model; once accepted, it embeds.
+        assert_eq!(embedder.current().unwrap(), Some(other.clone()));
+        embedder.set_info(other);
+        assert_eq!(
+            embedder.embed_texts(&["x"]).unwrap(),
+            vec![vec![0.0, 1.0, 0.0]]
+        );
+
+        bridge.set_info(EmbedInfoResult::default());
+        assert_eq!(embedder.current().unwrap(), None, "embedding switched off");
     }
 
     #[test]
