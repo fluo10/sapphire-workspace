@@ -1,6 +1,7 @@
 //! An OpenAI-compatible `/v1/embeddings` provider, with the #194 fixes.
 
 use std::ops::Range;
+use std::time::Duration;
 
 use crate::service::Embed;
 use crate::settings::EmbeddingSettings;
@@ -104,9 +105,31 @@ pub trait HttpPost: Send + Sync {
     ) -> Result<serde_json::Value>;
 }
 
-/// [`HttpPost`] over `ureq` (blocking; runs on the embedding worker thread).
-#[derive(Clone, Debug, Default)]
-pub struct UreqPost;
+/// Whole-request timeout for REST calls. ureq has none by default, and a stalled endpoint
+/// would otherwise block the single embedding worker forever.
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How much of an error response's body goes into the error message, in characters.
+const ERROR_BODY_CHARS: usize = 500;
+
+/// [`HttpPost`] over one shared `ureq::Agent` (blocking; runs on the embedding worker
+/// thread), with [`REQUEST_TIMEOUT`].
+#[derive(Clone)]
+pub struct UreqPost {
+    agent: ureq::Agent,
+}
+
+impl Default for UreqPost {
+    fn default() -> Self {
+        let agent = ureq::Agent::config_builder()
+            .timeout_global(Some(REQUEST_TIMEOUT))
+            // Non-2xx responses come back as responses, so their body can be reported.
+            .http_status_as_error(false)
+            .build()
+            .into();
+        Self { agent }
+    }
+}
 
 impl HttpPost for UreqPost {
     fn post_json(
@@ -115,15 +138,26 @@ impl HttpPost for UreqPost {
         bearer: Option<&str>,
         body: serde_json::Value,
     ) -> Result<serde_json::Value> {
-        let mut request = ureq::post(url).header("Content-Type", "application/json");
+        let mut request = self
+            .agent
+            .post(url)
+            .header("Content-Type", "application/json");
         if let Some(key) = bearer {
             request = request.header("Authorization", &format!("Bearer {key}"));
         }
-        request
+        let response = request
             .send_json(body)
-            .map_err(|e| Error::Embed(format!("POST {url}: {e}")))?
-            .into_body()
-            .read_json()
+            .map_err(|e| Error::Embed(format!("POST {url}: {e}")))?;
+        let status = response.status();
+        let mut body = response.into_body();
+        if !status.is_success() {
+            let text = body.read_to_string().unwrap_or_default();
+            return Err(Error::Embed(format!(
+                "POST {url}: HTTP {status}: {}",
+                cap_chars(text.trim(), ERROR_BODY_CHARS)
+            )));
+        }
+        body.read_json()
             .map_err(|e| Error::Embed(format!("POST {url}: {e}")))
     }
 }
@@ -140,7 +174,7 @@ pub struct RestEmbedder<H: HttpPost = UreqPost> {
 impl RestEmbedder<UreqPost> {
     /// A provider for `settings`, over `ureq`.
     pub fn new(settings: &EmbeddingSettings) -> Self {
-        Self::with_http(settings, UreqPost)
+        Self::with_http(settings, UreqPost::default())
     }
 }
 
@@ -168,7 +202,8 @@ impl<H: HttpPost> RestEmbedder<H> {
     ///
     /// The key is read from `api_key_env` on every call; when the variable is unset, no
     /// `Authorization` header is sent (keyless local endpoints). Vectors longer than
-    /// `dimension` are cut and normalized again (MRL); others are used as returned.
+    /// `dimension` are cut and normalized again (MRL), vectors of exactly `dimension` are
+    /// used as returned, and a shorter vector is an error.
     pub fn embed_texts(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         let capped: Vec<&str> = texts
             .iter()
@@ -183,6 +218,14 @@ impl<H: HttpPost> RestEmbedder<H> {
             let body = serde_json::json!({ "model": self.model, "input": inputs });
             let response = self.http.post_json(&self.url, key.as_deref(), body)?;
             for v in parse_response(&response, inputs.len())? {
+                if v.len() < self.dimension {
+                    return Err(Error::Embed(format!(
+                        "the endpoint returned a {}-dimension vector, shorter than the \
+                         configured dimension {}",
+                        v.len(),
+                        self.dimension
+                    )));
+                }
                 out.push(if v.len() > self.dimension {
                     mrl(&v, self.dimension)
                 } else {
@@ -214,6 +257,7 @@ mod tests {
             max_tokens: 1024,
             endpoint: Some("http://example.invalid/".into()),
             api_key_env: Some("SAPPHIRE_BRIDGE_EMBED_TEST_KEY_UNSET".into()),
+            cache_dir: None,
         }
     }
 
@@ -330,6 +374,56 @@ mod tests {
             let n = v.iter().map(|x| x * x).sum::<f32>().sqrt();
             assert!((n - 1.0).abs() < 1e-5, "norm {n}");
         }
+    }
+
+    #[test]
+    fn shorter_vectors_are_an_error() {
+        let e = RestEmbedder::with_http(&settings(1024), Fake::new(768));
+        let err = e.embed_texts(&["a".into()]).unwrap_err();
+        assert!(matches!(err, Error::Embed(_)), "{err}");
+        let msg = err.to_string();
+        assert!(msg.contains("768") && msg.contains("1024"), "{msg}");
+    }
+
+    #[test]
+    fn http_errors_carry_the_response_body() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut length = 0;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = v.trim().parse().unwrap();
+                }
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            reader.read_exact(&mut vec![0; length]).unwrap();
+            let body = r#"{"error":{"message":"Incorrect API key provided"}}"#;
+            write!(
+                reader.get_mut(),
+                "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+        });
+        let err = UreqPost::default()
+            .post_json(
+                &format!("http://{addr}/v1/embeddings"),
+                Some("k"),
+                serde_json::json!({}),
+            )
+            .unwrap_err();
+        server.join().unwrap();
+        let msg = err.to_string();
+        assert!(msg.contains("401"), "{msg}");
+        assert!(msg.contains("Incorrect API key provided"), "{msg}");
     }
 
     #[test]

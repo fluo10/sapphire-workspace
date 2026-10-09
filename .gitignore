@@ -21,3 +21,6 @@ tmp
 # macOS Finder metadata
 .DS_Store
 **/.DS_Store
+
+# Model weights fastembed caches in the working directory by default
+.fastembed_cache/

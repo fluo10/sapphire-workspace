@@ -1,15 +1,21 @@
 //! Qwen3-VL-Embedding-2B on CPU, text mode, through fastembed's `qwen3` (candle) backend.
-
 //!
 //! fastembed applies no template and truncates after its own tokenization, so this provider
-//! truncates the content by tokens first, then wraps it in the template ([`wrap`]), and lets
-//! fastembed's `max_length` (`max_tokens + 64`) leave the template intact.
+//! truncates the content by tokens first, then wraps it in the template ([`wrap`]), and sets
+//! the model's `max_length` to `max_tokens + 64` so the template is never cut.
+//!
+//! The files are fetched through hf-hub into an explicit cache directory. fastembed's own
+//! `from_hf` would pick `HF_HOME`, `FASTEMBED_CACHE_DIR` or `./.fastembed_cache`, which for a
+//! service means its working directory; so the model is assembled here the way `from_hf`
+//! does it (fastembed 7.1.1, `models/qwen3.rs`).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use candle_core::{DType, Device};
-use fastembed::Qwen3TextEmbedding;
-use tokenizers::Tokenizer;
+use candle_nn::VarBuilder;
+use fastembed::{Qwen3Config, Qwen3Model, Qwen3TextEmbedding};
+use hf_hub::api::sync::{ApiBuilder, ApiRepo};
+use tokenizers::{PaddingDirection, PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
 
 use crate::service::Embed;
 use crate::settings::{EmbeddingSettings, LOCAL_MODEL};
@@ -26,28 +32,74 @@ const FORWARD_BATCH: usize = 8;
 /// Qwen3-VL-Embedding-2B with this crate's template, truncation and MRL.
 pub struct LocalQwen {
     model: Qwen3TextEmbedding,
-    /// The model's tokenizer, without fastembed's padding and truncation settings.
+    /// The model's tokenizer, without the padding and truncation the model's copy has.
     tokenizer: Tokenizer,
     max_tokens: usize,
     dimension: usize,
 }
 
 impl LocalQwen {
-    /// Load the model at f32 on the CPU, downloading the weights into the Hugging Face cache
-    /// on first use (about 4 GB; about 7 GB resident once loaded).
-    pub fn load(settings: &EmbeddingSettings) -> Result<Self> {
-        let model = Qwen3TextEmbedding::from_hf(
-            LOCAL_MODEL,
-            &Device::Cpu,
-            DType::F32,
-            settings.max_tokens + TEMPLATE_TOKENS,
-        )
-        .map_err(|e| Error::Load(format!("{LOCAL_MODEL}: {e}")))?;
-        let path = cached_tokenizer_path()?;
-        let tokenizer = Tokenizer::from_file(&path)
-            .map_err(|e| Error::Load(format!("{}: {e}", path.display())))?;
+    /// Load the model at f32 on the CPU. The files are downloaded into `cache_dir` (hf-hub
+    /// layout) on first use: about 4 GB, about 7 GB resident once loaded.
+    pub fn load(settings: &EmbeddingSettings, cache_dir: &Path) -> Result<Self> {
+        let load_err = |what: &str, e: &dyn std::fmt::Display| {
+            Error::Load(format!("{LOCAL_MODEL}: {what}: {e}"))
+        };
+        let mut builder = ApiBuilder::new()
+            .with_cache_dir(cache_dir.to_path_buf())
+            .with_progress(false);
+        if let Some(token) = std::env::var("HF_TOKEN")
+            .ok()
+            .map(|t| t.trim().to_owned())
+            .filter(|t| !t.is_empty())
+        {
+            builder = builder.with_token(Some(token));
+        }
+        let repo = builder
+            .build()
+            .map_err(|e| load_err("hf-hub", &e))?
+            .model(LOCAL_MODEL.to_owned());
+
+        let config_path = repo
+            .get("config.json")
+            .map_err(|e| load_err("config.json", &e))?;
+        let config_bytes = std::fs::read(&config_path).map_err(|e| load_err("config.json", &e))?;
+        let (config, prefix) = parse_config_and_weight_prefix(&config_bytes)?;
+        let weights = safetensors_weight_files(&repo)?;
+        let tokenizer_path = repo
+            .get("tokenizer.json")
+            .map_err(|e| load_err("tokenizer.json", &e))?;
+
+        // SAFETY: the safetensors files are memory-mapped read-only. They live in the hf-hub
+        // cache, which nothing in this process writes while the model is loaded.
+        let vb = unsafe {
+            VarBuilder::from_mmaped_safetensors(&weights, DType::F32, &Device::Cpu)
+                .map_err(|e| load_err("weights", &e))?
+        };
+        let vb = match prefix {
+            Some(prefix) => vb.pp(prefix),
+            None => vb,
+        };
+        let model = Qwen3Model::new(config, vb).map_err(|e| load_err("model", &e))?;
+
+        let tokenizer =
+            Tokenizer::from_file(&tokenizer_path).map_err(|e| load_err("tokenizer.json", &e))?;
+        let mut model_tokenizer = tokenizer.clone();
+        // Left padding keeps the real last token at the last position (last-token pooling).
+        model_tokenizer.with_padding(Some(PaddingParams {
+            strategy: PaddingStrategy::BatchLongest,
+            direction: PaddingDirection::Left,
+            ..Default::default()
+        }));
+        model_tokenizer
+            .with_truncation(Some(TruncationParams {
+                max_length: settings.max_tokens + TEMPLATE_TOKENS,
+                ..Default::default()
+            }))
+            .map_err(|e| load_err("tokenizer truncation", &e))?;
+
         Ok(Self {
-            model,
+            model: Qwen3TextEmbedding::new(model, model_tokenizer),
             tokenizer,
             max_tokens: settings.max_tokens,
             dimension: settings.dimension as usize,
@@ -68,24 +120,53 @@ impl LocalQwen {
     }
 }
 
-/// `tokenizer.json` for [`LOCAL_MODEL`], as fastembed's `from_hf` left it in the hf-hub cache.
-///
-/// fastembed does not re-export hf-hub, so this repeats its cache choice: `HF_HOME`, else
-/// fastembed's cache directory (`FASTEMBED_CACHE_DIR`, default `.fastembed_cache`). hf-hub's
-/// offline `Cache` then follows `refs/main` to the snapshot.
-fn cached_tokenizer_path() -> Result<PathBuf> {
-    let dir = std::env::var("HF_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(fastembed::get_cache_dir()));
-    hf_hub::Cache::new(dir.clone())
-        .model(LOCAL_MODEL.to_owned())
-        .get("tokenizer.json")
-        .ok_or_else(|| {
-            Error::Load(format!(
-                "tokenizer.json for {LOCAL_MODEL} is not in the cache at {}",
-                dir.display()
-            ))
+/// The text config and weight prefix: a plain Qwen3 config, or a Qwen3-VL config whose text
+/// model lives under `model.language_model`. Mirrors fastembed 7.1.1's private helper.
+fn parse_config_and_weight_prefix(bytes: &[u8]) -> Result<(Qwen3Config, Option<&'static str>)> {
+    #[derive(serde::Deserialize)]
+    struct VlConfig {
+        text_config: Qwen3Config,
+    }
+    if let Ok(config) = serde_json::from_slice::<Qwen3Config>(bytes) {
+        return Ok((config, None));
+    }
+    if let Ok(config) = serde_json::from_slice::<VlConfig>(bytes) {
+        return Ok((config.text_config, Some("model.language_model")));
+    }
+    Err(Error::Load(format!(
+        "{LOCAL_MODEL}: config.json is neither a Qwen3 nor a Qwen3-VL text config"
+    )))
+}
+
+/// `model.safetensors`, or every shard listed in `model.safetensors.index.json`.
+/// Mirrors fastembed 7.1.1's private helper.
+fn safetensors_weight_files(repo: &ApiRepo) -> Result<Vec<PathBuf>> {
+    const SINGLE_FILE: &str = "model.safetensors";
+    const INDEX_FILE: &str = "model.safetensors.index.json";
+
+    if let Ok(path) = repo.get(SINGLE_FILE) {
+        return Ok(vec![path]);
+    }
+    let err = |e: &dyn std::fmt::Display| Error::Load(format!("{LOCAL_MODEL}: {INDEX_FILE}: {e}"));
+    let index_path = repo.get(INDEX_FILE).map_err(|e| err(&e))?;
+    let index: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(index_path).map_err(|e| err(&e))?)
+            .map_err(|e| err(&e))?;
+    let mut shards: Vec<String> = index["weight_map"]
+        .as_object()
+        .ok_or_else(|| err(&"no `weight_map` object"))?
+        .values()
+        .filter_map(|file| file.as_str().map(str::to_owned))
+        .collect();
+    shards.sort_unstable();
+    shards.dedup();
+    shards
+        .iter()
+        .map(|file| {
+            repo.get(file)
+                .map_err(|e| Error::Load(format!("{LOCAL_MODEL}: {file}: {e}")))
         })
+        .collect()
 }
 
 impl Embed for LocalQwen {
@@ -114,20 +195,25 @@ mod tests {
         a.iter().zip(b).map(|(x, y)| x * y).sum()
     }
 
-    /// Downloads about 4 GB on first run and needs about 10 GB of RAM.
+    /// Downloads about 4 GB on first run and needs about 10 GB of RAM. The cache is
+    /// `SAPPHIRE_EMBED_TEST_CACHE`, else `<crate>/.fastembed_cache` (gitignored).
     #[test]
     #[ignore]
     fn real_model_embeds_japanese_sensibly() {
         let settings = EmbeddingSettings {
             enabled: true,
             provider: crate::Provider::Local,
-            model: crate::settings::LOCAL_MODEL.into(),
+            model: LOCAL_MODEL.into(),
             dimension: 1024,
             max_tokens: 1024,
             endpoint: None,
             api_key_env: None,
+            cache_dir: None,
         };
-        let mut model = LocalQwen::load(&settings).unwrap();
+        let cache = std::env::var("SAPPHIRE_EMBED_TEST_CACHE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| Path::new(env!("CARGO_MANIFEST_DIR")).join(".fastembed_cache"));
+        let mut model = LocalQwen::load(&settings, &cache).unwrap();
         let texts: Vec<String> = ["今日は雨が降っている", "雨の日です", "請求書の支払い期限"]
             .iter()
             .map(|s| s.to_string())

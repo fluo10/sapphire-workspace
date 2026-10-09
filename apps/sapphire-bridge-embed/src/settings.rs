@@ -9,14 +9,19 @@
 //! # openai only:
 //! endpoint    = "https://api.openai.com"
 //! api_key_env = "OPENAI_API_KEY"
+//! # local only, optional: overrides the cache directory the bridge passes in
+//! cache_dir   = "D:/models"
 //! ```
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::{Error, Result};
 
 /// The local model: the only one supported for now.
 pub const LOCAL_MODEL: &str = "Qwen/Qwen3-VL-Embedding-2B";
+
+/// Upper bound on `max_tokens` (local).
+pub const MAX_TOKENS: usize = 8192;
 
 /// Which provider computes the vectors.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -49,6 +54,12 @@ pub struct EmbeddingSettings {
     /// Environment variable holding the API key (openai only; default `OPENAI_API_KEY`).
     #[serde(default)]
     pub api_key_env: Option<String>,
+    /// Where the local model's files are cached (hf-hub layout). Optional: when set it
+    /// overrides the directory the bridge passes to [`EmbedService::from_settings`].
+    ///
+    /// [`EmbedService::from_settings`]: crate::EmbedService::from_settings
+    #[serde(default)]
+    pub cache_dir: Option<PathBuf>,
 }
 
 fn default_provider() -> Provider {
@@ -97,8 +108,11 @@ impl EmbeddingSettings {
                     self.dimension
                 ));
             }
-            if self.max_tokens == 0 {
-                return Err("`max_tokens` must be at least 1".into());
+            if !(1..=MAX_TOKENS).contains(&self.max_tokens) {
+                return Err(format!(
+                    "`max_tokens` = {} is out of range (1..={MAX_TOKENS})",
+                    self.max_tokens
+                ));
             }
             if self.model != LOCAL_MODEL {
                 return Err(format!(
@@ -144,6 +158,7 @@ mod tests {
                 max_tokens: 1024,
                 endpoint: None,
                 api_key_env: None,
+                cache_dir: None,
             }
         );
     }
@@ -154,6 +169,28 @@ mod tests {
         let err = EmbeddingSettings::load(&write(&dir, "enabled = true\ndimension = 4096\n"))
             .unwrap_err();
         assert!(matches!(err, Error::Settings(_)), "{err}");
+    }
+
+    #[test]
+    fn max_tokens_over_8192_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = EmbeddingSettings::load(&write(&dir, "enabled = true\nmax_tokens = 8193\n"))
+            .unwrap_err();
+        assert!(matches!(err, Error::Settings(_)), "{err}");
+        let ok = EmbeddingSettings::load(&write(&dir, "enabled = true\nmax_tokens = 8192\n"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(ok.max_tokens, 8192);
+    }
+
+    #[test]
+    fn cache_dir_is_optional_and_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let got =
+            EmbeddingSettings::load(&write(&dir, "enabled = true\ncache_dir = \"D:/models\"\n"))
+                .unwrap()
+                .unwrap();
+        assert_eq!(got.cache_dir, Some(PathBuf::from("D:/models")));
     }
 
     #[test]

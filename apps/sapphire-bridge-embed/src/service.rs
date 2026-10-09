@@ -1,6 +1,7 @@
 //! One worker thread owns the model: load on demand, unload when idle.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -51,13 +52,19 @@ pub struct EmbedService {
 
 impl EmbedService {
     /// The service for `s`, or `None` when embedding is disabled.
-    pub fn from_settings(s: &EmbeddingSettings) -> Option<EmbedService> {
+    ///
+    /// `cache_dir` is where the local model's files are cached (hf-hub layout); the
+    /// settings' own `cache_dir`, when set, overrides it. The REST provider ignores it.
+    pub fn from_settings(s: &EmbeddingSettings, cache_dir: PathBuf) -> Option<EmbedService> {
         if !s.enabled {
             return None;
         }
         let settings = s.clone();
         let (template_version, loader): (u32, Loader) = match s.provider {
-            Provider::Local => (TEMPLATE_VERSION, local_loader(settings)),
+            Provider::Local => {
+                let cache_dir = s.cache_dir.clone().unwrap_or(cache_dir);
+                (TEMPLATE_VERSION, local_loader(settings, cache_dir))
+            }
             Provider::Openai => (
                 0,
                 Box::new(move || Ok(Box::new(RestEmbedder::new(&settings)) as Box<dyn Embed>)),
@@ -105,6 +112,8 @@ impl EmbedService {
     }
 
     /// Embed `texts`, in batches of [`BATCH`] inside the worker. Loads the model if needed.
+    ///
+    /// A caller that drops this future does not cancel its job: the worker still runs it.
     pub async fn embed(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>> {
         let (reply, rx) = tokio::sync::oneshot::channel();
         self.tx.send((texts, reply)).map_err(|_| Error::Stopped)?;
@@ -113,12 +122,14 @@ impl EmbedService {
 }
 
 #[cfg(feature = "local")]
-fn local_loader(settings: EmbeddingSettings) -> Loader {
-    Box::new(move || Ok(Box::new(crate::local::LocalQwen::load(&settings)?) as Box<dyn Embed>))
+fn local_loader(settings: EmbeddingSettings, cache_dir: PathBuf) -> Loader {
+    Box::new(move || {
+        Ok(Box::new(crate::local::LocalQwen::load(&settings, &cache_dir)?) as Box<dyn Embed>)
+    })
 }
 
 #[cfg(not(feature = "local"))]
-fn local_loader(_settings: EmbeddingSettings) -> Loader {
+fn local_loader(_settings: EmbeddingSettings, _cache_dir: PathBuf) -> Loader {
     Box::new(|| {
         Err(Error::Load(
             "this bridge was built without the `local` embedding feature".into(),
@@ -238,15 +249,24 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::AtomicUsize;
 
-    /// Returns `[len(text)]` per text and records every call's texts.
+    /// Returns `[len(text)]` per text and records every call's texts. Panics on `"boom"`.
+    /// Sets `dropped` when dropped.
     struct FakeEmbed {
         calls: Arc<Mutex<Vec<Vec<String>>>>,
+        dropped: Arc<AtomicBool>,
     }
 
     impl Embed for FakeEmbed {
         fn embed(&mut self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            assert!(!texts.iter().any(|t| t == "boom"), "boom");
             self.calls.lock().unwrap().push(texts.to_vec());
             Ok(texts.iter().map(|t| vec![t.len() as f32]).collect())
+        }
+    }
+
+    impl Drop for FakeEmbed {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::SeqCst);
         }
     }
 
@@ -254,6 +274,7 @@ mod tests {
         service: EmbedService,
         loads: Arc<AtomicUsize>,
         calls: Arc<Mutex<Vec<Vec<String>>>>,
+        dropped: Arc<AtomicBool>,
     }
 
     fn info() -> ModelInfo {
@@ -267,16 +288,53 @@ mod tests {
     fn harness(idle: Duration) -> Harness {
         let loads = Arc::new(AtomicUsize::new(0));
         let calls = Arc::new(Mutex::new(Vec::new()));
-        let (l, c) = (loads.clone(), calls.clone());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let (l, c, d) = (loads.clone(), calls.clone(), dropped.clone());
         let loader: Loader = Box::new(move || {
             l.fetch_add(1, Ordering::SeqCst);
-            Ok(Box::new(FakeEmbed { calls: c.clone() }) as Box<dyn Embed>)
+            d.store(false, Ordering::SeqCst);
+            Ok(Box::new(FakeEmbed {
+                calls: c.clone(),
+                dropped: d.clone(),
+            }) as Box<dyn Embed>)
         });
         let service = EmbedService::with_loader(info(), loader, idle, Duration::from_secs(60));
         Harness {
             service,
             loads,
             calls,
+            dropped,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_panic_in_embed_fails_the_request_and_reloads_next_time() {
+        let h = harness(Duration::from_secs(60));
+        h.service.embed(texts(&["a"])).await.unwrap();
+        let err = h.service.embed(texts(&["boom"])).await.unwrap_err();
+        assert!(matches!(err, Error::Embed(_)), "{err}");
+        assert!(err.to_string().contains("panicked"), "{err}");
+        assert!(!h.service.loaded());
+        assert!(h.dropped.load(Ordering::SeqCst));
+        assert_eq!(
+            h.service.embed(texts(&["ok"])).await.unwrap(),
+            vec![vec![2.0]]
+        );
+        assert_eq!(h.loads.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn dropping_the_service_ends_the_worker() {
+        let h = harness(Duration::from_secs(60));
+        h.service.embed(texts(&["a"])).await.unwrap();
+        assert!(!h.dropped.load(Ordering::SeqCst));
+        let dropped = h.dropped.clone();
+        drop(h.service);
+        // The worker exits on disconnect and drops its model with it.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !dropped.load(Ordering::SeqCst) {
+            assert!(Instant::now() < deadline, "the worker did not exit");
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
 
@@ -396,10 +454,11 @@ mod tests {
             max_tokens: 1024,
             endpoint: None,
             api_key_env: None,
+            cache_dir: None,
         };
-        assert!(EmbedService::from_settings(&s).is_none());
+        assert!(EmbedService::from_settings(&s, PathBuf::from("unused")).is_none());
         let on = EmbeddingSettings { enabled: true, ..s };
-        let svc = EmbedService::from_settings(&on).unwrap();
+        let svc = EmbedService::from_settings(&on, PathBuf::from("unused")).unwrap();
         assert_eq!(
             svc.info(),
             ModelInfo {

@@ -5511,6 +5511,7 @@ name = "sapphire-bridge-embed"
 version = "0.14.0"
 dependencies = [
  "candle-core",
+ "candle-nn",
  "fastembed 7.1.1",
  "hf-hub",
  "serde",
