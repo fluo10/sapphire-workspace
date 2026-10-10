@@ -27,8 +27,9 @@
   framework 組込みの git 自動同期（`SyncBackend`/`ChangeSource` 抽象）の撤去自体はそのまま維持。
   git は**ユーザーが手動**で併用する。GUI 統合 git は将来ゼロベースで再構築（#91）。
 - 同期は **iroh（QUIC）の上で 2 台の app server が直接セッションを張る p2p**（下の「ワークスペース
-  同期」節）。sync 用の HTTP JSON-RPC と API キーは廃止した。API キー（`-keys`）が残るのは
-  **非同期 HTTP エンドポイント**（agent の `/mcp` `/acp` `/a2a`）だけ。
+  同期」節）。sync 用の HTTP JSON-RPC と API キーは廃止した。キーで入るのは、同期に参加しない
+  **external device**（下の節）が HTTP エンドポイント（agent の `/acp` や `/audio/ingest` など）に
+  来るときだけ。
 - サーバも「ファイル原本＋DBキャッシュ」で対称（**Model B**）という対称性は p2p 設計の出発点として
   残る。全デバイスが同一構造を持ち、「常時稼働のピア」がサーバ役を担う（sync 仕様 §1）。
 - **ベクター索引（redb）は同期対象外だが、ベクター自体はファイルとして同期する**（#187）。
@@ -120,7 +121,7 @@ Cargo workspace（モノレポ）。削除済みの crate も削除線で残す 
 | `sapphire-framework-bridge-embed` | bridge の埋め込みコンポーネント（ローカル Qwen3-VL-Embedding-2B を candle で、または OpenAI 互換 REST）。ファサード feature は `bridge-embed`（既定ではなく `native` にも入らない — fastembed / candle が重いため）。**bridge をプロセス内に持つモバイルアプリがあるため framework crate に残す** |
 | `apps/sapphire-bridge` | 上記のバイナリと CLI（`serve` / `status` / `log` / `service` / `workspace` / `workgroup` / `device`） |
 | `sapphire-framework-registry` | デバイス台帳（`<dir>/<grain-id>.toml` を 1 デバイス 1 ファイル。`node_id` を保持。users は撤去） |
-| `sapphire-framework-keys` | `KeyStore` / `AuthConfig` / `protect`。**非同期 HTTP エンドポイント**の認証用 |
+| `sapphire-framework-keys` | `protect` / `AuthConfig` / `BridgeVerifier`。HTTP エンドポイントで external device の Bearer トークンを bridge に確かめる（#199） |
 | `sapphire-framework-service` | OS のサービスマネージャへの登録（`ServiceSpec`・systemd user unit・LaunchAgent・タスクスケジューラ） |
 | `sapphire-framework-backend` | GUI 向け**非同期** `WorkspaceBackend` + `IpcBackend` / `LocalBackend`、`BackendEvent` |
 | `sapphire-framework-gui` | app 非依存の egui `WorkspaceManager` / `WorkspaceRegistry` と同期 GUI 部品（下記「GUI 部品」） |
@@ -264,6 +265,21 @@ CLI は `sapphire-bridge`（`serve` / `status` / `service` / `workspace` / `work
 `workspace` は読み取り専用の `list` のみ — ワークスペースを workgroup に置くのは
 それを所有するアプリの仕事だからである（仕様 §1）。
 詳細はプロセス構成仕様 §5。
+
+### external device（#199）
+
+同期に参加しない（できない）クライアント — 録音ペンダント、同期していないマシンからの ACP
+クライアント、Webhook など — は **external device** として workgroup の台帳
+`<workgroup root>/external_devices/<grain-id>.toml` に 1 件 1 ファイルで載る。台帳は同期されるので、
+どのホストのアプリサーバーでも同じキーが通る。レコードは使えるアプリの一覧（`apps`）を持ち、
+1 つの external device が複数のアプリを使える（空ならどれも使えない）。トークン
+（`sapphire-ed-…`）は `add` と `rotate` で一度だけ表示し、台帳には SHA-256 だけを置く。retire
+（行は残す）・restore・rotate（id は維持）がある。アプリの HTTP 層は `protect` で Bearer
+トークンを受け、bridge の `external_device.authenticate` に自分のアプリ名と一緒に確かめる（成功は
+30 秒キャッシュ。bridge に聞けなければ 503）。管理は `sapphire-bridge external-device …`、各アプリの
+`external-device …`（`add` は既定でそのアプリ）、SyncPanel の External devices 画面。サーバーごとの
+`KeyStore`（生トークンの `keys.toml`）は廃止した。設計は
+`superpowers/specs/2026-10-11-external-devices-design.md`。
 
 ### 代表デバイスとスター型同期（#182）
 

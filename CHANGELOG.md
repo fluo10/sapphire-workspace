@@ -10,6 +10,8 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
+- External devices (#199): clients that reach the workgroup's applications with a key instead of syncing — a recording pendant, a remote ACP client, a webhook. They live in a synced ledger beside the devices, `<workgroup root>/external_devices/<grain-id>.toml`, each listing the applications it may use (one external device may use several; none by default). The token (`sapphire-ed-…`) is shown once by `add` and `rotate`; the ledger keeps only its SHA-256. `retire` keeps the record, `restore` brings it back, `rotate` keeps the id. Managed with `sapphire-bridge external-device …`, every app's `external-device …` (whose `add` allows that app), and the sync panel's External devices screen. `sapphire-framework-bridge-api` 2.3.0 adds the `external_device.*` methods; `sapphire-framework-registry` adds `ExternalDevices`.
+
 - Primary and secondary devices, elected per workspace from bridge `Hello` messages (`sapphire/hello/1`), with a manual priority: `sapphire-bridge device priority`. `sapphire-framework-bridge-api` 2.1.0 adds `bridge.device_priority_set`, `PeersResult.roles` and `PeerInfo.priority`.
 - `sapphire-framework-workspace`: a shared `logging` module — the app log, lifted from the bridge's own `logging` onto the foundation every app server builds on. `AppContext::init` now installs the process's `tracing` subscriber (console on stdout, so journald keeps seeing a service-managed server's output), and `AppServer::run` routes the file layer at `<data dir>/logs/app.log`: the framework's and the app's own targets at info, appending across restarts, rotating at 10 MiB with three rotated files kept. An app server that logged nothing before — no subscriber, so `tracing` silently dropped every event — now logs by building its context, with no wiring of its own. `tail`/`follow` read the file back in the manner of `tail -f`.
 - `bridge.workgroup_create` and `bridge.device_retire` on the bridge control plane; the framework and bridge CLIs use them when the bridge runs.
@@ -23,6 +25,8 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - `sapphire-framework-bridge-api` 2.3.0: `embed.settings`, `embed.model_set`, `embed.device_set`, `embed.key_set` and `embed.key_clear` with their client calls and types; `EmbedInfoResult.note` says why embedding is off; feature `cli` holds the shared `embedding` subcommands.
 
 ### Changed
+
+- `sapphire-framework-keys` authenticates against the workgroup's external devices: `protect(AuthConfig, router)` with a `Verifier`, normally `BridgeVerifier::new(app, version)`, which asks the bridge (`external_device.authenticate`) and caches a success for 30 seconds; a refused token is 401, a bridge that cannot be asked is 503. `Authenticated` now carries the external device's `id` and `name`. `KeyStore`, `KeyEntry` and the per-server `keys.toml` of raw tokens are removed: re-create existing keys as external devices.
 
 - A workspace syncs as a star as soon as a primary device is elected, around its primary and secondary devices. One candidate (a device at priority >= 1, the default) is enough: the devices at priority 0 then sync only through it. Set every device's priority to 0 to keep the full mesh.
 - Until availability (#190) exists, ties between equal priorities fall to the device id, which is arbitrary. Raise the priority of your always-on machine so that it is the one elected.

@@ -108,15 +108,15 @@ pub mod prelude {
     #[cfg(feature = "backend")]
     pub use crate::backend::{IpcBackend, protocol};
 
-    // `KeyStore` and friends live in the `keys` crate (#103); the `keys`
-    // feature chains the crate's `axum` feature in, so an application hosting
-    // its own authenticated routes gets `protect`/`Authenticated` from here.
+    // Bearer-token authentication against the workgroup's external devices (#199); the
+    // `keys` feature chains the crate's `axum` feature in, so an application hosting its own
+    // authenticated routes gets `protect` and `BridgeVerifier` from here.
     #[cfg(feature = "keys")]
-    pub use crate::keys::{AuthConfig, Authenticated, KeyEntry, KeyStore, protect};
+    pub use crate::keys::{AuthConfig, Authenticated, BridgeVerifier, Verdict, Verifier, protect};
 
-    // `registry` and `keys` both expose the same `GrainId` (`KeyEntry::device_id`
-    // lives in the key file). Re-exporting both would collide, so take it from
-    // `registry` when that feature is on, and from `keys` only when it is not.
+    // `registry` and `keys` both expose the same `GrainId` (`Authenticated::id`). Re-exporting
+    // both would collide, so take it from `registry` when that feature is on, and from `keys`
+    // only when it is not.
     #[cfg(all(feature = "keys", not(feature = "registry")))]
     pub use crate::keys::GrainId;
 

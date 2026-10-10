@@ -25,15 +25,15 @@ to one another as a single client device, so there is nothing to align.
 
 `device.id` is **persisted into content** (a journal entry's `updated_by`,
 say). So removal is a tombstone (`retired_at`) by default, and a record is
-deleted physically only by an explicit `purge`. Revoking access is not the
-ledger's job — that is the server's key file (`KeyStore::revoke`).
+deleted physically only by an explicit `purge`.
 
-## Relation to keys
+## External devices
 
-`KeyEntry.device_id` points at a ledger entry, not the other way round,
-because the key file exists per host while the ledger exists per workspace —
-if one physical device talks to two servers, it has two keys in two separate
-files.
+`ExternalDevices` is the ledger of clients that reach a workgroup's applications with a
+key instead of syncing (#199): one record per file in `external_devices/`, beside
+`devices/`, listing the applications each may use. A record stores the SHA-256 of its
+token, never the token, which is shown once by `add` and `rotate`. `retire` stops the
+token working and keeps the record; `restore` brings it back.
 
 ## Migration
 

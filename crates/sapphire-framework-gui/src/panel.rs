@@ -5,7 +5,8 @@ use std::collections::HashMap;
 
 use crate::client::{CommandId, FrameworkClient};
 use crate::views::{
-    DeviceList, EmbeddingView, ServiceStatusBanner, ViewCtx, WorkgroupView, WorkspaceList,
+    DeviceList, EmbeddingView, ExternalDeviceList, ServiceStatusBanner, ViewCtx, WorkgroupView,
+    WorkspaceList,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -13,6 +14,7 @@ enum Screen {
     Workspaces,
     Devices,
     Workgroup,
+    ExternalDevices,
     Embedding,
 }
 
@@ -32,6 +34,7 @@ pub struct SyncPanel {
     devices: DeviceList,
     workgroup: WorkgroupView,
     embedding: EmbeddingView,
+    external: ExternalDeviceList,
     pending: HashMap<CommandId, Origin>,
 }
 
@@ -46,6 +49,7 @@ impl SyncPanel {
             devices: DeviceList::default(),
             workgroup: WorkgroupView::default(),
             embedding: EmbeddingView::default(),
+            external: ExternalDeviceList::default(),
             pending: HashMap::new(),
         }
     }
@@ -61,6 +65,9 @@ impl SyncPanel {
                 Some(Origin::Screen(Screen::Devices)) => self.devices.on_outcome(&outcome.result),
                 Some(Origin::Screen(Screen::Workgroup)) => {
                     self.workgroup.on_outcome(&outcome.result)
+                }
+                Some(Origin::Screen(Screen::ExternalDevices)) => {
+                    self.external.on_outcome(&outcome.result)
                 }
                 Some(Origin::Screen(Screen::Embedding)) => {
                     self.embedding.on_outcome(&outcome.result)
@@ -93,6 +100,7 @@ impl SyncPanel {
                     (Screen::Workspaces, "Workspaces"),
                     (Screen::Devices, "Devices"),
                     (Screen::Workgroup, "Workgroup"),
+                    (Screen::ExternalDevices, "External devices"),
                     (Screen::Embedding, "Embedding"),
                 ] {
                     ui.selectable_value(&mut self.screen, screen, label);
@@ -109,6 +117,7 @@ impl SyncPanel {
                 Screen::Workspaces => self.workspaces.ui(ui, &cx),
                 Screen::Devices => self.devices.ui(ui, &cx),
                 Screen::Workgroup => self.workgroup.ui(ui, &cx),
+                Screen::ExternalDevices => self.external.ui(ui, &cx),
                 Screen::Embedding => self.embedding.ui(ui, &cx),
             };
             if let Some(c) = c {
@@ -129,8 +138,8 @@ mod tests {
     use crate::client::{BridgeState, Conn, ServerState, Snapshot};
     use sapphire_backend::protocol::{StatusReport, SyncStatusResult, WorkspaceListEntry};
     use sapphire_bridge_api::{
-        EmbedInfoResult, EmbedNote, EmbedSettingsResult, GrainId, LocalModel, ModelSettings,
-        ModelSource, PeerInfo, RemoteModel, Slot, StatusResult, WorkgroupStatus,
+        EmbedInfoResult, EmbedNote, EmbedSettingsResult, ExternalDeviceInfo, GrainId, LocalModel,
+        ModelSettings, ModelSource, PeerInfo, RemoteModel, Slot, StatusResult, WorkgroupStatus,
         WorkgroupWorkspaceInfo,
     };
 
@@ -174,6 +183,15 @@ mod tests {
                     app_name: "app".into(),
                     name: "remote".into(),
                 }],
+                external_devices: Some(vec![ExternalDeviceInfo {
+                    id: GrainId::random(),
+                    name: "pendant".into(),
+                    description: None,
+                    apps: vec!["app".into()],
+                    created_at: "2026-10-11T00:00:00Z".into(),
+                    rotated_at: None,
+                    retired_at: None,
+                }]),
                 embedding: Some(EmbedSettingsResult {
                     models: ModelSettings {
                         local: Some(LocalModel::default()),
@@ -221,6 +239,7 @@ mod tests {
         let mut devices = DeviceList::default();
         let mut workspaces = WorkspaceList::default();
         let mut embedding = EmbeddingView::default();
+        let mut external = ExternalDeviceList::default();
         for _ in 0..2 {
             let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
                 let cx = ViewCtx {
@@ -233,6 +252,7 @@ mod tests {
                 assert!(devices.ui(ui, &cx).is_none());
                 assert!(workspaces.ui(ui, &cx).is_none());
                 assert!(embedding.ui(ui, &cx).is_none());
+                assert!(external.ui(ui, &cx).is_none());
             });
             // Unapplied texture deltas panic on drop; there is no renderer here.
             output.textures_delta.clear();

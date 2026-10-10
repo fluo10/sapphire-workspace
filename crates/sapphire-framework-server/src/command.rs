@@ -44,6 +44,11 @@ pub enum FrameworkCommand {
     /// device's switches, and its API key. Needs the running bridge.
     #[command(subcommand)]
     Embedding(sapphire_bridge_api::EmbeddingCommand),
+    /// Add, list, retire, restore and rotate the workgroup's external devices — clients
+    /// that reach this application with a key. `add` allows this application unless told
+    /// otherwise. Needs the running bridge.
+    #[command(subcommand)]
+    ExternalDevice(sapphire_bridge_api::ExternalDeviceCommand),
 }
 
 impl FrameworkCommand {
@@ -70,6 +75,9 @@ impl FrameworkCommand {
             FrameworkCommand::Workgroup(command) => command.dispatch(version).await,
             FrameworkCommand::Device(command) => command.dispatch(version).await,
             FrameworkCommand::Embedding(command) => embedding(command, version).await,
+            FrameworkCommand::ExternalDevice(command) => {
+                external_device(command, server.app_name(), version).await
+            }
         }
     }
 }
@@ -325,6 +333,22 @@ async fn embedding(command: sapphire_bridge_api::EmbeddingCommand, version: &str
     let request = command.request()?;
     let report = client.embed_request(request).await?;
     for line in sapphire_bridge_api::describe(&report) {
+        println!("{line}");
+    }
+    Ok(0)
+}
+
+/// `external-device …`: always through the running bridge, which owns the ledger.
+async fn external_device(
+    command: sapphire_bridge_api::ExternalDeviceCommand,
+    app: &str,
+    version: &str,
+) -> Result<i32> {
+    let client = connect_running(version).await?;
+    let outcome = client
+        .external_device_request(command.request(Some(app)))
+        .await?;
+    for line in sapphire_bridge_api::describe_external_outcome(&outcome) {
         println!("{line}");
     }
     Ok(0)

@@ -26,10 +26,21 @@ pub use embed::{
     describe,
 };
 
+mod external;
+pub use external::{
+    ExternalDeviceAddParams, ExternalDeviceAuthenticateParams, ExternalDeviceAuthenticateResult,
+    ExternalDeviceInfo, ExternalDeviceListResult, ExternalDeviceOutcome, ExternalDeviceRequest,
+    ExternalDeviceSelectParams, ExternalDeviceSetAppsParams, ExternalDeviceTokenResult,
+    describe_external_device, describe_external_outcome,
+};
+
 #[cfg(feature = "cli")]
 mod cli;
 #[cfg(feature = "cli")]
-pub use cli::{EmbeddingCommand, KeyCommand, LocalCommand, RemoteCommand, Switch, read_key};
+pub use cli::{
+    EmbeddingCommand, ExternalDeviceCommand, KeyCommand, LocalCommand, RemoteCommand, Switch,
+    read_key,
+};
 
 /// The version of the bridge's control-plane API: the methods below and their types.
 ///
@@ -81,6 +92,20 @@ pub const DEVICE_RETIRE: &str = "bridge.device_retire";
 pub const EMBED_INFO: &str = "embed.info";
 /// Embed texts with the bridge's embedding model.
 pub const EMBED: &str = "embed.embed";
+/// List the workgroup's external devices.
+pub const EXTERNAL_DEVICE_LIST: &str = "external_device.list";
+/// Add an external device; the answer carries its token, once.
+pub const EXTERNAL_DEVICE_ADD: &str = "external_device.add";
+/// Retire an external device: its token stops working, the record stays.
+pub const EXTERNAL_DEVICE_RETIRE: &str = "external_device.retire";
+/// Bring a retired external device back, with its token.
+pub const EXTERNAL_DEVICE_RESTORE: &str = "external_device.restore";
+/// Replace an external device's token, keeping its id.
+pub const EXTERNAL_DEVICE_ROTATE: &str = "external_device.rotate";
+/// Set the applications an external device may use.
+pub const EXTERNAL_DEVICE_SET_APPS: &str = "external_device.set_apps";
+/// Check a presented token for an application: who it is, or an error.
+pub const EXTERNAL_DEVICE_AUTHENTICATE: &str = "external_device.authenticate";
 /// Read the embedding settings and what they resolve to.
 pub const EMBED_SETTINGS: &str = "embed.settings";
 /// Set or clear one model slot.

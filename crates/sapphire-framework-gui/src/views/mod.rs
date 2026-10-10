@@ -6,12 +6,14 @@ pub mod model;
 mod banner;
 mod devices;
 mod embedding;
+mod external;
 mod workgroup;
 mod workspaces;
 
 pub use banner::ServiceStatusBanner;
 pub use devices::{DeviceList, InviteDialog};
 pub use embedding::EmbeddingView;
+pub use external::ExternalDeviceList;
 pub use workgroup::{JoinDialog, WorkgroupView};
 pub use workspaces::WorkspaceList;
 

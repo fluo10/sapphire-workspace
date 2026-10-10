@@ -12,11 +12,11 @@ use crate::error::{Error, Result};
 ///
 /// Truncating in place would destroy the ledger if we crashed mid-write. A
 /// device id is baked into journal frontmatter, so losing the ledger leaves past
-/// references unresolvable — hence the same trick `KeyStore::save_entries` uses.
+/// references unresolvable.
 ///
-/// Unlike `keys.rs`, the file is not created 0600: this ledger holds no secrets
-/// (tokens live in the key file) and the whole workspace is meant to sync, so
-/// an owner-only permission would be pointless.
+/// The file is not created 0600: no ledger holds a secret (an external device's record
+/// keeps only its token's hash) and the ledgers are meant to sync, so an owner-only
+/// permission would be pointless.
 ///
 /// The temp file name carries the process id and a per-process counter. Two
 /// processes writing the same ledger at once (or two threads in one process)

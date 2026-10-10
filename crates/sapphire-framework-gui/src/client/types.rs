@@ -6,8 +6,8 @@ use std::time::Duration;
 use grain_id::GrainId;
 use sapphire_backend::protocol::{StatusReport, WorkspaceListEntry};
 use sapphire_bridge_api::{
-    BRIDGE_NAME, EmbedRequest, EmbedSettingsResult, PeerInfo, StatusResult, WorkgroupWorkspaceInfo,
-    WorkspaceRoles,
+    BRIDGE_NAME, EmbedRequest, EmbedSettingsResult, ExternalDeviceInfo, ExternalDeviceRequest,
+    PeerInfo, StatusResult, WorkgroupWorkspaceInfo, WorkspaceRoles,
 };
 use sapphire_ipc::Endpoint;
 
@@ -136,6 +136,8 @@ pub struct BridgeState {
     pub ledger: Vec<WorkgroupWorkspaceInfo>,
     /// `embed.settings`; `None` from a bridge older than 2.3.
     pub embedding: Option<EmbedSettingsResult>,
+    /// `external_device.list` (empty without a workgroup); `None` from an older bridge.
+    pub external_devices: Option<Vec<ExternalDeviceInfo>>,
 }
 
 /// What the app server said.
@@ -208,6 +210,8 @@ pub enum Command {
     },
     /// Change the embedding settings, or store or clear this device's API key.
     Embedding(EmbedRequest),
+    /// Manage the workgroup's external devices.
+    ExternalDevice(ExternalDeviceRequest),
     /// Set a device's election priority.
     DevicePrioritySet {
         /// The device's name or id.
@@ -256,6 +260,8 @@ pub enum CommandOutput {
     Done,
     /// An invite ticket, to show once.
     Ticket(String),
+    /// An external device's token, to show once.
+    Token(String),
 }
 
 /// Names one sent command.

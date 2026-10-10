@@ -108,7 +108,7 @@ impl InviteDialog {
                 self.ticket = Some(t.clone());
                 self.open = true;
             }
-            Ok(CommandOutput::Done) => {}
+            Ok(CommandOutput::Done | CommandOutput::Token(_)) => {}
             Err(e) => self.error = Some(e.clone()),
         }
     }
