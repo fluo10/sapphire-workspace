@@ -100,6 +100,8 @@ pub struct Host {
     /// tasks it spawned. So the bridge gets a runtime of its own, and stopping it means
     /// dropping that runtime (see [`tear_down`]).
     bridge: Option<tokio::runtime::Runtime>,
+    /// The embedding provider its bridge serves, kept so a restart serves it again.
+    embed: Option<Arc<dyn sapphire_framework_bridge::EmbedProvider>>,
 }
 
 /// A fresh host, with a bridge and an app server of its own and sync wired but not enabled.
@@ -126,6 +128,26 @@ pub async fn start_host_with_priority(
         node_id,
         device_name,
         priority,
+        None,
+        tempfile::tempdir().expect("a host tree"),
+    )
+    .await
+}
+
+/// A fresh host whose bridge embeds with `provider`, at `priority`.
+pub async fn start_host_embedding(
+    net: &LoopbackNetwork,
+    node_id: &str,
+    device_name: &str,
+    priority: u8,
+    provider: Arc<dyn sapphire_framework_bridge::EmbedProvider>,
+) -> Host {
+    build(
+        net,
+        node_id,
+        device_name,
+        priority,
+        Some(provider),
         tempfile::tempdir().expect("a host tree"),
     )
     .await
@@ -155,6 +177,7 @@ async fn build(
     node_id: &str,
     device_name: &str,
     priority: u8,
+    embed: Option<Arc<dyn sapphire_framework_bridge::EmbedProvider>>,
     tmp: tempfile::TempDir,
 ) -> Host {
     let ctx = ctx();
@@ -202,6 +225,10 @@ async fn build(
         interval: Duration::from_millis(100),
         dead: Duration::from_millis(600),
     });
+    let bridge = match &embed {
+        Some(provider) => bridge.embed_provider(Arc::clone(provider)),
+        None => bridge,
+    };
     let bridge_runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -232,12 +259,21 @@ async fn build(
 
     // The app server, with sync wired the way an application wires it.
     let endpoint = Endpoint::in_dir(ctx.app_name, runtime_dir.clone());
-    let runtime = Arc::new(SyncRuntime::new(
-        ctx,
-        Arc::clone(&bridge_client),
-        std::env::current_exe().unwrap_or_else(|_| PathBuf::from("sapphire")),
-        ManagedBy::Service,
-    ));
+    let runtime = Arc::new(
+        SyncRuntime::new(
+            ctx,
+            Arc::clone(&bridge_client),
+            std::env::current_exe().unwrap_or_else(|_| PathBuf::from("sapphire")),
+            ManagedBy::Service,
+        )
+        // Embedding asks this host's own bridge, not the process environment's.
+        .with_bridge_endpoint(control.clone()),
+    );
+    // A test cannot wait ten minutes: the primary fills in at once, and looks every second.
+    runtime.set_backfill_timing(sapphire_framework_server::BackfillTiming {
+        grace: Duration::ZERO,
+        interval: Duration::from_secs(1),
+    });
     let server = AppServer::new(ctx, VERSION)
         .endpoint(endpoint.clone())
         .sync(Arc::clone(&runtime));
@@ -263,6 +299,7 @@ async fn build(
         runtime: Some(runtime),
         server: Some(server_task),
         bridge: Some(bridge_runtime),
+        embed,
     }
 }
 
@@ -341,7 +378,8 @@ impl Host {
             .this_device(&self.node_id)
             .unwrap()
             .priority;
-        build(net, &self.node_id, &self.device_name, priority, tmp).await
+        let embed = self.embed.take();
+        build(net, &self.node_id, &self.device_name, priority, embed, tmp).await
     }
 
     /// Stop this host's bridge, as if the daemon had died, and leave the app server running.

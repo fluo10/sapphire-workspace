@@ -83,6 +83,13 @@ impl TrackStore for RedbTrackStore {
         Ok(table.len()?)
     }
 
+    fn clear(&self) -> Result<()> {
+        let wtx = self.db.begin_write()?;
+        wtx.open_table(TABLE)?.retain(|_, _| false)?;
+        wtx.commit()?;
+        Ok(())
+    }
+
     fn upsert_many(&self, entries: &[(String, FileStamp)]) -> Result<()> {
         let wtx = self.db.begin_write()?;
         {
@@ -148,6 +155,34 @@ fn is_schema_mismatch(err: &Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn stamp(n: i64) -> FileStamp {
+        FileStamp {
+            mtime_ns: n,
+            len: n as u64,
+        }
+    }
+
+    /// Both stores forget everything on `clear`, and keep working after it (#195).
+    #[test]
+    fn clear_forgets_every_path_in_place() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("track_v2.redb");
+        let redb = RedbTrackStore::open(&path).unwrap();
+        let memory = crate::open_in_memory();
+        for store in [&redb as &dyn TrackStore, &memory] {
+            store
+                .upsert_many(&[("a".into(), stamp(1)), ("b".into(), stamp(2))])
+                .unwrap();
+            store.clear().unwrap();
+            assert_eq!(store.count().unwrap(), 0);
+            store.upsert("c", stamp(3)).unwrap();
+            assert_eq!(store.count().unwrap(), 1);
+        }
+        drop(redb);
+        // Cleared on disk, not only in memory.
+        assert_eq!(RedbTrackStore::open(&path).unwrap().count().unwrap(), 1);
+    }
 
     #[test]
     fn redb_round_trips_and_persists() {

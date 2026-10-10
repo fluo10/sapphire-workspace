@@ -5698,6 +5698,7 @@ dependencies = [
 name = "sapphire-framework-server"
 version = "0.14.0"
 dependencies = [
+ "async-trait",
  "clap",
  "grain-id",
  "indexmap",
@@ -5785,6 +5786,7 @@ dependencies = [
  "chrono",
  "clap",
  "dirs",
+ "half",
  "indexmap",
  "md-5",
  "sapphire-framework-bridge-api",
@@ -5793,6 +5795,7 @@ dependencies = [
  "sapphire-framework-track",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",

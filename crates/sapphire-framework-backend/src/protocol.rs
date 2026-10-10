@@ -387,6 +387,20 @@ pub struct SyncStatusResult {
     /// How the workspace is wired to its peers. Absent from older servers: a mesh.
     #[serde(default)]
     pub topology: Topology,
+    /// How far embedding has got, when this host embeds (#188).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding: Option<EmbeddingProgress>,
+}
+
+/// How far a workspace's embedding has got on this host.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct EmbeddingProgress {
+    /// Documents with a vector.
+    pub vectors: u64,
+    /// Documents still without one.
+    pub pending: u64,
+    /// Whether an embedding pass is running now.
+    pub running: bool,
 }
 
 /// List this application's workspaces on this host, with their sync state.
@@ -436,6 +450,7 @@ impl SyncStatusResult {
             last_error: None,
             bridge_available: false,
             topology: Topology::Mesh,
+            embedding: None,
         }
     }
 }

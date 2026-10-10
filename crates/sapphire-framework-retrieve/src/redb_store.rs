@@ -44,7 +44,9 @@ use tantivy::{
 use crate::{
     embed::Embedder,
     error::{Error, Result},
-    retrieve_store::{Document, FileSearchResult, FtsQuery, RetrieveStore, VectorQuery},
+    retrieve_store::{
+        Document, FileSearchResult, FtsQuery, RetrieveStore, VectorQuery, VectorSource,
+    },
     snippet::{collapse_and_cut, leading},
     vector_store::{VecInfo, l2_distance, vec_deserialize, vec_serialize},
 };
@@ -504,14 +506,15 @@ impl RetrieveStore for RedbStore {
     fn embed_pending(
         &self,
         embedder: &dyn Embedder,
+        source: &dyn VectorSource,
         on_progress: &dyn Fn(usize, usize),
     ) -> Result<usize> {
         if self.dim().is_none() {
             return Ok(0);
         }
 
-        // Collect (doc_id, text) for non-empty documents that lack a vector.
-        let mut pending: Vec<(i64, String)> = Vec::new();
+        // Collect (doc_id, path, text) for non-empty documents that lack a vector.
+        let mut pending: Vec<(i64, String, String)> = Vec::new();
         {
             let rtx = self.db.begin_read().map_err(redb_err)?;
             let vecs = rtx.open_table(VECTORS).map_err(redb_err)?;
@@ -530,31 +533,45 @@ impl RetrieveStore for RedbStore {
                     .map_err(redb_err)?
                     .is_none()
                 {
-                    pending.push((doc_id, rec.text));
+                    pending.push((doc_id, rec.path, rec.text));
                 }
             }
         }
 
+        // What the source already has is stored as it is; what it neither has nor allows
+        // stays pending. Only the rest is computed.
+        let mut found = Vec::new();
+        let mut to_embed = Vec::new();
+        for (doc_id, path, text) in pending {
+            if let Some(v) = source.find(&path, &text) {
+                found.push((doc_id, v));
+            } else if source.may_embed(&path, &text) {
+                to_embed.push((doc_id, path, text));
+            }
+        }
+        let found = self.put_vectors(&found)?;
+        let pending = to_embed;
+
         let total = pending.len();
         let mut done = 0;
-        let mut embedded = 0;
+        let mut embedded = found;
         let mut last_err = None;
         // Set when the loop broke on a fully-failed batch: the caller is told,
         // even if earlier batches embedded (#194).
         let mut broke_early = false;
-        for batch in pending.chunks(100) {
-            let texts: Vec<&str> = batch.iter().map(|(_, t)| t.as_str()).collect();
+        for batch in pending.chunks(source.batch_size().max(1)) {
+            let texts: Vec<&str> = batch.iter().map(|(_, _, t)| t.as_str()).collect();
             let (vectors, outage): (Vec<(i64, Vec<f32>)>, bool) = match embedder.embed_texts(&texts)
             {
                 Ok(embeddings) => (
-                    batch.iter().map(|(id, _)| *id).zip(embeddings).collect(),
+                    batch.iter().map(|(id, _, _)| *id).zip(embeddings).collect(),
                     false,
                 ),
                 // One bad input must not block the rest: retry the batch one
                 // document at a time, and leave each one that still fails pending.
                 Err(_) => {
                     let mut ok = Vec::new();
-                    for (doc_id, text) in batch {
+                    for (doc_id, _, text) in batch {
                         match embedder.embed_texts(&[text.as_str()]) {
                             Ok(mut v) if v.len() == 1 => ok.push((*doc_id, v.remove(0))),
                             Ok(v) => {
@@ -578,6 +595,20 @@ impl RetrieveStore for RedbStore {
                 }
             };
             embedded += self.put_vectors(&vectors)?;
+            // Handed on only once the index holds them: a vector the index refused (a wrong
+            // dimension) must not become a file other devices trust.
+            let by_id: std::collections::HashMap<i64, (&str, &str)> = batch
+                .iter()
+                .map(|(id, p, t)| (*id, (p.as_str(), t.as_str())))
+                .collect();
+            let want = self.dim().unwrap_or(0) as usize;
+            for (doc_id, v) in &vectors {
+                if v.len() == want
+                    && let Some((path, text)) = by_id.get(doc_id)
+                {
+                    source.embedded(path, text, v);
+                }
+            }
             done += batch.len();
             on_progress(done, total);
             if outage {
@@ -815,7 +846,13 @@ mod tests {
 
         // Embed pending documents, then semantic search.
         let embedder = FakeEmbedder;
-        let embedded = store.embed_pending(&embedder, &|_, _| {}).unwrap();
+        let embedded = store
+            .embed_pending(
+                &embedder,
+                &crate::retrieve_store::NoVectorSource,
+                &|_, _| {},
+            )
+            .unwrap();
         assert_eq!(embedded, 2);
         let info = store.vec_info().unwrap();
         assert_eq!(info.vector_count, 2);
@@ -884,7 +921,16 @@ mod tests {
             .upsert_document(&doc(1, "/w/a.md", "alpha beta gamma"))
             .unwrap();
         store.rebuild_fts().unwrap();
-        assert_eq!(store.embed_pending(&FakeEmbedder, &|_, _| {}).unwrap(), 1);
+        assert_eq!(
+            store
+                .embed_pending(
+                    &FakeEmbedder,
+                    &crate::retrieve_store::NoVectorSource,
+                    &|_, _| {}
+                )
+                .unwrap(),
+            1
+        );
 
         let hits = store
             .search_similar(&VectorQuery::new("alpha", &FakeEmbedder).limit(5))
@@ -901,7 +947,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = RedbStore::open(dir.path(), Some(3)).unwrap();
         store.upsert_document(&doc(1, "/w/a.md", "one")).unwrap();
-        store.embed_pending(&FakeEmbedder, &|_, _| {}).unwrap();
+        store
+            .embed_pending(
+                &FakeEmbedder,
+                &crate::retrieve_store::NoVectorSource,
+                &|_, _| {},
+            )
+            .unwrap();
 
         store.upsert_document(&doc(1, "/w/a.md", "one")).unwrap();
         assert_eq!(store.vec_info().unwrap().pending_count, 0);
@@ -916,7 +968,16 @@ mod tests {
         let store = RedbStore::open(dir.path(), Some(3)).unwrap();
         store.upsert_document(&doc(1, "/w/empty.md", "")).unwrap();
         assert_eq!(store.document_count().unwrap(), 1);
-        assert_eq!(store.embed_pending(&FakeEmbedder, &|_, _| {}).unwrap(), 0);
+        assert_eq!(
+            store
+                .embed_pending(
+                    &FakeEmbedder,
+                    &crate::retrieve_store::NoVectorSource,
+                    &|_, _| {}
+                )
+                .unwrap(),
+            0
+        );
         assert_eq!(store.vec_info().unwrap().pending_count, 0);
     }
 
@@ -931,7 +992,13 @@ mod tests {
             .upsert_document(&doc(2, "/w/y/b.md", "shared words"))
             .unwrap();
         store.rebuild_fts().unwrap();
-        store.embed_pending(&FakeEmbedder, &|_, _| {}).unwrap();
+        store
+            .embed_pending(
+                &FakeEmbedder,
+                &crate::retrieve_store::NoVectorSource,
+                &|_, _| {},
+            )
+            .unwrap();
         let x = std::path::Path::new("/w/x");
 
         let fts = store
@@ -1040,7 +1107,13 @@ mod tests {
             .unwrap();
         store.upsert_document(&doc(3, "/w/c.md", "cherry")).unwrap();
 
-        let embedded = store.embed_pending(&PoisonEmbedder, &|_, _| {}).unwrap();
+        let embedded = store
+            .embed_pending(
+                &PoisonEmbedder,
+                &crate::retrieve_store::NoVectorSource,
+                &|_, _| {},
+            )
+            .unwrap();
 
         assert_eq!(embedded, 2);
         let info = store.vec_info().unwrap();
@@ -1049,7 +1122,16 @@ mod tests {
         store
             .upsert_document(&doc(2, "/w/bad.md", "fixed"))
             .unwrap();
-        assert_eq!(store.embed_pending(&PoisonEmbedder, &|_, _| {}).unwrap(), 1);
+        assert_eq!(
+            store
+                .embed_pending(
+                    &PoisonEmbedder,
+                    &crate::retrieve_store::NoVectorSource,
+                    &|_, _| {}
+                )
+                .unwrap(),
+            1
+        );
     }
 
     #[test]
@@ -1060,7 +1142,11 @@ mod tests {
         store.upsert_document(&doc(2, "/w/b.md", "two")).unwrap();
 
         let err = store
-            .embed_pending(&BrokenEmbedder, &|_, _| {})
+            .embed_pending(
+                &BrokenEmbedder,
+                &crate::retrieve_store::NoVectorSource,
+                &|_, _| {},
+            )
             .unwrap_err();
 
         assert!(err.to_string().contains("provider unreachable"), "{err}");
@@ -1074,7 +1160,16 @@ mod tests {
         store.configure_vectors("m", 3).unwrap();
         store.upsert_document(&doc(1, "/w/a.md", "banana")).unwrap();
         store.upsert_document(&doc(2, "/w/b.md", "cherry")).unwrap();
-        assert_eq!(store.embed_pending(&FakeEmbedder, &|_, _| {}).unwrap(), 2);
+        assert_eq!(
+            store
+                .embed_pending(
+                    &FakeEmbedder,
+                    &crate::retrieve_store::NoVectorSource,
+                    &|_, _| {}
+                )
+                .unwrap(),
+            2
+        );
 
         store.configure_vectors("other", 3).unwrap();
 
@@ -1090,7 +1185,13 @@ mod tests {
         let store = RedbStore::open(dir.path(), None).unwrap();
         store.configure_vectors("m", 3).unwrap();
         store.upsert_document(&doc(1, "/w/a.md", "banana")).unwrap();
-        store.embed_pending(&FakeEmbedder, &|_, _| {}).unwrap();
+        store
+            .embed_pending(
+                &FakeEmbedder,
+                &crate::retrieve_store::NoVectorSource,
+                &|_, _| {},
+            )
+            .unwrap();
 
         store.configure_vectors("m", 4).unwrap();
 
@@ -1107,7 +1208,13 @@ mod tests {
             store.configure_vectors("m", 3).unwrap();
             store.upsert_document(&doc(1, "/w/a.md", "banana")).unwrap();
             store.upsert_document(&doc(2, "/w/b.md", "cherry")).unwrap();
-            store.embed_pending(&FakeEmbedder, &|_, _| {}).unwrap();
+            store
+                .embed_pending(
+                    &FakeEmbedder,
+                    &crate::retrieve_store::NoVectorSource,
+                    &|_, _| {},
+                )
+                .unwrap();
             store.configure_vectors("m", 3).unwrap();
             assert_eq!(store.vec_info().unwrap().vector_count, 2);
         }
@@ -1129,7 +1236,16 @@ mod tests {
         store.configure_vectors("m", 3).unwrap();
 
         assert_eq!(store.dim(), Some(3));
-        assert_eq!(store.embed_pending(&FakeEmbedder, &|_, _| {}).unwrap(), 2);
+        assert_eq!(
+            store
+                .embed_pending(
+                    &FakeEmbedder,
+                    &crate::retrieve_store::NoVectorSource,
+                    &|_, _| {}
+                )
+                .unwrap(),
+            2
+        );
         let hits = store
             .search_similar(&VectorQuery::new("cherry", &FakeEmbedder).limit(5))
             .unwrap();
@@ -1156,7 +1272,13 @@ mod tests {
         }
         let embedder = CountingBrokenEmbedder(Default::default());
 
-        let err = store.embed_pending(&embedder, &|_, _| {}).unwrap_err();
+        let err = store
+            .embed_pending(
+                &embedder,
+                &crate::retrieve_store::NoVectorSource,
+                &|_, _| {},
+            )
+            .unwrap_err();
 
         assert!(err.to_string().contains("provider unreachable"), "{err}");
         // One call for batch 1, then 100 single retries; batch 2 is never tried.
@@ -1186,7 +1308,11 @@ mod tests {
         // The last batch failed as a whole: the call reports it (#194), even though the
         // first batch embedded.
         let err = store
-            .embed_pending(&PoisonEmbedder, &|_, _| {})
+            .embed_pending(
+                &PoisonEmbedder,
+                &crate::retrieve_store::NoVectorSource,
+                &|_, _| {},
+            )
             .unwrap_err();
         assert!(err.to_string().contains("input rejected"), "{err}");
 
@@ -1215,7 +1341,11 @@ mod tests {
         }
 
         let err = store
-            .embed_pending(&PoisonEmbedder, &|_, _| {})
+            .embed_pending(
+                &PoisonEmbedder,
+                &crate::retrieve_store::NoVectorSource,
+                &|_, _| {},
+            )
             .unwrap_err();
         assert!(err.to_string().contains("input rejected"), "{err}");
 
@@ -1242,7 +1372,16 @@ mod tests {
         let info = store.vec_info().unwrap();
         assert_eq!((info.vector_count, info.pending_count), (1, 1));
         // Through embed_pending too: a 3-value embedder stores nothing in a 4-dim store.
-        assert_eq!(store.embed_pending(&FakeEmbedder, &|_, _| {}).unwrap(), 0);
+        assert_eq!(
+            store
+                .embed_pending(
+                    &FakeEmbedder,
+                    &crate::retrieve_store::NoVectorSource,
+                    &|_, _| {}
+                )
+                .unwrap(),
+            0
+        );
         assert_eq!(store.vec_info().unwrap().vector_count, 1);
     }
 
@@ -1262,7 +1401,13 @@ mod tests {
                 .unwrap();
         }
 
-        let embedded = store.embed_pending(&PoisonEmbedder, &|_, _| {}).unwrap();
+        let embedded = store
+            .embed_pending(
+                &PoisonEmbedder,
+                &crate::retrieve_store::NoVectorSource,
+                &|_, _| {},
+            )
+            .unwrap();
 
         assert_eq!(embedded, 149);
         let info = store.vec_info().unwrap();
@@ -1334,5 +1479,143 @@ mod tests {
 
         assert_eq!(hits.len(), 1);
         assert!(!hits[0].snippet.is_empty());
+    }
+
+    /// Finds the vectors in `stored` by path, allows embedding the paths in `allowed`, and
+    /// records what it is handed.
+    struct MapSource {
+        stored: std::collections::HashMap<String, Vec<f32>>,
+        allowed: Vec<String>,
+        kept: std::sync::Mutex<Vec<(String, Vec<f32>)>>,
+    }
+
+    impl crate::retrieve_store::VectorSource for MapSource {
+        fn find(&self, path: &str, _: &str) -> Option<Vec<f32>> {
+            self.stored.get(path).cloned()
+        }
+        fn may_embed(&self, path: &str, _: &str) -> bool {
+            self.allowed.iter().any(|p| p == path)
+        }
+        fn embedded(&self, path: &str, _: &str, vector: &[f32]) {
+            self.kept
+                .lock()
+                .unwrap()
+                .push((path.to_owned(), vector.to_vec()));
+        }
+    }
+
+    /// Counts the texts it embeds.
+    struct CountingEmbedder(std::sync::atomic::AtomicUsize);
+    impl Embedder for CountingEmbedder {
+        fn embed_texts(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+            self.0
+                .fetch_add(texts.len(), std::sync::atomic::Ordering::SeqCst);
+            FakeEmbedder.embed_texts(texts)
+        }
+    }
+
+    #[test]
+    fn a_source_supplies_what_it_has_and_decides_what_is_computed() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RedbStore::open(dir.path(), Some(3)).unwrap();
+        store
+            .upsert_document(&doc(1, "/w/found.md", "banana"))
+            .unwrap();
+        store
+            .upsert_document(&doc(2, "/w/mine.md", "cherry"))
+            .unwrap();
+        store
+            .upsert_document(&doc(3, "/w/theirs.md", "other"))
+            .unwrap();
+        store.rebuild_fts().unwrap();
+        let source = MapSource {
+            stored: [("/w/found.md".to_owned(), vec![0.5, 0.5, 0.0])].into(),
+            allowed: vec!["/w/mine.md".to_owned()],
+            kept: Default::default(),
+        };
+        let embedder = CountingEmbedder(Default::default());
+
+        let got = store.embed_pending(&embedder, &source, &|_, _| {}).unwrap();
+
+        assert_eq!(got, 2, "one found, one computed");
+        assert_eq!(embedder.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            *source.kept.lock().unwrap(),
+            vec![("/w/mine.md".to_owned(), vec![0.0, 1.0, 0.0])],
+            "only the computed vector is handed back"
+        );
+        let info = store.vec_info().unwrap();
+        assert_eq!(
+            (info.vector_count, info.pending_count),
+            (2, 1),
+            "the refused one stays pending"
+        );
+        // The found vector is what search uses.
+        let hits = store
+            .search_similar(&VectorQuery::new("banana", &FakeEmbedder).limit(1))
+            .unwrap();
+        assert!(hits[0].path.ends_with("found.md") || hits[0].path.ends_with("mine.md"));
+    }
+
+    #[test]
+    fn a_found_vector_of_the_wrong_dimension_is_not_stored() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RedbStore::open(dir.path(), Some(3)).unwrap();
+        store.upsert_document(&doc(1, "/w/a.md", "banana")).unwrap();
+        let source = MapSource {
+            stored: [("/w/a.md".to_owned(), vec![1.0, 0.0])].into(),
+            allowed: vec![],
+            kept: Default::default(),
+        };
+        assert_eq!(
+            store
+                .embed_pending(&FakeEmbedder, &source, &|_, _| {})
+                .unwrap(),
+            0
+        );
+        assert_eq!(store.vec_info().unwrap().pending_count, 1);
+    }
+
+    /// Embeds everything, `n` texts per request.
+    struct SmallBatches(usize);
+    impl crate::retrieve_store::VectorSource for SmallBatches {
+        fn find(&self, _: &str, _: &str) -> Option<Vec<f32>> {
+            None
+        }
+        fn may_embed(&self, _: &str, _: &str) -> bool {
+            true
+        }
+        fn embedded(&self, _: &str, _: &str, _: &[f32]) {}
+        fn batch_size(&self) -> usize {
+            self.0
+        }
+    }
+
+    /// Records how many texts each request carried.
+    struct BatchRecorder(std::sync::Mutex<Vec<usize>>);
+    impl Embedder for BatchRecorder {
+        fn embed_texts(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+            self.0.lock().unwrap().push(texts.len());
+            FakeEmbedder.embed_texts(texts)
+        }
+    }
+
+    #[test]
+    fn the_source_sets_how_many_texts_go_in_one_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RedbStore::open(dir.path(), Some(3)).unwrap();
+        for i in 0..5 {
+            store
+                .upsert_document(&doc(i, &format!("/w/{i}.md"), "text"))
+                .unwrap();
+        }
+        let embedder = BatchRecorder(Default::default());
+        assert_eq!(
+            store
+                .embed_pending(&embedder, &SmallBatches(2), &|_, _| {})
+                .unwrap(),
+            5
+        );
+        assert_eq!(*embedder.0.lock().unwrap(), vec![2, 2, 1]);
     }
 }

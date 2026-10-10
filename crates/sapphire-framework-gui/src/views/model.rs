@@ -19,6 +19,8 @@ pub enum Badge {
         peers: usize,
         /// Whether the workspace syncs through a primary device.
         star: bool,
+        /// Files this host has yet to give a vector (#188); 0 when none or not embedding.
+        embedding_pending: u64,
     },
     /// Synced but paused, for this reason.
     Paused(String),
@@ -34,10 +36,19 @@ impl Badge {
     /// The text shown in the row.
     pub fn label(&self) -> String {
         match self {
-            Badge::Syncing { peers, star } => format!(
-                "syncing · {peers} peer{}{}",
+            Badge::Syncing {
+                peers,
+                star,
+                embedding_pending,
+            } => format!(
+                "syncing · {peers} peer{}{}{}",
                 if *peers == 1 { "" } else { "s" },
-                if *star { " · star" } else { "" }
+                if *star { " · star" } else { "" },
+                if *embedding_pending > 0 {
+                    format!(" · embedding {embedding_pending} pending")
+                } else {
+                    String::new()
+                }
             ),
             Badge::Paused(why) => format!("paused: {why}"),
             Badge::Error(e) => format!("error: {e}"),
@@ -61,6 +72,7 @@ pub fn badge(entry: &WorkspaceListEntry) -> Badge {
         Badge::Syncing {
             peers: entry.sync.peers,
             star: matches!(entry.sync.topology, Topology::Star { .. }),
+            embedding_pending: entry.sync.embedding.as_ref().map_or(0, |e| e.pending),
         }
     }
 }
@@ -396,8 +408,19 @@ mod tests {
             badge(&entry("a", None, true, synced(3))),
             Badge::Syncing {
                 peers: 3,
-                star: false
+                star: false,
+                embedding_pending: 0,
             }
+        );
+        let mut s = synced(1);
+        s.embedding = Some(sapphire_backend::protocol::EmbeddingProgress {
+            vectors: 10,
+            pending: 4,
+            running: true,
+        });
+        assert_eq!(
+            badge(&entry("a", None, true, s)).label(),
+            "syncing · 1 peer · embedding 4 pending"
         );
     }
 
@@ -673,6 +696,8 @@ mod tests {
                 model: "m".into(),
                 dimension: 8,
                 template_version: 0,
+                revision: None,
+                max_tokens: None,
             }),
             loaded: true,
             note: Some(EmbedNote::KeyMissing),

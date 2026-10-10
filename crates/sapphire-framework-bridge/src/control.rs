@@ -1138,6 +1138,8 @@ mod tests {
                 model: "fake".into(),
                 dimension: 2,
                 template_version: 1,
+                revision: None,
+                max_tokens: None,
             })
         }
         fn loaded(&self) -> bool {
@@ -1319,6 +1321,8 @@ mod tests {
                     model,
                     dimension,
                     template_version: 0,
+                    revision: None,
+                    max_tokens: None,
                 })) as Arc<dyn crate::EmbedProvider>,
             )
         });

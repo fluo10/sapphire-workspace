@@ -108,6 +108,15 @@ pub trait TrackStore: Send + Sync {
     /// Number of tracked paths.
     fn count(&self) -> Result<u64>;
 
+    /// Forget every path, so the next sync treats every file as changed. Backends
+    /// override this to clear in one transaction.
+    fn clear(&self) -> Result<()> {
+        for path in self.mtimes()?.keys() {
+            self.remove(path)?;
+        }
+        Ok(())
+    }
+
     /// Insert or update many entries. Backends override this to commit the
     /// whole batch in a single transaction.
     fn upsert_many(&self, entries: &[(String, FileStamp)]) -> Result<()> {
@@ -280,6 +289,11 @@ impl TrackStore for InMemoryTrackStore {
 
     fn count(&self) -> Result<u64> {
         Ok(self.inner.lock().unwrap().len() as u64)
+    }
+
+    fn clear(&self) -> Result<()> {
+        self.inner.lock().unwrap().clear();
+        Ok(())
     }
 }
 

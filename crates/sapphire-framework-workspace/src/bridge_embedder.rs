@@ -377,6 +377,8 @@ pub(crate) mod testing {
                         model: "fake-2d".into(),
                         dimension: 2,
                         template_version: 1,
+                        revision: None,
+                        max_tokens: None,
                     }),
                     loaded: true,
                     note: None,
@@ -551,6 +553,8 @@ mod tests {
             model: "other-3d".into(),
             dimension: 3,
             template_version: 0,
+            revision: None,
+            max_tokens: None,
         };
         bridge.set_info(EmbedInfoResult {
             enabled: true,

@@ -73,6 +73,50 @@ struct Installed {
     info: EmbedModelInfo,
 }
 
+/// Whether this device computes the vector of a file it could not find one for, by the
+/// file's workspace-relative path (`/`-separated) and hex content hash.
+pub type EmbedPolicy<'a> = dyn Fn(&str, &str) -> bool + Sync + 'a;
+
+/// The synced vector files as the retrieve store's [`VectorSource`].
+struct FileVectors<'a> {
+    /// The active profile's directory; `None` reads nothing and keeps nothing.
+    dir: Option<crate::vectors::VectorDir>,
+    root: &'a Path,
+    policy: &'a EmbedPolicy<'a>,
+    batch_size: usize,
+}
+
+/// Texts per embedding request when an app embeds in the foreground.
+const BATCH: usize = 100;
+
+impl sapphire_retrieve::VectorSource for FileVectors<'_> {
+    fn find(&self, _path: &str, text: &str) -> Option<Vec<f32>> {
+        self.dir
+            .as_ref()?
+            .read(&crate::vectors::content_hash(text.as_bytes()))
+    }
+
+    fn may_embed(&self, path: &str, text: &str) -> bool {
+        let rel = Path::new(path)
+            .strip_prefix(self.root)
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|_| path.to_owned());
+        (self.policy)(&rel, &crate::vectors::content_hash(text.as_bytes()))
+    }
+
+    fn batch_size(&self) -> usize {
+        self.batch_size
+    }
+
+    fn embedded(&self, _path: &str, text: &str, vector: &[f32]) {
+        let Some(dir) = &self.dir else { return };
+        let hash = crate::vectors::content_hash(text.as_bytes());
+        if let Err(err) = dir.write(&hash, vector) {
+            tracing::warn!("could not write the vector file for {hash}: {err}");
+        }
+    }
+}
+
 /// Ask the bridge at `endpoint` (default: the standard one) for an embedder.
 fn connect(
     endpoint: Option<sapphire_ipc::Endpoint>,
@@ -186,15 +230,15 @@ impl WorkspaceState {
     /// Open (or create) the retrieve DB for `workspace`.
     pub fn open(workspace: Workspace) -> Result<Self> {
         let backend = Self::open_initial_backend(&workspace)?;
-        let mut track_db = Self::open_initial_track(&workspace)?;
+        let track_db = Self::open_initial_track(&workspace)?;
         if index_lost_its_documents(backend.as_ref(), track_db.as_ref())? {
             // The retrieve store was reset (an old schema or redb file format)
             // but the track store still has a stamp for every file, so an
-            // incremental sync would skip them all. Start the track store over,
-            // as `rebuild` does, so the next sync re-indexes the workspace.
-            drop(track_db);
-            let _ = std::fs::remove_file(workspace.track_db_path());
-            track_db = Self::open_initial_track(&workspace)?;
+            // incremental sync would skip them all. Forget every stamp, so the
+            // next sync re-indexes the workspace. Cleared in place rather than by
+            // deleting the file: a delete that fails (a virus scanner holding the
+            // file on Windows) would leave the stamps behind in silence (#195).
+            track_db.clear()?;
         }
         Ok(Self {
             retrieve_db: Mutex::new(backend),
@@ -211,10 +255,13 @@ impl WorkspaceState {
         // index and the track store start from a consistent (empty) state.
         // The orphaned pre-#118 `track_v1.redb` goes with it, so a rebuild
         // also clears any stale second-resolution snapshot.
-        let _ = std::fs::remove_file(workspace.track_db_path());
+        // The orphan is never read again, so a failed delete costs only disk space. The
+        // live track store is cleared in place below, which cannot fail silently the way
+        // a delete can (#195).
         let _ = std::fs::remove_file(workspace.cache_dir().join("track_v1.redb"));
         let backend = Self::open_initial_backend(&workspace)?;
         let track_db = Self::open_initial_track(&workspace)?;
+        track_db.clear()?;
         Ok(Self {
             retrieve_db: Mutex::new(backend),
             track_db,
@@ -585,8 +632,12 @@ impl WorkspaceState {
         self.refresh_embedder_at(None).await
     }
 
-    /// [`refresh_embedder`](Self::refresh_embedder), asking the bridge at `endpoint`.
-    async fn refresh_embedder_at(&self, endpoint: Option<sapphire_ipc::Endpoint>) -> Result<()> {
+    /// [`refresh_embedder`](Self::refresh_embedder), asking the bridge at `endpoint` (the
+    /// standard one when `None`): for a server whose bridge is not the host's default.
+    pub async fn refresh_embedder_at(
+        &self,
+        endpoint: Option<sapphire_ipc::Endpoint>,
+    ) -> Result<()> {
         if !self.wants_embedder()? {
             return Ok(());
         }
@@ -640,6 +691,8 @@ impl WorkspaceState {
                 model: model.to_owned(),
                 dimension: dim,
                 template_version: 0,
+                revision: None,
+                max_tokens: None,
             },
         }));
         Ok(())
@@ -761,7 +814,7 @@ impl WorkspaceState {
             return Ok((upserted, removed, 0));
         };
 
-        let embedded = match self.retrieve_db().embed_pending(&*embedder, &|_, _| {}) {
+        let embedded = match self.embed_with(&*embedder, &|_, _| true, BATCH, &|_, _| {}) {
             Ok(n) => n,
             Err(e) => {
                 tracing::warn!("embedding failed; documents stay pending: {e}");
@@ -778,7 +831,69 @@ impl WorkspaceState {
         let Some(embedder) = self.embedder() else {
             return Ok(0);
         };
-        Ok(self.retrieve_db().embed_pending(&*embedder, &on_progress)?)
+        self.embed_with(&*embedder, &|_, _| true, BATCH, &on_progress)
+    }
+
+    /// Embed pending documents as one device of a synced workspace (#187).
+    ///
+    /// A document whose vector file exists under `.<app>/embedded/<profile>/` takes it
+    /// without embedding; one without is embedded only when `policy` says so for its
+    /// workspace-relative path and content hash, and its vector is then written there for
+    /// the other devices. The embedder must have been loaded (see
+    /// [`refresh_embedder`](Self::refresh_embedder)); without one nothing happens.
+    ///
+    /// `batch_size` texts go to the bridge per request: a background pass keeps it small,
+    /// so a search query is not stuck behind it on the bridge's one worker (#188).
+    pub fn embed_pending_with(&self, policy: &EmbedPolicy<'_>, batch_size: usize) -> Result<usize> {
+        let Some(embedder) = self.embedder() else {
+            return Ok(0);
+        };
+        self.embed_with(&*embedder, policy, batch_size, &|_, _| {})
+    }
+
+    /// Remove the vector files of the active profile that no live content needs and that
+    /// are older than `older_than` (the primary device's cleanup, #187). `live` holds the
+    /// hex content hashes of the workspace's current files. Returns how many were removed.
+    pub fn remove_stale_vectors(
+        &self,
+        live: &std::collections::HashSet<String>,
+        older_than: std::time::Duration,
+    ) -> usize {
+        match self.vector_dir() {
+            Some(dir) => dir.remove_stale(live, older_than),
+            None => 0,
+        }
+    }
+
+    /// The active profile's vector directory, once an embedder is installed.
+    fn vector_dir(&self) -> Option<crate::vectors::VectorDir> {
+        if self.vector_db() == VectorDb::None {
+            return None;
+        }
+        let slot = self.embedder.read().unwrap_or_else(|e| e.into_inner());
+        let info = &slot.as_ref()?.as_ref()?.info;
+        Some(crate::vectors::VectorDir::new(
+            &self.workspace.marker_dir(),
+            crate::vectors::Profile::of(info),
+        ))
+    }
+
+    fn embed_with(
+        &self,
+        embedder: &dyn Embedder,
+        policy: &EmbedPolicy<'_>,
+        batch_size: usize,
+        on_progress: &dyn Fn(usize, usize),
+    ) -> Result<usize> {
+        let source = FileVectors {
+            dir: self.vector_dir(),
+            root: &self.workspace.root,
+            policy,
+            batch_size,
+        };
+        Ok(self
+            .retrieve_db()
+            .embed_pending(embedder, &source, on_progress)?)
     }
 
     // ── info ──────────────────────────────────────────────────────────────────
@@ -1224,6 +1339,8 @@ mod tests {
                     model: "other-3d".into(),
                     dimension: 3,
                     template_version: 0,
+                    revision: None,
+                    max_tokens: None,
                 }),
                 ..Default::default()
             }
@@ -1290,6 +1407,91 @@ mod tests {
                     .unwrap();
                 assert!(hits[0].path.ends_with("banana.md"), "{mode:?}: {hits:?}");
             }
+        }
+
+        /// Counts the texts it embeds, through a counter the test keeps.
+        struct CountingEmbedder(Arc<std::sync::atomic::AtomicUsize>);
+        impl Embedder for CountingEmbedder {
+            fn embed_texts(&self, texts: &[&str]) -> sapphire_retrieve::Result<Vec<Vec<f32>>> {
+                self.0
+                    .fetch_add(texts.len(), std::sync::atomic::Ordering::SeqCst);
+                FakeEmbedder.embed_texts(texts)
+            }
+        }
+
+        fn copy_tree(from: &Path, to: &Path) {
+            fs::create_dir_all(to).unwrap();
+            for entry in fs::read_dir(from).unwrap() {
+                let entry = entry.unwrap();
+                let target = to.join(entry.file_name());
+                if entry.file_type().unwrap().is_dir() {
+                    copy_tree(&entry.path(), &target);
+                } else {
+                    fs::copy(entry.path(), target).unwrap();
+                }
+            }
+        }
+
+        #[test]
+        fn a_vector_file_written_on_one_device_spares_the_other_the_embedding() {
+            let (tmp_a, a) = make_state();
+            a.set_embedder_for_test(Box::new(FakeEmbedder), "fake-3d", 3)
+                .unwrap();
+            assert_eq!(a.embed_pending_with(&|_, _| true, 100).unwrap(), 2);
+            let embedded = tmp_a.path().join(".ws-state-embed-test").join("embedded");
+            let profiles: Vec<_> = fs::read_dir(&embedded).unwrap().collect();
+            assert_eq!(profiles.len(), 1, "one profile directory");
+            // The vector files are not documents.
+            a.sync().unwrap();
+            assert_eq!(a.db_info().unwrap().document_count, 2);
+
+            // B holds the same files, and sync has brought A's vectors over.
+            let (tmp_b, b) = make_state();
+            copy_tree(
+                &embedded,
+                &tmp_b.path().join(".ws-state-embed-test").join("embedded"),
+            );
+            let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            b.set_embedder_for_test(Box::new(CountingEmbedder(Arc::clone(&count))), "fake-3d", 3)
+                .unwrap();
+
+            assert_eq!(b.embed_pending_with(&|_, _| false, 100).unwrap(), 2);
+            assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 0);
+            let hits = b
+                .retrieve_files(&params("apple"), &HybridConfig::default())
+                .unwrap();
+            assert!(hits[0].path.ends_with("apple.md"), "{hits:?}");
+        }
+
+        #[test]
+        fn without_a_vector_file_the_policy_decides() {
+            let (_tmp, state) = make_state();
+            state
+                .set_embedder_for_test(Box::new(FakeEmbedder), "fake-3d", 3)
+                .unwrap();
+            let asked = std::sync::Mutex::new(Vec::new());
+            let embedded = state
+                .embed_pending_with(
+                    &|rel: &str, hash: &str| {
+                        asked
+                            .lock()
+                            .unwrap()
+                            .push((rel.to_owned(), hash.to_owned()));
+                        rel == "apple.md"
+                    },
+                    100,
+                )
+                .unwrap();
+            assert_eq!(embedded, 1);
+            assert_eq!(state.db_info().unwrap().pending_count, 1);
+            let mut asked = asked.into_inner().unwrap();
+            asked.sort();
+            assert_eq!(asked[0].0, "apple.md");
+            assert_eq!(
+                asked[0].1,
+                crate::vectors::content_hash(b"apple pie recipe"),
+                "the content address is the hash of the file's bytes"
+            );
         }
 
         /// Fails every call, like a bridge whose provider is down.

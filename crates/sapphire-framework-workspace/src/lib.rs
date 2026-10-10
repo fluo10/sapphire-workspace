@@ -5,6 +5,7 @@ pub mod config;
 pub mod context;
 pub mod indexer;
 pub mod logging;
+pub mod vectors;
 pub mod workspace;
 pub mod workspace_state;
 
@@ -34,7 +35,7 @@ pub use indexer::{
 pub use sapphire_bridge_api::EmbedModelInfo;
 pub use workspace::Workspace;
 pub use workspace::{DEFAULT_WORKSPACE_MARKER, path_uuid};
-pub use workspace_state::{DbInfo, RetrieveParams, SearchMode, WorkspaceState};
+pub use workspace_state::{DbInfo, EmbedPolicy, RetrieveParams, SearchMode, WorkspaceState};
 
 // Re-export sapphire-retrieve public API so callers can use a single dependency.
 /// Retrieve cache schema version. Retained for API compatibility with the

@@ -183,6 +183,38 @@ pub struct FileSearchResult {
     pub snippet: String,
 }
 
+// ── vector source ─────────────────────────────────────────────────────────────
+
+/// Where [`RetrieveStore::embed_pending`] looks for vectors before it computes any, and
+/// whether it may compute them: the synced vector files of #187, or nothing.
+pub trait VectorSource: Sync {
+    /// The stored vector for this document, if there is one.
+    fn find(&self, path: &str, text: &str) -> Option<Vec<f32>>;
+    /// Whether this device should compute a vector it could not find.
+    fn may_embed(&self, path: &str, text: &str) -> bool;
+    /// A vector was just computed and stored in the index: keep it.
+    fn embedded(&self, path: &str, text: &str, vector: &[f32]);
+
+    /// How many texts go to the embedder in one call. A background backfill keeps this
+    /// small, so a search query waiting on the same model is not stuck behind it.
+    fn batch_size(&self) -> usize {
+        100
+    }
+}
+
+/// Finds nothing, embeds everything, keeps nothing: an index on its own.
+pub struct NoVectorSource;
+
+impl VectorSource for NoVectorSource {
+    fn find(&self, _: &str, _: &str) -> Option<Vec<f32>> {
+        None
+    }
+    fn may_embed(&self, _: &str, _: &str) -> bool {
+        true
+    }
+    fn embedded(&self, _: &str, _: &str, _: &[f32]) {}
+}
+
 // ── trait ─────────────────────────────────────────────────────────────────────
 
 /// Unified synchronous interface for retrieve storage backends.
@@ -213,9 +245,11 @@ pub trait RetrieveStore: Send + Sync {
         Ok(())
     }
 
-    /// Generate and store embeddings for all documents without a vector.
+    /// Give every document without a vector one: from `source` when it has it, else by
+    /// computing it with `embedder` when `source` allows, then handing it to `source`.
+    /// A document `source` neither has nor allows stays pending.
     ///
-    /// Returns the number of documents embedded. A document the embedder
+    /// Returns the number of documents that got a vector, found or computed. A document the embedder
     /// rejects is logged and stays pending. As soon as a whole batch fails,
     /// including every one-at-a-time retry, the call stops: that is a provider
     /// outage, not a bad input, so the remaining batches are not attempted and
@@ -224,6 +258,7 @@ pub trait RetrieveStore: Send + Sync {
     fn embed_pending(
         &self,
         embedder: &dyn Embedder,
+        source: &dyn VectorSource,
         on_progress: &dyn Fn(usize, usize),
     ) -> Result<usize>;
 

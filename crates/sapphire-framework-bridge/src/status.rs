@@ -305,6 +305,8 @@ mod tests {
                 model: "fake".into(),
                 dimension: 2,
                 template_version: 1,
+                revision: None,
+                max_tokens: None,
             })
         }
         fn loaded(&self) -> bool {

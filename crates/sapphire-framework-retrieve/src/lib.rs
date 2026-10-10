@@ -16,7 +16,8 @@ pub use db::{open_redb, open_redb_vec};
 pub use embed::Embedder;
 pub use error::{Error, Result};
 pub use retrieve_store::{
-    Document, FileSearchResult, FtsQuery, HybridQuery, RetrieveStore, VectorQuery,
+    Document, FileSearchResult, FtsQuery, HybridQuery, NoVectorSource, RetrieveStore, VectorQuery,
+    VectorSource,
 };
 pub use snippet::SNIPPET_CHARS;
 pub use vector_store::VecInfo;

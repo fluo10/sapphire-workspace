@@ -50,6 +50,8 @@ sapphire-framework-bridge = { package = "sapphire-framework-bridge", version = "
 sapphire-framework-server = { path = ".", features = ["test-util"] }
 tempfile = "3"
 toml.workspace = true
+# The synced-vector test serves a fake embedding provider from its bridges.
+async-trait.workspace = true
 
 [target.'cfg(unix)'.dev-dependencies]
 # The signal test sends SIGTERM with `libc::kill` directly.
