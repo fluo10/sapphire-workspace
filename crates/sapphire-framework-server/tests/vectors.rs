@@ -155,3 +155,55 @@ async fn the_primary_embeds_what_a_device_without_embedding_wrote() {
     .await;
     assert_eq!(pb.0.load(Ordering::SeqCst), 1);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_primary_waits_out_the_grace_period_then_backfills_on_its_own() {
+    let net = LoopbackNetwork::new();
+    let pb = counting();
+    let a = common::start_host_with_priority(&net, NODE_A, "a", 0).await;
+    let b = common::start_host_embedding(&net, NODE_B, "b", 1, pb.clone()).await;
+    let runtime_b = b.runtime().unwrap();
+    runtime_b.set_backfill_timing(sapphire_framework_server::BackfillTiming {
+        grace: Duration::from_secs(3600),
+        interval: Duration::from_millis(300),
+    });
+    common::introduce_all(&[&a, &b]);
+    common::enable_sync(&a).await;
+    common::enable_sync(&b).await;
+    common::await_primary(&[&a, &b], b.device_id().await).await;
+
+    let content = "fresh from a device that does not embed";
+    write(&a, "fresh.md", content).await;
+    await_condition("the file reaching B", || {
+        file_at(&b.ws, "fresh.md").is_some()
+    })
+    .await;
+    // Several periodic passes go by inside the grace period: nothing is embedded.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(
+        pb.0.load(Ordering::SeqCst),
+        0,
+        "the author's version is too fresh"
+    );
+
+    // B reports the file as pending.
+    let status: proto::SyncStatusResult = b
+        .client
+        .call(proto::SYNC_STATUS, proto::WsParams { ws: b.ws.clone() })
+        .await
+        .unwrap();
+    let progress = status.embedding.expect("B embeds");
+    assert!(progress.pending >= 1, "{progress:?}");
+
+    // Once the grace period is over, the next periodic pass fills it in with nothing else
+    // prompting it.
+    runtime_b.set_backfill_timing(sapphire_framework_server::BackfillTiming {
+        grace: Duration::ZERO,
+        interval: Duration::from_millis(300),
+    });
+    await_condition("the backfilled vector reaching A", || {
+        has_vector(&a, content)
+    })
+    .await;
+    assert_eq!(pb.0.load(Ordering::SeqCst), 1);
+}

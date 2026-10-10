@@ -141,6 +141,11 @@ impl WorkspaceHost {
         self.open.lock().expect("host mutex").clear();
     }
 
+    /// The backend of `key` if it is open now; never opens one.
+    pub(crate) fn open_backend(&self, key: &Path) -> Option<Arc<LocalBackend>> {
+        self.touch(key)
+    }
+
     fn touch(&self, key: &Path) -> Option<Arc<LocalBackend>> {
         let mut open = self.open.lock().expect("host mutex");
         let entry = open.get_mut(key)?;

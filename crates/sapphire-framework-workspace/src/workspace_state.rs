@@ -83,7 +83,11 @@ struct FileVectors<'a> {
     dir: Option<crate::vectors::VectorDir>,
     root: &'a Path,
     policy: &'a EmbedPolicy<'a>,
+    batch_size: usize,
 }
+
+/// Texts per embedding request when an app embeds in the foreground.
+const BATCH: usize = 100;
 
 impl sapphire_retrieve::VectorSource for FileVectors<'_> {
     fn find(&self, _path: &str, text: &str) -> Option<Vec<f32>> {
@@ -98,6 +102,10 @@ impl sapphire_retrieve::VectorSource for FileVectors<'_> {
             .map(|p| p.to_string_lossy().replace('\\', "/"))
             .unwrap_or_else(|_| path.to_owned());
         (self.policy)(&rel, &crate::vectors::content_hash(text.as_bytes()))
+    }
+
+    fn batch_size(&self) -> usize {
+        self.batch_size
     }
 
     fn embedded(&self, _path: &str, text: &str, vector: &[f32]) {
@@ -806,7 +814,7 @@ impl WorkspaceState {
             return Ok((upserted, removed, 0));
         };
 
-        let embedded = match self.embed_with(&*embedder, &|_, _| true, &|_, _| {}) {
+        let embedded = match self.embed_with(&*embedder, &|_, _| true, BATCH, &|_, _| {}) {
             Ok(n) => n,
             Err(e) => {
                 tracing::warn!("embedding failed; documents stay pending: {e}");
@@ -823,7 +831,7 @@ impl WorkspaceState {
         let Some(embedder) = self.embedder() else {
             return Ok(0);
         };
-        self.embed_with(&*embedder, &|_, _| true, &on_progress)
+        self.embed_with(&*embedder, &|_, _| true, BATCH, &on_progress)
     }
 
     /// Embed pending documents as one device of a synced workspace (#187).
@@ -833,11 +841,14 @@ impl WorkspaceState {
     /// workspace-relative path and content hash, and its vector is then written there for
     /// the other devices. The embedder must have been loaded (see
     /// [`refresh_embedder`](Self::refresh_embedder)); without one nothing happens.
-    pub fn embed_pending_with(&self, policy: &EmbedPolicy<'_>) -> Result<usize> {
+    ///
+    /// `batch_size` texts go to the bridge per request: a background pass keeps it small,
+    /// so a search query is not stuck behind it on the bridge's one worker (#188).
+    pub fn embed_pending_with(&self, policy: &EmbedPolicy<'_>, batch_size: usize) -> Result<usize> {
         let Some(embedder) = self.embedder() else {
             return Ok(0);
         };
-        self.embed_with(&*embedder, policy, &|_, _| {})
+        self.embed_with(&*embedder, policy, batch_size, &|_, _| {})
     }
 
     /// Remove the vector files of the active profile that no live content needs and that
@@ -871,12 +882,14 @@ impl WorkspaceState {
         &self,
         embedder: &dyn Embedder,
         policy: &EmbedPolicy<'_>,
+        batch_size: usize,
         on_progress: &dyn Fn(usize, usize),
     ) -> Result<usize> {
         let source = FileVectors {
             dir: self.vector_dir(),
             root: &self.workspace.root,
             policy,
+            batch_size,
         };
         Ok(self
             .retrieve_db()
@@ -1424,7 +1437,7 @@ mod tests {
             let (tmp_a, a) = make_state();
             a.set_embedder_for_test(Box::new(FakeEmbedder), "fake-3d", 3)
                 .unwrap();
-            assert_eq!(a.embed_pending_with(&|_, _| true).unwrap(), 2);
+            assert_eq!(a.embed_pending_with(&|_, _| true, 100).unwrap(), 2);
             let embedded = tmp_a.path().join(".ws-state-embed-test").join("embedded");
             let profiles: Vec<_> = fs::read_dir(&embedded).unwrap().collect();
             assert_eq!(profiles.len(), 1, "one profile directory");
@@ -1442,7 +1455,7 @@ mod tests {
             b.set_embedder_for_test(Box::new(CountingEmbedder(Arc::clone(&count))), "fake-3d", 3)
                 .unwrap();
 
-            assert_eq!(b.embed_pending_with(&|_, _| false).unwrap(), 2);
+            assert_eq!(b.embed_pending_with(&|_, _| false, 100).unwrap(), 2);
             assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 0);
             let hits = b
                 .retrieve_files(&params("apple"), &HybridConfig::default())
@@ -1458,13 +1471,16 @@ mod tests {
                 .unwrap();
             let asked = std::sync::Mutex::new(Vec::new());
             let embedded = state
-                .embed_pending_with(&|rel: &str, hash: &str| {
-                    asked
-                        .lock()
-                        .unwrap()
-                        .push((rel.to_owned(), hash.to_owned()));
-                    rel == "apple.md"
-                })
+                .embed_pending_with(
+                    &|rel: &str, hash: &str| {
+                        asked
+                            .lock()
+                            .unwrap()
+                            .push((rel.to_owned(), hash.to_owned()));
+                        rel == "apple.md"
+                    },
+                    100,
+                )
                 .unwrap();
             assert_eq!(embedded, 1);
             assert_eq!(state.db_info().unwrap().pending_count, 1);
