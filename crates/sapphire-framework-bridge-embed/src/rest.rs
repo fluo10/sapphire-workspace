@@ -4,7 +4,8 @@ use std::ops::Range;
 use std::time::Duration;
 
 use crate::service::Embed;
-use crate::settings::EmbeddingSettings;
+use sapphire_bridge_api::{ApiKey, RemoteModel};
+
 use crate::template::mrl;
 use crate::{Error, Result};
 
@@ -19,12 +20,6 @@ pub const MAX_INPUT_CHARS: usize = 4_000;
 
 /// Upper bound on the characters sent in one request, summed over its (capped) inputs.
 pub const MAX_REQUEST_CHARS: usize = 100_000;
-
-/// The default endpoint when `endpoint` is not set.
-pub const DEFAULT_ENDPOINT: &str = "https://api.openai.com";
-
-/// The default environment variable for the API key.
-pub const DEFAULT_API_KEY_ENV: &str = "OPENAI_API_KEY";
 
 /// `text` cut to at most `max` characters, on a `char` boundary.
 pub fn cap_chars(text: &str, max: usize) -> &str {
@@ -168,33 +163,26 @@ pub struct RestEmbedder<H: HttpPost = UreqPost> {
     url: String,
     model: String,
     dimension: usize,
-    api_key_env: String,
+    key: Option<ApiKey>,
 }
 
 impl RestEmbedder<UreqPost> {
-    /// A provider for `settings`, over `ureq`.
-    pub fn new(settings: &EmbeddingSettings) -> Self {
-        Self::with_http(settings, UreqPost::default())
+    /// A provider for `model`, over `ureq`, sending `key` when there is one.
+    pub fn new(model: &RemoteModel, key: Option<ApiKey>) -> Self {
+        Self::with_http(model, key, UreqPost::default())
     }
 }
 
 impl<H: HttpPost> RestEmbedder<H> {
-    /// A provider for `settings` over `http`.
-    pub fn with_http(settings: &EmbeddingSettings, http: H) -> Self {
-        let endpoint = settings
-            .endpoint
-            .as_deref()
-            .unwrap_or(DEFAULT_ENDPOINT)
-            .trim_end_matches('/');
+    /// A provider for `model` over `http`.
+    pub fn with_http(model: &RemoteModel, key: Option<ApiKey>, http: H) -> Self {
+        let endpoint = model.endpoint.trim_end_matches('/');
         Self {
             http,
             url: format!("{endpoint}/v1/embeddings"),
-            model: settings.model.clone(),
-            dimension: settings.dimension as usize,
-            api_key_env: settings
-                .api_key_env
-                .clone()
-                .unwrap_or_else(|| DEFAULT_API_KEY_ENV.to_owned()),
+            model: model.model.clone(),
+            dimension: model.dimension as usize,
+            key: key.filter(|k| !k.is_empty()),
         }
     }
 
@@ -209,14 +197,12 @@ impl<H: HttpPost> RestEmbedder<H> {
             .iter()
             .map(|t| cap_chars(t, MAX_INPUT_CHARS))
             .collect();
-        let key = std::env::var(&self.api_key_env)
-            .ok()
-            .filter(|k| !k.is_empty());
+        let key = self.key.as_ref().map(ApiKey::expose);
         let mut out = Vec::with_capacity(capped.len());
         for group in request_groups(&capped) {
             let inputs = &capped[group];
             let body = serde_json::json!({ "model": self.model, "input": inputs });
-            let response = self.http.post_json(&self.url, key.as_deref(), body)?;
+            let response = self.http.post_json(&self.url, key, body)?;
             for v in parse_response(&response, inputs.len())? {
                 if v.len() < self.dimension {
                     return Err(Error::Embed(format!(
@@ -248,16 +234,11 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    fn settings(dimension: u32) -> EmbeddingSettings {
-        EmbeddingSettings {
-            enabled: true,
-            provider: crate::Provider::Openai,
+    fn settings(dimension: u32) -> RemoteModel {
+        RemoteModel {
+            endpoint: "http://example.invalid/".into(),
             model: "m".into(),
             dimension,
-            max_tokens: 1024,
-            endpoint: Some("http://example.invalid/".into()),
-            api_key_env: Some("SAPPHIRE_BRIDGE_EMBED_TEST_KEY_UNSET".into()),
-            cache_dir: None,
         }
     }
 
@@ -337,7 +318,7 @@ mod tests {
 
     #[test]
     fn results_follow_index_not_response_order() {
-        let e = RestEmbedder::with_http(&settings(4), Fake::new(4));
+        let e = RestEmbedder::with_http(&settings(4), None, Fake::new(4));
         let texts: Vec<String> = ["a", "bb", "ccc"].iter().map(|s| s.to_string()).collect();
         let out = e.embed_texts(&texts).unwrap();
         let firsts: Vec<f32> = out.iter().map(|v| v[0]).collect();
@@ -351,7 +332,7 @@ mod tests {
 
     #[test]
     fn inputs_are_capped_before_sending() {
-        let e = RestEmbedder::with_http(&settings(4), Fake::new(4));
+        let e = RestEmbedder::with_http(&settings(4), None, Fake::new(4));
         let out = e.embed_texts(&["y".repeat(MAX_INPUT_CHARS + 50)]).unwrap();
         assert_eq!(out[0][0], MAX_INPUT_CHARS as f32);
     }
@@ -360,14 +341,14 @@ mod tests {
     fn a_count_mismatch_is_an_error() {
         let mut fake = Fake::new(4);
         fake.drop_one = true;
-        let e = RestEmbedder::with_http(&settings(4), fake);
+        let e = RestEmbedder::with_http(&settings(4), None, fake);
         let texts: Vec<String> = vec!["a".into(), "b".into()];
         assert!(matches!(e.embed_texts(&texts), Err(Error::Embed(_))));
     }
 
     #[test]
     fn longer_vectors_are_cut_to_dimension_and_normalized() {
-        let e = RestEmbedder::with_http(&settings(1024), Fake::new(3000));
+        let e = RestEmbedder::with_http(&settings(1024), None, Fake::new(3000));
         let out = e.embed_texts(&["a".into(), "b".into()]).unwrap();
         for v in out {
             assert_eq!(v.len(), 1024);
@@ -378,7 +359,7 @@ mod tests {
 
     #[test]
     fn shorter_vectors_are_an_error() {
-        let e = RestEmbedder::with_http(&settings(1024), Fake::new(768));
+        let e = RestEmbedder::with_http(&settings(1024), None, Fake::new(768));
         let err = e.embed_texts(&["a".into()]).unwrap_err();
         assert!(matches!(err, Error::Embed(_)), "{err}");
         let msg = err.to_string();
@@ -426,9 +407,42 @@ mod tests {
         assert!(msg.contains("Incorrect API key provided"), "{msg}");
     }
 
+    /// Records the bearer each request carries, and answers with one 4-vector per input.
+    #[derive(Default)]
+    struct BearerSpy(Mutex<Vec<Option<String>>>);
+
+    impl HttpPost for BearerSpy {
+        fn post_json(
+            &self,
+            _url: &str,
+            bearer: Option<&str>,
+            body: serde_json::Value,
+        ) -> Result<serde_json::Value> {
+            self.0.lock().unwrap().push(bearer.map(str::to_owned));
+            let n = body["input"].as_array().unwrap().len();
+            let data: Vec<_> = (0..n)
+                .map(|i| serde_json::json!({ "index": i, "embedding": [1.0, 0.0, 0.0, 0.0] }))
+                .collect();
+            Ok(serde_json::json!({ "data": data }))
+        }
+    }
+
+    #[test]
+    fn the_key_goes_in_the_header_and_only_when_there_is_one() {
+        for (key, want) in [
+            (Some(ApiKey::new("sk-1")), Some("sk-1".to_owned())),
+            (Some(ApiKey::new("  ")), None),
+            (None, None),
+        ] {
+            let e = RestEmbedder::with_http(&settings(4), key, BearerSpy::default());
+            e.embed_texts(&["a".into()]).unwrap();
+            assert_eq!(*e.http.0.lock().unwrap(), vec![want]);
+        }
+    }
+
     #[test]
     fn empty_input_sends_nothing() {
-        let e = RestEmbedder::with_http(&settings(4), Fake::new(4));
+        let e = RestEmbedder::with_http(&settings(4), None, Fake::new(4));
         assert!(e.embed_texts(&[]).unwrap().is_empty());
         assert!(e.http.calls.lock().unwrap().is_empty());
     }

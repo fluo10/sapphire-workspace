@@ -40,6 +40,10 @@ pub enum FrameworkCommand {
     /// List the workgroup's devices, invite one or retire one.
     #[command(subcommand)]
     Device(DeviceCommand),
+    /// Show or change the embedding models (the workgroup's local and remote one), this
+    /// device's switches, and its API key. Needs the running bridge.
+    #[command(subcommand)]
+    Embedding(sapphire_bridge_api::EmbeddingCommand),
 }
 
 impl FrameworkCommand {
@@ -65,6 +69,7 @@ impl FrameworkCommand {
             }
             FrameworkCommand::Workgroup(command) => command.dispatch(version).await,
             FrameworkCommand::Device(command) => command.dispatch(version).await,
+            FrameworkCommand::Embedding(command) => embedding(command, version).await,
         }
     }
 }
@@ -213,7 +218,7 @@ pub enum DeviceCommand {
         /// The device's name or id.
         selector: String,
     },
-    /// Show or set a device's election priority (0-255; 0 = never designated or backup).
+    /// Show or set a device's election priority (0-255; 0 = never primary or secondary).
     /// The election is non-preemptive: raising a priority does not move a role already held.
     Priority {
         /// The device's name or id.
@@ -311,6 +316,18 @@ async fn connect_running(version: &str) -> Result<BridgeClient> {
     BridgeClient::connect_running("cli", version)
         .await
         .map_err(Error::from)
+}
+
+/// `embedding …`: always through the running bridge, whose files these are.
+async fn embedding(command: sapphire_bridge_api::EmbeddingCommand, version: &str) -> Result<i32> {
+    // Connect first: `key set` asks for the key, which is pointless with no bridge to take it.
+    let client = connect_running(version).await?;
+    let request = command.request()?;
+    let report = client.embed_request(request).await?;
+    for line in sapphire_bridge_api::describe(&report) {
+        println!("{line}");
+    }
+    Ok(0)
 }
 
 /// `workspace init`: the server does the creating, over IPC.

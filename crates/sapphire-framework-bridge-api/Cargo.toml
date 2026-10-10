@@ -1,6 +1,6 @@
 [package]
 name = "sapphire-framework-bridge-api"
-version = "2.2.0"
+version = "2.3.0"
 edition.workspace = true
 description = "Control-plane protocol and client for the sapphire-framework bridge"
 license.workspace = true
@@ -8,7 +8,13 @@ repository.workspace = true
 keywords = ["bridge", "ipc", "protocol", "local-first"]
 categories = ["network-programming"]
 
+[features]
+# The `embedding` subcommands both CLIs share.
+cli = ["dep:clap", "dep:rpassword"]
+
 [dependencies]
+clap = { workspace = true, optional = true }
+rpassword = { version = "7", optional = true }
 sapphire-ipc = { package = "sapphire-framework-ipc", version = "0.14.0", path = "../sapphire-framework-ipc" }
 grain-id.workspace = true
 serde.workspace = true
@@ -18,4 +24,5 @@ tokio = { workspace = true, features = ["rt", "sync", "io-util"] }
 tracing.workspace = true
 
 [dev-dependencies]
+clap.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

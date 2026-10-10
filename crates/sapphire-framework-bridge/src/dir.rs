@@ -93,6 +93,16 @@ impl BridgeDir {
         self.root.join("net.toml")
     }
 
+    /// This device's embedding settings (not synced).
+    pub fn embedding_toml(&self) -> PathBuf {
+        self.root.join(crate::embed_settings::SETTINGS_FILE)
+    }
+
+    /// The remote embedding model's API key, readable by the owner only.
+    pub fn embedding_key(&self) -> PathBuf {
+        self.root.join(crate::embed_settings::KEY_FILE)
+    }
+
     /// The routing table.
     pub fn routes_toml(&self) -> PathBuf {
         self.root.join("routes.toml")

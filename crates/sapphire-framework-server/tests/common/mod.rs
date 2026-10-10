@@ -621,15 +621,15 @@ pub async fn settle(hosts: &[&Host]) {
     }
 }
 
-/// Wait until every host's bridge reports `want` as the designated device of its workspace.
-pub async fn await_designated(hosts: &[&Host], want: GrainId) {
+/// Wait until every host's bridge reports `want` as the primary device of its workspace.
+pub async fn await_primary(hosts: &[&Host], want: GrainId) {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let mut all = true;
         for host in hosts {
             let peers = host.bridge().peers().await.expect("peers");
             let ws = host.workspace_id().await;
-            if peers.roles_for(ws).and_then(|r| r.designated) != Some(want) {
+            if peers.roles_for(ws).and_then(|r| r.primary) != Some(want) {
                 all = false;
             }
         }

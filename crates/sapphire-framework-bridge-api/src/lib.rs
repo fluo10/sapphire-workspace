@@ -18,6 +18,19 @@ pub use sapphire_ipc::ManagedBy;
 mod client;
 pub use client::BridgeClient;
 
+mod embed;
+pub use embed::{
+    ApiKey, DEFAULT_DIMENSION, DEFAULT_MAX_TOKENS, DeviceSettings, EmbedDeviceSetParams,
+    EmbedKeySetParams, EmbedModelSetParams, EmbedNote, EmbedRequest, EmbedSettingsResult,
+    LOCAL_MODEL, LocalModel, MAX_TOKENS, ModelSettings, ModelSource, RemoteModel, Slot, SlotModel,
+    describe,
+};
+
+#[cfg(feature = "cli")]
+mod cli;
+#[cfg(feature = "cli")]
+pub use cli::{EmbeddingCommand, KeyCommand, LocalCommand, RemoteCommand, Switch, read_key};
+
 /// The version of the bridge's control-plane API: the methods below and their types.
 ///
 /// It is this crate's major version, parsed at compile time, so the two cannot drift: a
@@ -68,6 +81,16 @@ pub const DEVICE_RETIRE: &str = "bridge.device_retire";
 pub const EMBED_INFO: &str = "embed.info";
 /// Embed texts with the bridge's embedding model.
 pub const EMBED: &str = "embed.embed";
+/// Read the embedding settings and what they resolve to.
+pub const EMBED_SETTINGS: &str = "embed.settings";
+/// Set or clear one model slot.
+pub const EMBED_MODEL_SET: &str = "embed.model_set";
+/// Switch one slot on or off on this device.
+pub const EMBED_DEVICE_SET: &str = "embed.device_set";
+/// Store the remote slot's API key on this device.
+pub const EMBED_KEY_SET: &str = "embed.key_set";
+/// Remove the remote slot's API key from this device.
+pub const EMBED_KEY_CLEAR: &str = "embed.key_clear";
 
 /// Set a device's election priority.
 pub const DEVICE_PRIORITY_SET: &str = "bridge.device_priority_set";
@@ -244,12 +267,12 @@ pub struct UnregisterParams {
 pub struct WorkspaceRoles {
     /// The workspace.
     pub workspace_id: GrainId,
-    /// The designated device, if any candidate exists.
+    /// The primary device, if any candidate exists.
     #[serde(default)]
-    pub designated: Option<GrainId>,
-    /// The backup device, if a second candidate exists.
+    pub primary: Option<GrainId>,
+    /// The secondary device, if a second candidate exists.
     #[serde(default)]
-    pub backup: Option<GrainId>,
+    pub secondary: Option<GrainId>,
 }
 
 /// One device of the workgroup.
@@ -335,6 +358,9 @@ pub struct EmbedInfoResult {
     /// Whether the model is in memory right now (local provider); always true for REST.
     #[serde(default)]
     pub loaded: bool,
+    /// Why embedding is off, or what it lacks while on. Absent from bridges before 2.3.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<EmbedNote>,
 }
 
 /// Parameters of [`EMBED`].
@@ -462,8 +488,10 @@ mod tests {
                 template_version: 1,
             }),
             loaded: true,
+            note: Some(EmbedNote::KeyMissing),
         };
         let back = round_trip(&info);
+        assert_eq!(back.note, Some(EmbedNote::KeyMissing));
         assert!(back.enabled && back.loaded);
         assert_eq!(back.model, info.model);
         let off = serde_json::to_value(EmbedInfoResult::default()).unwrap();
@@ -650,12 +678,12 @@ mod tests {
             peers: Vec::new(),
             roles: vec![WorkspaceRoles {
                 workspace_id: ws,
-                designated: Some(d),
-                backup: None,
+                primary: Some(d),
+                secondary: None,
             }],
         };
 
-        assert_eq!(result.roles_for(ws).unwrap().designated, Some(d));
+        assert_eq!(result.roles_for(ws).unwrap().primary, Some(d));
     }
 
     #[test]

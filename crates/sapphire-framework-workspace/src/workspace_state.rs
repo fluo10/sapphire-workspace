@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 #[cfg(feature = "redb-store")]
 use sapphire_retrieve::open_redb;
@@ -7,7 +7,6 @@ use sapphire_retrieve::{
     Embedder, FileSearchResult, FtsQuery, HybridQuery, RetrieveStore, VectorQuery,
 };
 use sapphire_track::TrackStore;
-use tokio::sync::OnceCell;
 
 use crate::{
     bridge_embedder::BridgeEmbedder,
@@ -57,10 +56,37 @@ pub struct WorkspaceState {
     /// mtime/size-based change-detection store (see [`sapphire_track`]). Unlike the
     /// retrieve backend it is never swapped at runtime, so it needs no lock.
     track_db: Arc<dyn TrackStore + Send + Sync>,
-    /// The bridge's embedder, once asked; `None` inside when the bridge does not embed.
-    embedder: OnceCell<Option<Box<dyn Embedder + Send + Sync>>>,
+    /// The embedder: `None` until the bridge was asked, `Some(None)` when it does not embed.
+    /// Replaced when the bridge switches models (see [`refresh_embedder`](Self::refresh_embedder)).
+    embedder: RwLock<Option<Option<Installed>>>,
     /// See [`WorkspaceState::set_vector_db`].
     vector_db: Mutex<VectorDb>,
+}
+
+/// The embedder in use, with the model the vector store is configured for.
+#[derive(Clone)]
+struct Installed {
+    embedder: Arc<dyn Embedder + Send + Sync>,
+    /// The bridge connection behind it; `None` for one a test installed, never replaced.
+    bridge: Option<Arc<BridgeEmbedder>>,
+    /// The model the store is configured for.
+    info: EmbedModelInfo,
+}
+
+/// Ask the bridge at `endpoint` (default: the standard one) for an embedder.
+fn connect(
+    endpoint: Option<sapphire_ipc::Endpoint>,
+) -> Option<(Arc<BridgeEmbedder>, EmbedModelInfo)> {
+    BridgeEmbedder::connect(endpoint).map(|(e, info)| (Arc::new(e), info))
+}
+
+/// The full-text query `params` ask for.
+fn fts_query<'a>(params: &RetrieveParams<'a>) -> FtsQuery<'a> {
+    let mut q = FtsQuery::new(params.query).limit(params.limit);
+    if let Some(f) = params.folder {
+        q = q.path_prefix(f);
+    }
+    q
 }
 
 /// Vectors are on by default wherever the store can hold them.
@@ -174,7 +200,7 @@ impl WorkspaceState {
             retrieve_db: Mutex::new(backend),
             track_db,
             workspace,
-            embedder: OnceCell::new(),
+            embedder: RwLock::new(None),
             vector_db: Mutex::new(default_vector_db()),
         })
     }
@@ -193,7 +219,7 @@ impl WorkspaceState {
             retrieve_db: Mutex::new(backend),
             track_db,
             workspace,
-            embedder: OnceCell::new(),
+            embedder: RwLock::new(None),
             vector_db: Mutex::new(default_vector_db()),
         })
     }
@@ -213,11 +239,20 @@ impl WorkspaceState {
 
     /// The loaded embedder, if any. `None` until [`load_embedder`](Self::load_embedder) found
     /// one, and always `None` under [`VectorDb::None`].
-    pub fn embedder(&self) -> Option<&dyn Embedder> {
+    pub fn embedder(&self) -> Option<Arc<dyn Embedder + Send + Sync>> {
         if self.vector_db() == VectorDb::None {
             return None;
         }
-        Some(self.embedder.get()?.as_ref()?.as_ref())
+        let slot = self.embedder.read().unwrap_or_else(|e| e.into_inner());
+        Some(Arc::clone(&slot.as_ref()?.as_ref()?.embedder))
+    }
+
+    /// Whether the bridge has been asked for an embedder yet.
+    fn asked(&self) -> bool {
+        self.embedder
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
     }
 
     // ── single-file update API ────────────────────────────────────────────────
@@ -523,22 +558,62 @@ impl WorkspaceState {
 
     /// [`load_embedder`](Self::load_embedder), asking the bridge at `endpoint`.
     fn load_embedder_at(&self, endpoint: Option<sapphire_ipc::Endpoint>) -> Result<()> {
-        if self.embedder.initialized() || !self.wants_embedder()? {
+        if self.asked() || !self.wants_embedder()? {
             return Ok(());
         }
-        self.install_embedder(BridgeEmbedder::connect(endpoint))
+        self.install_embedder(connect(endpoint), false)
     }
 
     /// Async version of [`load_embedder`](Self::load_embedder): the bridge is asked on
     /// `spawn_blocking`.
     pub async fn load_embedder_async(&self) -> Result<()> {
-        if self.embedder.initialized() || !self.wants_embedder()? {
+        if self.asked() || !self.wants_embedder()? {
             return Ok(());
         }
-        let found = tokio::task::spawn_blocking(|| BridgeEmbedder::connect(None))
+        let found = tokio::task::spawn_blocking(|| connect(None))
             .await
             .map_err(|e| Error::Io(std::io::Error::other(e)))?;
-        self.install_embedder(found)
+        self.install_embedder(found, false)
+    }
+
+    /// Ask the bridge again which model it serves, and follow it: a different model or
+    /// dimension reconfigures the vector store (vectors of the old model are dropped and
+    /// their documents become pending), and a bridge that stopped embedding removes the
+    /// embedder, so search falls back to FTS. [`sync_and_embed`](Self::sync_and_embed)
+    /// calls it every time.
+    pub async fn refresh_embedder(&self) -> Result<()> {
+        self.refresh_embedder_at(None).await
+    }
+
+    /// [`refresh_embedder`](Self::refresh_embedder), asking the bridge at `endpoint`.
+    async fn refresh_embedder_at(&self, endpoint: Option<sapphire_ipc::Endpoint>) -> Result<()> {
+        if !self.wants_embedder()? {
+            return Ok(());
+        }
+        let current = {
+            let slot = self.embedder.read().unwrap_or_else(|e| e.into_inner());
+            match slot.as_ref().and_then(Option::as_ref) {
+                // Installed by a test: there is no bridge to follow.
+                Some(Installed { bridge: None, .. }) => return Ok(()),
+                Some(Installed {
+                    bridge: Some(bridge),
+                    ..
+                }) => Some(Arc::clone(bridge)),
+                None => None,
+            }
+        };
+        let found = tokio::task::spawn_blocking(move || match current {
+            // The same connection, asked again; a broken one is replaced.
+            Some(bridge) => match bridge.current() {
+                Ok(Some(info)) => Some((bridge, info)),
+                Ok(None) => None,
+                Err(_) => connect(endpoint),
+            },
+            None => connect(endpoint),
+        })
+        .await
+        .map_err(|e| Error::Io(std::io::Error::other(e)))?;
+        self.install_embedder(found, true)
     }
 
     /// Install `e` as the embedder for a `model` of `dim` dimensions, without a bridge.
@@ -554,11 +629,19 @@ impl WorkspaceState {
         model: &str,
         dim: u32,
     ) -> Result<()> {
-        if self.embedder.initialized() || !self.wants_embedder()? {
+        if self.asked() || !self.wants_embedder()? {
             return Ok(());
         }
         self.retrieve_db().configure_vectors(model, dim)?;
-        let _ = self.embedder.set(Some(e));
+        *self.embedder.write().unwrap_or_else(|e| e.into_inner()) = Some(Some(Installed {
+            embedder: Arc::from(e),
+            bridge: None,
+            info: EmbedModelInfo {
+                model: model.to_owned(),
+                dimension: dim,
+                template_version: 0,
+            },
+        }));
         Ok(())
     }
 
@@ -574,17 +657,47 @@ impl WorkspaceState {
     }
 
     /// Configure the vector store for what the bridge answered, and keep the embedder.
-    fn install_embedder(&self, found: Option<(BridgeEmbedder, EmbedModelInfo)>) -> Result<()> {
-        let embedder: Option<Box<dyn Embedder + Send + Sync>> = match found {
-            Some((embedder, info)) => {
-                self.retrieve_db()
-                    .configure_vectors(&info.model, info.dimension)?;
-                Some(Box::new(embedder))
+    ///
+    /// A first probe (`replace` false) keeps an embedder a concurrent caller installed
+    /// first; a refresh replaces it. The store is reconfigured only when the model changed.
+    fn install_embedder(
+        &self,
+        found: Option<(Arc<BridgeEmbedder>, EmbedModelInfo)>,
+        replace: bool,
+    ) -> Result<()> {
+        let mut slot = self.embedder.write().unwrap_or_else(|e| e.into_inner());
+        if slot.is_some() && !replace {
+            return Ok(());
+        }
+        let installed = match found {
+            Some((bridge, info)) => {
+                let configured = slot.as_ref().and_then(Option::as_ref).map(|i| &i.info);
+                if configured != Some(&info) {
+                    if configured.is_some() {
+                        tracing::info!(
+                            "the bridge now embeds with {} ({} dimensions); re-embedding",
+                            info.model,
+                            info.dimension
+                        );
+                    }
+                    self.retrieve_db()
+                        .configure_vectors(&info.model, info.dimension)?;
+                    bridge.set_info(info.clone());
+                }
+                Some(Installed {
+                    embedder: Arc::clone(&bridge) as Arc<dyn Embedder + Send + Sync>,
+                    bridge: Some(bridge),
+                    info,
+                })
             }
-            None => None,
+            None => {
+                if slot.as_ref().is_some_and(Option::is_some) {
+                    tracing::info!("the bridge no longer embeds; search falls back to FTS");
+                }
+                None
+            }
         };
-        // A concurrent caller may have won the race; its embedder is as good as this one.
-        let _ = self.embedder.set(embedder);
+        *slot = Some(installed);
         Ok(())
     }
 
@@ -640,7 +753,7 @@ impl WorkspaceState {
         let (upserted, removed) =
             sync_workspace(&self.workspace, self.retrieve_db(), self.track_db())?;
 
-        if let Err(e) = self.load_embedder_async().await {
+        if let Err(e) = self.refresh_embedder().await {
             tracing::warn!("could not load the embedder; documents stay pending: {e}");
             return Ok((upserted, removed, 0));
         }
@@ -648,7 +761,7 @@ impl WorkspaceState {
             return Ok((upserted, removed, 0));
         };
 
-        let embedded = match self.retrieve_db().embed_pending(embedder, &|_, _| {}) {
+        let embedded = match self.retrieve_db().embed_pending(&*embedder, &|_, _| {}) {
             Ok(n) => n,
             Err(e) => {
                 tracing::warn!("embedding failed; documents stay pending: {e}");
@@ -665,7 +778,7 @@ impl WorkspaceState {
         let Some(embedder) = self.embedder() else {
             return Ok(0);
         };
-        Ok(self.retrieve_db().embed_pending(embedder, &on_progress)?)
+        Ok(self.retrieve_db().embed_pending(&*embedder, &on_progress)?)
     }
 
     // ── info ──────────────────────────────────────────────────────────────────
@@ -713,20 +826,20 @@ impl WorkspaceState {
         };
 
         let results = match effective_mode {
-            SearchMode::Fts => {
-                let mut q = FtsQuery::new(params.query).limit(params.limit);
-                if let Some(f) = params.folder {
-                    q = q.path_prefix(f);
-                }
-                self.retrieve_db().search_fts(&q)?
-            }
+            SearchMode::Fts => self.retrieve_db().search_fts(&fts_query(params))?,
             SearchMode::Semantic => {
                 let embedder = self.embedder().expect("caller verified embedder exists");
-                let mut vq = VectorQuery::new(params.query, embedder).limit(params.limit);
+                let mut vq = VectorQuery::new(params.query, &*embedder).limit(params.limit);
                 if let Some(f) = params.folder {
                     vq = vq.path_prefix(f);
                 }
-                self.retrieve_db().search_similar(&vq)?
+                match self.retrieve_db().search_similar(&vq) {
+                    Err(sapphire_retrieve::Error::Embed(e)) => {
+                        tracing::warn!("the query could not be embedded; searching FTS: {e}");
+                        self.retrieve_db().search_fts(&fts_query(params))?
+                    }
+                    other => other?,
+                }
             }
             SearchMode::Hybrid => {
                 let mut hq = HybridQuery::new(params.query)
@@ -734,13 +847,20 @@ impl WorkspaceState {
                     .rrf_k(hybrid_config.rrf_k as f64)
                     .weight_fts(hybrid_config.fts_weight)
                     .weight_sem(1.0 - hybrid_config.fts_weight);
-                if let Some(e) = self.embedder() {
-                    hq = hq.embedder(e);
+                let embedder = self.embedder();
+                if let Some(e) = &embedder {
+                    hq = hq.embedder(&**e);
                 }
                 if let Some(f) = params.folder {
                     hq = hq.path_prefix(f);
                 }
-                self.retrieve_db().search_hybrid(&hq)?
+                match self.retrieve_db().search_hybrid(&hq) {
+                    Err(sapphire_retrieve::Error::Embed(e)) => {
+                        tracing::warn!("the query could not be embedded; searching FTS: {e}");
+                        self.retrieve_db().search_fts(&fts_query(params))?
+                    }
+                    other => other?,
+                }
             }
         };
 
@@ -1095,6 +1215,81 @@ mod tests {
 
             assert_eq!(upserted, 3);
             assert_eq!(embedded, 0);
+        }
+
+        fn other_3d() -> sapphire_bridge_api::EmbedInfoResult {
+            sapphire_bridge_api::EmbedInfoResult {
+                enabled: true,
+                model: Some(EmbedModelInfo {
+                    model: "other-3d".into(),
+                    dimension: 3,
+                    template_version: 0,
+                }),
+                ..Default::default()
+            }
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn a_refresh_follows_the_bridge_to_another_model_and_off() {
+            use crate::bridge_embedder::testing::FakeBridge;
+
+            let (_tmp, state) = make_state();
+            let dir = tempfile::tempdir().unwrap();
+            let bridge = FakeBridge::enabled(dir.path());
+            let endpoint = Some(bridge.endpoint.clone());
+
+            state.refresh_embedder_at(endpoint.clone()).await.unwrap();
+            assert_eq!(state.embed_pending(|_, _| {}).unwrap(), 2);
+            assert_eq!(state.db_info().unwrap().embedding_dim, 2);
+
+            // The same model again: nothing is dropped.
+            state.refresh_embedder_at(endpoint.clone()).await.unwrap();
+            assert_eq!(state.db_info().unwrap().vector_count, 2);
+
+            // Another model: the store follows, and the documents are pending again.
+            bridge.set_info(other_3d());
+            state.refresh_embedder_at(endpoint.clone()).await.unwrap();
+            let info = state.db_info().unwrap();
+            assert_eq!((info.embedding_dim, info.vector_count), (3, 0));
+            assert_eq!(state.embed_pending(|_, _| {}).unwrap(), 2);
+
+            // Switched off: no embedder, and semantic search is FTS.
+            bridge.set_info(Default::default());
+            state.refresh_embedder_at(endpoint).await.unwrap();
+            assert!(state.embedder().is_none());
+            let hits = state
+                .retrieve_files(&params("banana"), &HybridConfig::default())
+                .unwrap();
+            assert!(hits[0].path.ends_with("banana.md"), "{hits:?}");
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn a_query_against_a_switched_model_falls_back_to_fts() {
+            use crate::bridge_embedder::testing::FakeBridge;
+
+            let (_tmp, state) = make_state();
+            let dir = tempfile::tempdir().unwrap();
+            let bridge = FakeBridge::enabled(dir.path());
+            state
+                .refresh_embedder_at(Some(bridge.endpoint.clone()))
+                .await
+                .unwrap();
+            state.embed_pending(|_, _| {}).unwrap();
+
+            // The bridge switched, and this state has not refreshed yet.
+            bridge.set_info(other_3d());
+            for mode in [SearchMode::Semantic, SearchMode::Hybrid] {
+                let hits = state
+                    .retrieve_files(
+                        &RetrieveParams {
+                            mode,
+                            ..params("banana")
+                        },
+                        &HybridConfig::default(),
+                    )
+                    .unwrap();
+                assert!(hits[0].path.ends_with("banana.md"), "{mode:?}: {hits:?}");
+            }
         }
 
         /// Fails every call, like a bridge whose provider is down.

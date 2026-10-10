@@ -13,7 +13,7 @@
 - Builds on: #184 (one document per file). Branch `feat/bridge-embed` is stacked on
   `feat/remove-chunker` (PR #196).
 - Related: #183 (spike: Qwen3-VL-Embedding-2B on CPU), #186 (workgroup-shared settings, API
-  key store, CLI/GUI), #187 (synced vector files), #188 (backfill on the designated device).
+  key store, CLI/GUI), #187 (synced vector files), #188 (backfill on the primary device).
 
 ## Background
 
@@ -53,7 +53,9 @@ The fix is to move embedding into the bridge, which is the one per-host daemon:
 4. **REST stays as a provider**, for OpenAI-compatible endpoints. It gets the #194 fixes.
 5. **Settings live in `<bridge dir>/embedding.toml` for now.** The file is per device and not
    synced. #186 moves the shared part to the workgroup root and adds key storage, the CLI and
-   the GUI. This spec defines only the file and its reading.
+   the GUI. This spec defines only the file and its reading. *Superseded by
+   `2026-10-10-embedding-settings-design.md`: the layout below, `provider` and `api_key_env`
+   are gone.*
 6. **No embedding is a normal state.** A missing or disabled configuration, a stopped bridge
    or a model that failed to load all mean the app searches with FTS only. None of them is an
    error.
@@ -314,6 +316,6 @@ follow-up issue is filed there. Timer and agent do not configure embedding.
 
 - Workgroup-shared settings, the API key store, and the CLI and GUI for settings: #186.
 - Synced vector files and the template and model header: #187.
-- Backfill on the designated device: #188.
+- Backfill on the primary device: #188.
 - Image embedding: text only for now.
 - GPU backends.

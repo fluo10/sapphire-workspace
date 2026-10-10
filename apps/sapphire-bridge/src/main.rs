@@ -1,10 +1,12 @@
 //! The host-wide sapphire daemon.
 //!
 //! Running it with no subcommand starts the bridge (`serve`); every other subcommand is a
-//! one-shot command against a running one. Two of them work directly on the bridge directory
+//! one-shot command against a running one. Some work directly on the bridge directory
 //! instead — `workgroup create`, because there is nothing to ask about a workgroup that does
 //! not exist yet, and `device retire`, because the control plane has no method for it. Both
-//! then see their effect immediately: the ledger is re-read on every authorization.
+//! then see their effect immediately: the ledger is re-read on every authorization. The
+//! `embedding` commands write the files themselves only when no bridge runs, so a device can
+//! be set up before its bridge starts.
 //!
 //! `service install` registers this binary with the OS service manager: a unit that runs
 //! `sapphire-bridge serve` and nothing else, described by [`bridge_service_spec`] through

@@ -27,8 +27,8 @@ const HEADER: &str = "\
 # node_id     optional. The device's iroh node id: 64 lowercase hex digits.
 #             Filled in when the device pairs. Unique within the ledger.
 # description optional. A note for you; the system never reads it.
-# priority    optional, 0-255, default 1. Higher is preferred as the designated
-#             device. 0: never designated or backup.
+# priority    optional, 0-255, default 1. Higher is preferred as the primary
+#             device. 0: never primary or secondary.
 # created_at  optional. Filled in when the record is written.
 # retired_at  optional. Set by `device retire`. The record stays, because
 #             synced content refers to this device's id forever.
@@ -60,7 +60,7 @@ pub struct Device {
     pub node_id: Option<String>,
     /// A note for the user; the system never reads it.
     pub description: Option<String>,
-    /// How strongly this device is preferred as a workspace's designated device. `0` opts
+    /// How strongly this device is preferred as a workspace's primary device. `0` opts
     /// it out of the election entirely.
     #[serde(default = "default_priority")]
     pub priority: u8,

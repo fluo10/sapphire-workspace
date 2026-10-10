@@ -223,10 +223,18 @@ CLI は全アプリ共通のフラット語彙 `serve` / `status` / `service` / 
    spawn 機構自体の再設計は Phase 2 の後続 issue で扱う。
 4. **埋め込み** — ホストに 1 つだけモデルを持つ。制御面の `embed.info` / `embed.embed` で
    bridge の埋め込みコンポーネント（`sapphire-framework-bridge-embed`、Qwen3-VL-Embedding-2B を
-   CPU で、または OpenAI 互換 REST）がベクトルを作る。設定は `<bridge dir>/embedding.toml`
-   （`enabled` / `provider` / `model` / `dimension` / `max_tokens`、`provider = "openai"` は
-   `endpoint` / `api_key_env`）。ワーカーは 1 本で、最初の要求でモデルをロードし、10 分間要求が
-   無ければアンロードする。埋め込みが無効・モデルのロード失敗・bridge 停止はいずれも異常ではなく、
+   CPU で、または OpenAI 互換 REST）がベクトルを作る。設定は持ち主ごとに 3 か所（#186）:
+   モデルは workgroup で共通 — ローカル 1 つとリモート 1 つの枠を `<workgroup root>/embedding.toml`
+   に置き、同期する。デバイスごと（同期しない）には枠ごとの on/off（未設定は自動: ローカルは
+   AVX2 が無ければ off、リモートは on）とキャッシュ置き場を `<bridge dir>/embedding.toml` に、
+   リモートの API キーを `<bridge dir>/embedding.key`（0600）に置く。使うのはリモートが on なら
+   リモート、でなければローカル。設定は `embedding` コマンド（bridge とアプリの CLI）、
+   SyncPanel の Embedding 画面、制御面の `embed.settings` / `embed.model_set` /
+   `embed.device_set` / `embed.key_set` / `embed.key_clear` で変える。bridge は設定が変わると
+   その場でプロバイダを作り直し（設定の呼び出し後と、ステータス周期 5 秒ごと — 他デバイスが
+   変えたモデルは同期された workgroup root から届く）、アプリは `sync_and_embed` のたびに
+   `embed.info` を聞き直してベクトルの保存先を合わせる。ワーカーは 1 本で、最初の要求でモデルを
+   ロードし、10 分間要求が無ければアンロードする。埋め込みが無効・モデルのロード失敗・bridge 停止はいずれも異常ではなく、
    アプリは FTS のみで検索する。**bridge ライブラリ（`sapphire-framework-bridge`）はこの
    コンポーネントに依存しない** — 定義するのは `EmbedProvider` フックだけで、実装を注入するのは
    bridge バイナリか、bridge をプロセス内に持つアプリである。プロバイダ無しの bridge は
@@ -247,7 +255,7 @@ CLI は `sapphire-bridge`（`serve` / `status` / `service` / `workspace` / `work
 
 ### 代表デバイスとスター型同期（#182）
 
-ワークスペースごとに、代表（designated）デバイスと予備（backup）デバイスが 1 台ずつ選ばれる。
+ワークスペースごとに、代表（primary）デバイスと予備（secondary）デバイスが 1 台ずつ選ばれる。
 決め手は 2 つ: デバイス台帳の priority（手動。0 なら選出に参加しない）と、bridge 同士が
 `sapphire/hello/1` で交換する Hello（10 秒間隔、40 秒で到達不能とみなす）。選出は
 ワークスペースごとに非先取り（non-preemptive）で、すでに役割を持つデバイスは、あとから来た
@@ -257,7 +265,7 @@ CLI は `sapphire-bridge`（`serve` / `status` / `service` / `workspace` / `work
 が 1 台だけでも代表は選ばれ、priority 0 の他のデバイスはその代表を介してのみ同期する。代表が
 選ばれない場合（候補がいない＝全員 priority 0、旧版の bridge だけ、など）や、起動直後でまだ誰も
 代表を名乗っていない間は、従来どおりのフルメッシュになる。
-詳細は[設計仕様](superpowers/specs/2026-10-08-designated-device-design.md)。
+詳細は[設計仕様](superpowers/specs/2026-10-08-primary-device-design.md)。
 
 ### セッションはエンドツーエンド
 

@@ -15,12 +15,12 @@ pub(crate) enum Link {
     Skip,
 }
 
-/// The link rule. With no designated device for the workspace, the mesh rule applies
+/// The link rule. With no primary device for the workspace, the mesh rule applies
 /// unchanged, as [`topology`] reports. Otherwise only a pair with at least one hub (the
-/// designated or the backup device) in it links.
+/// primary or the secondary device) in it links.
 pub(crate) fn link(me: GrainId, peer: GrainId, roles: Option<&WorkspaceRoles>) -> Link {
-    let hub = |d: GrainId| roles.is_some_and(|r| r.designated == Some(d) || r.backup == Some(d));
-    let star = roles.is_some_and(|r| r.designated.is_some());
+    let hub = |d: GrainId| roles.is_some_and(|r| r.primary == Some(d) || r.secondary == Some(d));
+    let star = roles.is_some_and(|r| r.primary.is_some());
     if star && !hub(me) && !hub(peer) {
         Link::Skip
     } else if me < peer {
@@ -32,8 +32,8 @@ pub(crate) fn link(me: GrainId, peer: GrainId, roles: Option<&WorkspaceRoles>) -
 
 /// What `sync.status` reports for these roles.
 pub(crate) fn topology(roles: Option<&WorkspaceRoles>) -> proto::Topology {
-    match roles.and_then(|r| r.designated.map(|d| (d, r.backup))) {
-        Some((designated, backup)) => proto::Topology::Star { designated, backup },
+    match roles.and_then(|r| r.primary.map(|d| (d, r.secondary))) {
+        Some((primary, secondary)) => proto::Topology::Star { primary, secondary },
         None => proto::Topology::Mesh,
     }
 }
@@ -51,8 +51,8 @@ mod tests {
     fn roles(ws: GrainId, d: Option<GrainId>, b: Option<GrainId>) -> WorkspaceRoles {
         WorkspaceRoles {
             workspace_id: ws,
-            designated: d,
-            backup: b,
+            primary: d,
+            secondary: b,
         }
     }
 
@@ -78,7 +78,7 @@ mod tests {
 
     #[test]
     fn two_non_hubs_skip_each_other() {
-        let id = sorted(4); // id[0] designated, id[1] backup, id[2] and id[3] neither
+        let id = sorted(4); // id[0] primary, id[1] secondary, id[2] and id[3] neither
         let r = roles(GrainId::random(), Some(id[0]), Some(id[1]));
         assert_eq!(link(id[2], id[3], Some(&r)), Link::Skip);
         assert_eq!(link(id[3], id[2], Some(&r)), Link::Skip);
@@ -105,7 +105,7 @@ mod tests {
     }
 
     #[test]
-    fn backup_only_roles_are_the_mesh() {
+    fn secondary_only_roles_are_the_mesh() {
         let id = sorted(3);
         let r = roles(GrainId::random(), None, Some(id[2]));
         assert_eq!(link(id[0], id[1], Some(&r)), Link::Dial);
@@ -113,11 +113,11 @@ mod tests {
         assert_eq!(topology(Some(&r)), proto::Topology::Mesh);
     }
 
-    /// Every pair of me / peer drawn from designated, backup and two non-hubs, under every
+    /// Every pair of me / peer drawn from primary, secondary and two non-hubs, under every
     /// assignment of ids to those roles, so both id orders are covered for each pair.
     #[test]
     fn link_covers_every_role_pair_in_both_id_orders() {
-        // Role slots: 0 designated, 1 backup, 2 and 3 neither.
+        // Role slots: 0 primary, 1 secondary, 2 and 3 neither.
         let perms: Vec<[usize; 4]> = {
             let mut out = Vec::new();
             for a in 0..4 {
@@ -190,26 +190,26 @@ mod tests {
     #[test]
     fn named_cases_against_the_hubs() {
         let id = sorted(4);
-        // Non-hub against the backup, both orders.
+        // Non-hub against the secondary, both orders.
         let r = roles(GrainId::random(), Some(id[3]), Some(id[1]));
         assert_eq!(link(id[0], id[1], Some(&r)), Link::Dial);
         assert_eq!(link(id[2], id[1], Some(&r)), Link::Await);
-        // A non-hub whose id is greater than the designated's awaits it.
+        // A non-hub whose id is greater than the primary's awaits it.
         let r = roles(GrainId::random(), Some(id[0]), Some(id[1]));
         assert_eq!(link(id[3], id[0], Some(&r)), Link::Await);
-        // A designated whose id is lower than a non-hub's dials it.
+        // A primary whose id is lower than a non-hub's dials it.
         assert_eq!(link(id[0], id[3], Some(&r)), Link::Dial);
     }
 
     #[test]
-    fn topology_is_star_only_with_a_designated_device() {
+    fn topology_is_star_only_with_a_primary_device() {
         let d = GrainId::random();
         assert_eq!(topology(None), proto::Topology::Mesh);
         assert_eq!(
             topology(Some(&roles(GrainId::random(), Some(d), None))),
             proto::Topology::Star {
-                designated: d,
-                backup: None
+                primary: d,
+                secondary: None
             }
         );
     }

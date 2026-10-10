@@ -114,9 +114,9 @@ pub(crate) struct Hello {
     #[serde(default)]
     pub hosting: Vec<GrainId>,
     #[serde(default)]
-    pub designated: Vec<GrainId>,
+    pub primary: Vec<GrainId>,
     #[serde(default)]
-    pub backup: Vec<GrainId>,
+    pub secondary: Vec<GrainId>,
 }
 
 /// The longest Hello line read; a longer one is unreadable and ends the link.
@@ -350,8 +350,8 @@ mod tests {
             priority: 1,
             availability: None,
             hosting: vec![],
-            designated: vec![],
-            backup: vec![],
+            primary: vec![],
+            secondary: vec![],
         }
     }
 
@@ -384,15 +384,15 @@ mod tests {
         let ws = GrainId::random();
         let mut ids = [GrainId::random(), GrainId::random(), GrainId::random()];
         ids.sort();
-        // `old` outranks the rest and holds the designated role; `live` is its backup.
+        // `old` outranks the rest and holds the primary role; `live` is its secondary.
         let (me, live, old) = (ids[0], ids[1], ids[2]);
-        let hello = |id: GrainId, designated: bool, backup: bool| Hello {
+        let hello = |id: GrainId, primary: bool, secondary: bool| Hello {
             device_id: id,
             priority: 9,
             availability: None,
             hosting: vec![ws],
-            designated: if designated { vec![ws] } else { vec![] },
-            backup: if backup { vec![ws] } else { vec![] },
+            primary: if primary { vec![ws] } else { vec![] },
+            secondary: if secondary { vec![ws] } else { vec![] },
         };
         let heard = || vec![hello(old, true, false), hello(live, false, true)];
         let mut elector = Elector::new(me, Duration::ZERO);
@@ -405,13 +405,13 @@ mod tests {
 
         let before = [device(me, false), device(live, false), device(old, false)];
         let (_, roles) = elector.step(t0, &own, &electable(heard(), &before));
-        assert_eq!(roles[&ws].designated, Some(old));
+        assert_eq!(roles[&ws].primary, Some(old));
 
         // `old` is retired while its link is up: it is still heard, but loses the role.
         let after = [device(me, false), device(live, false), device(old, true)];
         let (_, roles) = elector.step(t0, &own, &electable(heard(), &after));
-        assert_eq!(roles[&ws].designated, Some(live), "the backup takes over");
-        assert_ne!(roles[&ws].backup, Some(old));
+        assert_eq!(roles[&ws].primary, Some(live), "the secondary takes over");
+        assert_ne!(roles[&ws].secondary, Some(old));
     }
 
     #[test]

@@ -112,7 +112,7 @@ pub struct SyncRuntime {
     /// synced has none, so a dial or a push for it is a no-op rather than an error.
     live: Mutex<HashMap<PathBuf, Arc<LivePeers>>>,
     /// The bridge's last answer to `peers`, roles included. The inbound guard and
-    /// [`is_designated`](SyncRuntime::is_designated) read it rather than asking again.
+    /// [`is_primary`](SyncRuntime::is_primary) read it rather than asking again.
     last_peers: Mutex<Option<PeersResult>>,
 }
 
@@ -1044,12 +1044,12 @@ impl SyncRuntime {
         topology::link(me, peer, roles) == topology::Link::Skip
     }
 
-    /// Whether this host is `workspace_id`'s designated device, by the last roles the
+    /// Whether this host is `workspace_id`'s primary device, by the last roles the
     /// bridge reported. `false` when the bridge has not answered yet, or when this host's
     /// device id is not known yet (no workspace was enabled). Reads the cached id only:
     /// asking the bridge here would register with an empty workspace list, racing
     /// `enable`'s registration.
-    pub async fn is_designated(&self, workspace_id: GrainId) -> bool {
+    pub async fn is_primary(&self, workspace_id: GrainId) -> bool {
         let Some(&me) = self.device_id.get() else {
             return false;
         };
@@ -1057,7 +1057,7 @@ impl SyncRuntime {
         cached
             .as_ref()
             .and_then(|p| p.roles_for(workspace_id))
-            .is_some_and(|r| r.designated == Some(me))
+            .is_some_and(|r| r.primary == Some(me))
     }
 
     /// This host's device id, asked of the bridge once.

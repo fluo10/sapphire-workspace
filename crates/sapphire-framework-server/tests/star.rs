@@ -1,6 +1,6 @@
 //! The star topology, end to end.
 //!
-//! Bridges elect a designated and a backup device per workspace from the priorities their
+//! Bridges elect a primary and a secondary device per workspace from the priorities their
 //! Hellos carry. An app server that holds neither role syncs only with those two hubs; with
 //! no candidates every device falls back to the mesh. These tests drive real hosts on one
 //! loopback network through relay, takeover, no preemption, an election among a
@@ -87,12 +87,12 @@ async fn await_session_to(host: &common::Host, peer: GrainId) {
     }
 }
 
-/// The designated device `host`'s bridge reports for its workspace, right now.
-async fn designated(host: &common::Host) -> Option<GrainId> {
+/// The primary device `host`'s bridge reports for its workspace, right now.
+async fn primary(host: &common::Host) -> Option<GrainId> {
     let peers = host.bridge().peers().await.expect("peers");
     peers
         .roles_for(host.workspace_id().await)
-        .and_then(|r| r.designated)
+        .and_then(|r| r.primary)
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -111,7 +111,7 @@ async fn an_edit_between_two_non_hubs_travels_through_the_hub() {
     let (a, s, b, c) = (&hosts[0], &hosts[1], &hosts[2], &hosts[3]);
     let (a_id, s_id) = (a.device_id().await, s.device_id().await);
     let (b_id, c_id) = (b.device_id().await, c.device_id().await);
-    common::await_designated(&hosts.iter().collect::<Vec<_>>(), a_id).await;
+    common::await_primary(&hosts.iter().collect::<Vec<_>>(), a_id).await;
 
     // The star is applied once each non-hub talks to exactly the two hubs: any direct B–C
     // session a pre-election dial walk opened has been closed by then.
@@ -135,7 +135,7 @@ async fn an_edit_between_two_non_hubs_travels_through_the_hub() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_backup_takes_over_when_the_designated_device_stops() {
+async fn the_secondary_takes_over_when_the_primary_device_stops() {
     let net = LoopbackNetwork::new();
     let mut hosts = common::star_hosts(
         &net,
@@ -149,11 +149,11 @@ async fn the_backup_takes_over_when_the_designated_device_stops() {
     .await;
     let s_id = hosts[1].device_id().await;
     let a_id = hosts[0].device_id().await;
-    common::await_designated(&hosts.iter().collect::<Vec<_>>(), a_id).await;
+    common::await_primary(&hosts.iter().collect::<Vec<_>>(), a_id).await;
 
     hosts[0].stop().await;
     let rest: Vec<&common::Host> = hosts[1..].iter().collect();
-    common::await_designated(&rest, s_id).await;
+    common::await_primary(&rest, s_id).await;
 
     // The spec's bound — no sync gap longer than one dial pass — is not enforced here; this
     // proves only that the takeover happens and sync then works through the new hub.
@@ -175,11 +175,11 @@ async fn a_returning_device_does_not_take_the_role_back() {
     .await;
     let a_id = hosts[0].device_id().await;
     let s_id = hosts[1].device_id().await;
-    common::await_designated(&hosts.iter().collect::<Vec<_>>(), a_id).await;
+    common::await_primary(&hosts.iter().collect::<Vec<_>>(), a_id).await;
 
     let mut a = hosts.remove(0);
     a.stop().await;
-    common::await_designated(&hosts.iter().collect::<Vec<_>>(), s_id).await;
+    common::await_primary(&hosts.iter().collect::<Vec<_>>(), s_id).await;
     let a = a.restart(&net).await;
     // `restart` leaves sync disabled; enable it the way `star_hosts` does.
     common::enable_sync_after_restart(&a).await;
@@ -187,7 +187,7 @@ async fn a_returning_device_does_not_take_the_role_back() {
     // A, back and hearing the others, must first agree that S holds the role.
     let mut all: Vec<&common::Host> = hosts.iter().collect();
     all.push(&a);
-    common::await_designated(&all, s_id).await;
+    common::await_primary(&all, s_id).await;
 
     // Several dead intervals later, S still holds it. A fixed sleep on purpose: this proves
     // that something does *not* happen, and the check after it is one snapshot, not a poll
@@ -195,9 +195,9 @@ async fn a_returning_device_does_not_take_the_role_back() {
     tokio::time::sleep(Duration::from_secs(3)).await;
     for host in &all {
         assert_eq!(
-            designated(host).await,
+            primary(host).await,
             Some(s_id),
-            "{} no longer reports S as designated",
+            "{} no longer reports S as primary",
             host.node_id()
         );
     }
@@ -206,7 +206,7 @@ async fn a_returning_device_does_not_take_the_role_back() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_workspace_the_top_priority_device_does_not_host_elects_among_its_hosts() {
     // B and C share a workspace that A (priority 3) does not host. Their roles come only
-    // from each other, so B and C are designated and backup — a Star{B, C} — and, being
+    // from each other, so B and C are primary and secondary — a Star{B, C} — and, being
     // the two hubs, they hold a session with each other.
     //
     // The harness gives each host one workspace, so the spec's scenario of A running a star
@@ -234,7 +234,7 @@ async fn a_workspace_the_top_priority_device_does_not_host_elects_among_its_host
             let roles = peers.roles_for(host.workspace_id().await).cloned();
             let named: Vec<GrainId> = roles
                 .iter()
-                .flat_map(|r| [r.designated, r.backup])
+                .flat_map(|r| [r.primary, r.secondary])
                 .flatten()
                 .collect();
             assert!(
@@ -251,7 +251,7 @@ async fn a_workspace_the_top_priority_device_does_not_host_elects_among_its_host
         }
         assert!(
             Instant::now() < deadline,
-            "B and C never became designated and backup"
+            "B and C never became primary and secondary"
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }

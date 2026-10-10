@@ -1,4 +1,4 @@
-# Designated devices: electing a designated and a backup device per workspace, and star-shaped sync around them
+# Primary devices: electing a primary and a secondary device per workspace, and star-shaped sync around them
 
 - Date: 2026-10-08
 - Issues: #182 (election and topology), #190 (availability measurement); tracking: #189
@@ -26,7 +26,7 @@ The first draft of this spec named a single, manually chosen "central device". T
 dropped: a workgroup that moved from a central server (#90) to p2p sync should not grow a
 fixed centre again. This spec instead follows OSPF's designated router (DR) and backup
 designated router (BDR): every device computes, from what it can see, which reachable
-device is the **designated device** and which is the **backup device** for each workspace.
+device is the **primary device** and which is the **secondary device** for each workspace.
 No device is fixed in the role, and losing one costs nothing but a re-election.
 
 Unlike routers, desktops sleep, and laptops (and, later, phones) come and go. So the
@@ -35,20 +35,20 @@ election weighs two things: a manual **priority** (0 opts a device out) and a me
 
 ## Decisions
 
-1. **Elected, not appointed.** No setting names a device as designated. Users influence the
+1. **Elected, not appointed.** No setting names a device as primary. Users influence the
    election only through priority. Setting one device's priority above everyone else's is
    how to pin the role in practice.
 2. **The election tolerates disagreement; the work it guards must be idempotent.** There is
-   no consensus protocol. During a partition, each side elects its own designated device,
+   no consensus protocol. During a partition, each side elects its own primary device,
    and both run background work. That is accepted. The requirement moves to the work instead:
    everything #188 does must be idempotent and converge when two devices do it at once
    (content-addressed vector paths, last-writer-wins with no conflict copies under
    `embedded/`, GC that only deletes what a backfill would recreate). The cost of a
    disagreement is wasted compute, never lost or conflicting data.
 3. **Per workspace.** Candidates for a workspace are the devices whose app server for that
-   workspace is online. A device that does not run agent is never agent's designated device.
+   workspace is online. A device that does not run agent is never agent's primary device.
    So no workspace is ever left without a path.
-4. **Non-preemptive, like OSPF.** A designated device keeps the role while it stays
+4. **Non-preemptive, like OSPF.** A primary device keeps the role while it stays
    reachable, even when a higher-ranked device appears. The role moves only when its holder
    disappears. This is what keeps a sleeping-and-waking desktop from making the topology
    flap.
@@ -56,15 +56,17 @@ election weighs two things: a manual **priority** (0 opts a device out) and a me
    candidates, and every reachable device can say its own availability. The ledger (synced)
    holds only what a person sets, the priority. Nothing measured is written into synced
    files, so measuring adds no sync traffic and cannot race a priority change.
-6. **Words.** "Designated device" and "backup device" (表示: 代表デバイス / 予備デバイス).
-   "Master" and "central" were both considered and rejected.
+6. **Words.** "Primary device" and "secondary device" (表示: 代表デバイス / 予備デバイス).
+   "Master" and "central" were both considered and rejected. The first version used OSPF's
+   "designated" and "backup"; #198 replaced them with words people outside networking
+   read correctly, and "secondary" fits a device that relays all along rather than waiting.
 
 ## Data
 
 The device record (`<workgroup root>/devices/<id>.toml`) gains:
 
 ```toml
-priority = 1    # 0..=255; 0: never designated or backup. Absent: 1.
+priority = 1    # 0..=255; 0: never primary or secondary. Absent: 1.
 ```
 
 `Device` gets `priority: u8` with `#[serde(default = "default_priority")]` (1). Default 1
@@ -87,8 +89,8 @@ struct Hello {
     priority: u8,                       // as this bridge reads its own ledger record
     availability: Option<Tier>,         // None until #190
     hosting: Vec<GrainId>,              // workspaces whose owning app server is online here
-    designated: Vec<GrainId>,           // workspaces this device holds as designated
-    backup: Vec<GrainId>,               // workspaces this device holds as backup
+    primary: Vec<GrainId>,              // workspaces this device holds as primary
+    secondary: Vec<GrainId>,            // workspaces this device holds as secondary
 }
 ```
 
@@ -107,34 +109,34 @@ failover lags by up to one interval plus the app server's dial interval.
 ```rust
 fn elect(candidates: &[Candidate], promote: bool) -> Roles
 
-struct Roles { designated: Option<GrainId>, backup: Option<GrainId> }
+struct Roles { primary: Option<GrainId>, secondary: Option<GrainId> }
 ```
 
 - **Candidates:** this host and every reachable peer that lists `workspace` in `hosting`,
   with `priority > 0`.
 - **Rank:** `(priority, availability tier, device id)`, highest first. A missing tier ranks
   below every tier.
-- **Designated:** if candidates already claim it, the highest-ranked claimant keeps it, and
-  the others drop their claims. Otherwise, if a candidate claims backup and `promote` is
-  set, the backup is promoted. Otherwise, the highest-ranked candidate.
+- **Primary:** if candidates already claim it, the highest-ranked claimant keeps it, and
+  the others drop their claims. Otherwise, if a candidate claims secondary and `promote` is
+  set, the secondary is promoted. Otherwise, the highest-ranked candidate.
 - **Promotion gate:** `promote` is true only for a workspace in which this `Elector` has
-  previously seen a designated claim. Before that, designated is chosen by rank. A
-  provisional backup claim must not promote itself before the rank-elected designated has
+  previously seen a primary claim. Before that, primary is chosen by rank. A
+  provisional secondary claim must not promote itself before the rank-elected primary has
   claimed, which would make the role flap.
-- **Backup:** the same rule over the candidates other than the designated device, using
-  `backup` claims.
+- **Secondary:** the same rule over the candidates other than the primary device, using
+  `secondary` claims.
 - **Wait timer:** a bridge that has just started (or just started hosting a workspace)
   claims nothing for `DEAD_INTERVAL`, and while it waits it is left out of its own election
   entirely (it still hears its peers). This gives existing claims time to arrive, so a
   device that wakes up does not seize a role that is already held.
-- **No star before a claim:** until this `Elector` has seen a designated claim in a
+- **No star before a claim:** until this `Elector` has seen a primary claim in a
   workspace (its own claim included), it reports `Roles::default()` for that workspace,
   which means mesh. It still runs the election and publishes its claims as usual. On a cold
   start no one has claimed yet, and each waiting host leaves itself out of its own election,
   so hosts elect different hubs. A star built on those views would close working sessions,
   and with four hosts at the default priority it could leave one host with no session at all
-  for about `DEAD_INTERVAL`. Once a designated claim exists, every host agrees on the
-  designated device, so every non-hub keeps a path through it.
+  for about `DEAD_INTERVAL`. Once a primary claim exists, every host agrees on the
+  primary device, so every non-hub keeps a path through it.
 
 Each bridge then publishes its own claims in its next Hello. Two bridges with different
 views can transiently disagree. The claim rule makes them converge in one Hello round once
@@ -145,7 +147,7 @@ they see each other, and decision 2 makes the disagreement harmless meanwhile.
 These changes only add things, so `API_VERSION` stays 2.
 
 - `PeersResult` gains `roles: Vec<WorkspaceRoles>` (`#[serde(default)]`), with
-  `WorkspaceRoles { workspace_id, designated: Option<GrainId>, backup: Option<GrainId> }` for
+  `WorkspaceRoles { workspace_id, primary: Option<GrainId>, secondary: Option<GrainId> }` for
   every hosted workspace, including entries where both roles are `None`. An app server talking to an older bridge reads
   an empty list and stays a mesh.
 - `PeerInfo` gains `priority: u8` and `availability: Option<Tier>` (`#[serde(default)]`), for
@@ -164,7 +166,7 @@ sapphire-bridge device priority <device> <0-255>    # set
 Like `device retire`: with a bridge running it goes through the control-plane method; with
 none running it edits the ledger directly. The change is a write to the synced workgroup
 root, so every device sees it at its next workgroup session. `device list` gains `priority`
-column, plus the workspaces each device is designated or backup for. The `availability`
+column, plus the workspaces each device is primary or secondary for. The `availability`
 column of `device list` belongs to #190.
 The apps' flat `device` directive gains the same verb, pointing at the bridge as the other
 bridge-owned verbs do.
@@ -180,36 +182,36 @@ enum Link { Dial, Await, Skip }
 fn link(me: GrainId, peer: GrainId, roles: &Roles) -> Link
 ```
 
-- A star requires a `designated` device. Roles with only `backup` set, or with nothing set,
+- A star requires a `primary` device. Roles with only `secondary` set, or with nothing set,
   mean mesh, and the existing rule applies: `Dial` only if `me < peer`, otherwise `Await`
   the peer's dial. The bridge reports no roles for a workspace until it has seen a
-  designated claim there (see Election), so the star forms only around a device that has
+  primary claim there (see Election), so the star forms only around a device that has
   claimed the role, and a cold start stays a mesh until then.
-- In a star, if this host is the designated or backup device, the same id rule applies to
+- In a star, if this host is the primary or secondary device, the same id rule applies to
   every peer. They therefore stay linked to everyone, and to each other.
-- Otherwise (this host is neither), a peer that is neither designated nor backup is `Skip`.
-  The designated and backup devices follow the id rule.
+- Otherwise (this host is neither), a peer that is neither primary nor secondary is `Skip`.
+  The primary and secondary devices follow the id rule.
 
 Where the rule applies:
 
 - **`dial_loop` and `sync_now`** filter peers through `link`.
 - **Entering the star.** When roles appear for a workspace and this host is neither, live
   sessions with peers that `link` now skips are closed (`LivePeers::retain(..)`). Nothing is
-  lost: the designated and backup devices hold and relay everything.
+  lost: the primary and secondary devices hold and relay everything.
 - **Inbound sessions.** `run()` drops an announced stream from a peer that `link` would skip.
   Both ends compute from the same Hellos, so this is only a safety net for the moment their
   views differ.
-- **Losing the designated device.** The backup already holds a session with every device, so
-  sync does not pause. The election promotes it within `DEAD_INTERVAL`, a new backup is
+- **Losing the primary device.** The secondary already holds a session with every device, so
+  sync does not pause. The election promotes it within `DEAD_INTERVAL`, a new secondary is
   elected, and the next dial pass links to it. If no candidate is left, `roles` empties and
   the mesh returns.
 - **Relay.** Unchanged. A reader already forwards what one peer sends to every other session
   (`fan_out(.., Some(from))`).
 
-`SyncRuntime::is_designated(workspace) -> bool` is the hook #188 uses. It reads only the
+`SyncRuntime::is_primary(workspace) -> bool` is the hook #188 uses. It reads only the
 cached device id and the last roles the bridge reported, and never registers anything.
 
-Status: each workspace's sync status gains `topology: mesh | star { designated, backup }`,
+Status: each workspace's sync status gains `topology: mesh | star { primary, secondary }`,
 and `sapphire-<app> status` prints it.
 
 ## Availability (#190)
@@ -229,15 +231,15 @@ and `sapphire-<app> status` prints it.
 ## GUI (`sapphire-framework-gui`)
 
 - Device rows: priority (editable, 0–255, through `bridge.device_priority_set`), the
-  availability tier, and badges for the workspaces the device is designated or backup for.
-- Workspace rows: the topology line (`mesh`, or `star: designated X, backup Y`).
+  availability tier, and badges for the workspaces the device is primary or secondary for.
+- Workspace rows: the topology line (`mesh`, or `star: primary X, secondary Y`).
 - No confirmation dialog for priority changes: they can be undone at once and lose nothing.
 
 ## Mixed versions
 
 - An old bridge sends no Hello. Its device is not a candidate.
 - An old app server ignores `roles` and dials the mesh. New non-elected devices drop its
-  inbound sessions while a star is up, but the designated and backup devices accept them. So
+  inbound sessions while a star is up, but the primary and secondary devices accept them. So
   the old device still syncs, through them.
 - An old bridge under a new app server: `roles` is empty, and the mesh is used.
 
@@ -252,9 +254,9 @@ and `sapphire-<app> status` prints it.
 ## Testing
 
 - **Unit, `elect`:** no candidates; priority 0 excluded; rank order; an existing claim
-  survives a higher-ranked newcomer; backup promotion; two conflicting claims resolve to the
+  survives a higher-ranked newcomer; secondary promotion; two conflicting claims resolve to the
   higher rank; the wait timer suppresses claims.
-- **Unit, `link`:** every combination of me / peer × designated / backup / neither, roles
+- **Unit, `link`:** every combination of me / peer × primary / secondary / neither, roles
   empty and present, both id orders.
 - **Unit, availability:** tick counting, sleep detection (wall clock jumps past monotonic),
   tier mapping, the young-history penalty, the 7-day window rolling over.
@@ -262,8 +264,8 @@ and `sapphire-<app> status` prints it.
   converging between two bridges with different starting views. `device priority` with and
   without a running bridge. A retired device is refused.
 - **Integration (three devices, existing sync test harness):**
-  1. With A designated, an edit on B reaches C, and B and C hold no session with each other.
-  2. With A stopped, the backup takes over, and edits still arrive with no gap longer than
+  1. With A primary, an edit on B reaches C, and B and C hold no session with each other.
+  2. With A stopped, the secondary takes over, and edits still arrive with no gap longer than
      a dial pass. (Not enforced by a test.)
   3. A returns and does **not** take the role back (non-preemption).
   4. B and C, which the top-priority device does not host, elect among themselves and sync
