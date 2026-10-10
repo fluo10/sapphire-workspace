@@ -97,10 +97,11 @@ pub fn workspace_router_with_sync(
     /// returned: the caller's write succeeded, and reporting a sync problem as a write
     /// failure would make an unrelated outage look like the caller's.
     async fn scanned(sync: Option<Arc<SyncRuntime>>, root: &std::path::Path, what: &str) {
-        if let Some(runtime) = sync
-            && let Err(err) = runtime.scan(root).await
-        {
-            tracing::warn!(root = %root.display(), "scan after {what} failed: {err}");
+        if let Some(runtime) = sync {
+            if let Err(err) = runtime.scan(root).await {
+                tracing::warn!(root = %root.display(), "scan after {what} failed: {err}");
+            }
+            runtime.request_embed(root);
         }
     }
 

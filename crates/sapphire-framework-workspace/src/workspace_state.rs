@@ -621,8 +621,12 @@ impl WorkspaceState {
         self.refresh_embedder_at(None).await
     }
 
-    /// [`refresh_embedder`](Self::refresh_embedder), asking the bridge at `endpoint`.
-    async fn refresh_embedder_at(&self, endpoint: Option<sapphire_ipc::Endpoint>) -> Result<()> {
+    /// [`refresh_embedder`](Self::refresh_embedder), asking the bridge at `endpoint` (the
+    /// standard one when `None`): for a server whose bridge is not the host's default.
+    pub async fn refresh_embedder_at(
+        &self,
+        endpoint: Option<sapphire_ipc::Endpoint>,
+    ) -> Result<()> {
         if !self.wants_embedder()? {
             return Ok(());
         }

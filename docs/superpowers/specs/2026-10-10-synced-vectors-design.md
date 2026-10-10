@@ -128,7 +128,9 @@ serialised per workspace like the re-index:
 3. `embed_pending_with(policy)`.
 4. On the primary device, `remove_stale_vectors` with the winners' hashes.
 
-Failures are logged and never fail the session, like the re-index.
+A pass is also requested when the dial loop sees this host become a workspace's primary
+device: files that arrived before the election settled would otherwise wait for the next
+change. Failures are logged and never fail the session, like the re-index.
 
 ### sync: the filter
 

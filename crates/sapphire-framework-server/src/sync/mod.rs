@@ -68,6 +68,10 @@ struct Synced {
     last_error: Option<String>,
 }
 
+/// How old a vector file no live content needs must be before the primary device removes
+/// it: a vector can arrive before its file, and a day is far longer than that window.
+const STALE_VECTOR_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
 /// Replication for one application's workspaces.
 pub struct SyncRuntime {
     ctx: &'static AppContext,
@@ -105,6 +109,13 @@ pub struct SyncRuntime {
     /// Serialises re-indexing, so two sessions finishing at once do not both sweep the
     /// workspace through the same store.
     reindexing: Mutex<()>,
+    /// Roots with an embedding pass waiting to run (#187). A request for a root already
+    /// waiting is folded into that pass.
+    embed_wanted: Mutex<std::collections::HashSet<PathBuf>>,
+    /// Serialises embedding passes: one model, one queue.
+    embedding: Mutex<()>,
+    /// The bridge an embedding pass asks for its model; `None` is the host's standard one.
+    bridge_endpoint: Option<sapphire_ipc::Endpoint>,
     /// The live session table of every synced workspace, keyed by canonical root.
     ///
     /// One table per workspace rather than one for the runtime: a session is about one
@@ -134,6 +145,9 @@ impl SyncRuntime {
             watcher: OnceCell::new(),
             host: OnceCell::new(),
             reindexing: Mutex::new(()),
+            embed_wanted: Mutex::new(std::collections::HashSet::new()),
+            embedding: Mutex::new(()),
+            bridge_endpoint: None,
             live: Mutex::new(HashMap::new()),
             last_peers: Mutex::new(None),
         }
@@ -143,6 +157,13 @@ impl SyncRuntime {
     ///
     /// Called by [`AppServer::sync`](crate::AppServer::sync). First writer wins: a runtime
     /// belongs to the server that wired it.
+    /// Embed through the bridge at `endpoint` rather than the host's standard one: for a
+    /// fixture running several hosts in one process.
+    pub fn with_bridge_endpoint(mut self, endpoint: sapphire_ipc::Endpoint) -> SyncRuntime {
+        self.bridge_endpoint = Some(endpoint);
+        self
+    }
+
     pub(crate) fn set_host(&self, host: Arc<WorkspaceHost>) {
         let _ = self.host.set(host);
     }
@@ -502,6 +523,113 @@ impl SyncRuntime {
         }
     }
 
+    /// Run an embedding pass over `root` in the background, after the pass already
+    /// waiting for it if there is one (#187).
+    ///
+    /// The pass reads the vector files that arrived, and computes the missing ones this
+    /// host is responsible for: the files whose winning version this replica wrote, and —
+    /// on the primary device — every other one. It never holds up the caller.
+    pub fn request_embed(self: &Arc<Self>, root: &Path) {
+        let Ok(key) = root.canonicalize() else {
+            return;
+        };
+        let runtime = Arc::clone(self);
+        tokio::spawn(async move {
+            if !runtime.embed_wanted.lock().await.insert(key.clone()) {
+                return;
+            }
+            let _one_at_a_time = runtime.embedding.lock().await;
+            // Taken off the list as the pass starts: a change during the pass asks again.
+            runtime.embed_wanted.lock().await.remove(&key);
+            runtime.embed_pass(&key).await;
+        });
+    }
+
+    /// One embedding pass over `key`. Best-effort, like the re-index: logged, never fatal.
+    async fn embed_pass(&self, key: &Path) {
+        let Some(host) = self.host.get() else {
+            return;
+        };
+        let (workspace_id, replica) = {
+            let synced = self.synced.lock().await;
+            match synced.get(key) {
+                Some(entry) => (entry.workspace_id, Arc::clone(&entry.replica)),
+                None => return,
+            }
+        };
+        let backend = match host.backend(key).await {
+            Ok(backend) => backend,
+            Err(err) => {
+                tracing::warn!(root = %key.display(), "embedding pass: {err}");
+                return;
+            }
+        };
+        let state = Arc::clone(backend.state());
+        if let Err(err) = state
+            .refresh_embedder_at(self.bridge_endpoint.clone())
+            .await
+        {
+            tracing::warn!(root = %key.display(), "embedding pass: {err}");
+            return;
+        }
+        if state.embedder().is_none() {
+            return;
+        }
+        let primary = self.is_primary(workspace_id).await;
+        // The replica's view, read once: which content each path has, and which of those
+        // versions this replica wrote.
+        let (mine, live) = {
+            let replica = replica.lock().await;
+            let me = replica.replica_id();
+            let states = match replica.states() {
+                Ok(states) => states,
+                Err(err) => {
+                    tracing::warn!(root = %key.display(), "embedding pass: {err}");
+                    return;
+                }
+            };
+            let mut mine = HashMap::new();
+            let mut live = std::collections::HashSet::new();
+            for (path, path_state) in states {
+                let winner = path_state.winner();
+                let Some(hash) = winner.content.hash() else {
+                    continue;
+                };
+                let hash = hash.to_hex();
+                if winner.dot.replica == me {
+                    mine.insert(path, hash.clone());
+                }
+                live.insert(hash);
+            }
+            (mine, live)
+        };
+        let root = key.to_owned();
+        let result = tokio::task::spawn_blocking(move || {
+            let policy = |rel: &str, hash: &str| {
+                primary || mine.get(rel).is_some_and(|h| h.as_str() == hash)
+            };
+            let embedded = state.embed_pending_with(&policy)?;
+            let removed = if primary {
+                state.remove_stale_vectors(&live, STALE_VECTOR_AGE)
+            } else {
+                0
+            };
+            Ok::<_, sapphire_workspace::Error>((embedded, removed))
+        })
+        .await;
+        match result {
+            Ok(Ok((embedded, removed))) if embedded > 0 || removed > 0 => tracing::info!(
+                root = %root.display(),
+                embedded,
+                removed,
+                "embedding pass"
+            ),
+            Ok(Ok(_)) => {}
+            Ok(Err(err)) => tracing::warn!(root = %root.display(), "embedding pass: {err}"),
+            Err(err) => tracing::warn!(root = %root.display(), "embedding pass: {err}"),
+        }
+    }
+
     /// Open a session with every peer that will take one.
     pub async fn sync_now(self: &Arc<Self>, root: &Path) -> Result<()> {
         let Ok(key) = root.canonicalize() else {
@@ -665,6 +793,7 @@ impl SyncRuntime {
                 // This is the receiving side: the files are on disk now and nobody else will
                 // index them.
                 driver.reindex(&key).await;
+                driver.request_embed(&key);
                 driver.spawn_reader(table, updates, key, peer);
             });
         }
@@ -764,6 +893,8 @@ impl SyncRuntime {
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut waiting: HashMap<GrainId, std::time::Instant> = HashMap::new();
         let mut failures: HashMap<GrainId, u32> = HashMap::new();
+        // The workspaces this host was the primary device of at the last walk.
+        let mut primary_of: std::collections::HashSet<GrainId> = Default::default();
         loop {
             tick.tick().await;
             let roots = self.roots().await;
@@ -789,6 +920,26 @@ impl SyncRuntime {
                     continue;
                 }
             };
+            // A host that has just become a workspace's primary device owes it the vectors
+            // nobody else computes (#187): files that arrived before the election settled
+            // would otherwise wait for the next change.
+            let ids: Vec<(PathBuf, GrainId)> = self
+                .synced
+                .lock()
+                .await
+                .iter()
+                .map(|(root, entry)| (root.clone(), entry.workspace_id))
+                .collect();
+            for (root, workspace_id) in ids {
+                let primary = peers
+                    .roles_for(workspace_id)
+                    .is_some_and(|r| r.primary == Some(me));
+                if !primary {
+                    primary_of.remove(&workspace_id);
+                } else if primary_of.insert(workspace_id) {
+                    self.request_embed(&root);
+                }
+            }
             let now = std::time::Instant::now();
             // Dial only peers whose device id is greater than ours. Every device dialling
             // every other can deadlock: two hosts that dial each other at once each hold
@@ -911,6 +1062,7 @@ impl SyncRuntime {
         // The session wrote files during the exchange; the index has to catch up before the
         // workspace is searchable again.
         self.reindex(&key).await;
+        self.request_embed(&key);
         self.spawn_reader(Arc::clone(&table), updates, key, device);
         Ok(())
     }
@@ -936,6 +1088,7 @@ impl SyncRuntime {
                         // The files are on disk now (the session guarantees it before
                         // publishing), so the index is behind them until the sweep below.
                         driver.reindex(&key).await;
+                        driver.request_embed(&key);
                         table.fan_out(&batch, Some(from)).await;
                     }
                     // A burst bigger than the channel: the newest is kept and the gap is
@@ -1000,6 +1153,7 @@ impl SyncRuntime {
             if let Err(err) = self.scan(&root).await {
                 tracing::warn!(root = %root.display(), "scan after a local edit failed: {err}");
             }
+            self.request_embed(&root);
             if let Err(err) = self.sync_now(&root).await {
                 tracing::warn!(root = %root.display(), "dial after a local edit failed: {err}");
             }
