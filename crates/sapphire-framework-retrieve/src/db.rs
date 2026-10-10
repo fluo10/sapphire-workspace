@@ -118,6 +118,7 @@ impl RetrieveStore for InMemoryStore {
     fn embed_pending(
         &self,
         _embedder: &dyn Embedder,
+        _source: &dyn crate::retrieve_store::VectorSource,
         _on_progress: &dyn Fn(usize, usize),
     ) -> Result<usize> {
         Ok(0)
@@ -265,9 +266,10 @@ impl RetrieveDb {
     pub fn embed_pending(
         &self,
         embedder: &dyn Embedder,
+        source: &dyn crate::retrieve_store::VectorSource,
         on_progress: impl Fn(usize, usize),
     ) -> Result<usize> {
-        self.store().embed_pending(embedder, &on_progress)
+        self.store().embed_pending(embedder, source, &on_progress)
     }
 
     pub fn vec_info(&self) -> Result<VecInfo> {

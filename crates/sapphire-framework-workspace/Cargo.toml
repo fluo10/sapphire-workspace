@@ -35,7 +35,10 @@ dirs.workspace = true
 uuid.workspace = true
 chrono = { workspace = true }
 md-5 = "0.11"
+# Synced vector files (#187): content addresses, f16 values, a JSON header.
+sha2.workspace = true
+half = "2"
+serde_json.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
-serde_json.workspace = true
