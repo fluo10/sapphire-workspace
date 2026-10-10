@@ -5672,9 +5672,12 @@ dependencies = [
 name = "sapphire-framework-registry"
 version = "0.14.0"
 dependencies = [
+ "base64 0.23.1",
  "chrono",
+ "getrandom 0.4.3",
  "grain-id",
  "serde",
+ "sha2",
  "tempfile",
  "thiserror 2.0.20",
  "toml",
