@@ -59,7 +59,7 @@ pub use events::subscribe_method;
 pub use handlers::{workspace_router, workspace_router_with_sync};
 pub use host::{DEFAULT_IDLE, DEFAULT_MAX_OPEN, WorkspaceHost};
 pub use registry::{HOST_REGISTRY_FILE, HostEntry, HostRegistry};
-pub use sync::{SyncRuntime, SyncStatus, sync_router};
+pub use sync::{BackfillTiming, SyncRuntime, SyncStatus, sync_router};
 
 /// An application's server.
 pub struct AppServer {

@@ -54,6 +54,8 @@ pub struct SyncStatus {
     pub bridge_available: bool,
     /// How the workspace is wired to its peers, by the roles the bridge last reported.
     pub topology: proto::Topology,
+    /// How far embedding has got, when this host embeds (#188).
+    pub embedding: Option<proto::EmbeddingProgress>,
 }
 
 /// One workspace this runtime syncs.
@@ -71,6 +73,29 @@ struct Synced {
 /// How old a vector file no live content needs must be before the primary device removes
 /// it: a vector can arrive before its file, and a day is far longer than that window.
 const STALE_VECTOR_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+/// Texts per embedding request in a server pass: small, so a search query waiting on the
+/// bridge's one worker is never stuck behind a long backfill (#188).
+const PASS_BATCH: usize = 4;
+
+/// How the primary device paces its backfill (#188).
+#[derive(Clone, Copy, Debug)]
+pub struct BackfillTiming {
+    /// How old another device's version must be before the primary embeds it: its author
+    /// has embedded it by then, or will not.
+    pub grace: std::time::Duration,
+    /// How often the primary device runs a pass with nothing prompting it.
+    pub interval: std::time::Duration,
+}
+
+impl Default for BackfillTiming {
+    fn default() -> Self {
+        BackfillTiming {
+            grace: std::time::Duration::from_secs(10 * 60),
+            interval: std::time::Duration::from_secs(10 * 60),
+        }
+    }
+}
 
 /// Replication for one application's workspaces.
 pub struct SyncRuntime {
@@ -114,6 +139,10 @@ pub struct SyncRuntime {
     embed_wanted: Mutex<std::collections::HashSet<PathBuf>>,
     /// Serialises embedding passes: one model, one queue.
     embedding: Mutex<()>,
+    /// Roots whose embedding pass is running now, for `sync.status`.
+    embed_running: Mutex<std::collections::HashSet<PathBuf>>,
+    /// The primary device's backfill pacing (#188).
+    backfill: std::sync::Mutex<BackfillTiming>,
     /// The bridge an embedding pass asks for its model; `None` is the host's standard one.
     bridge_endpoint: Option<sapphire_ipc::Endpoint>,
     /// The live session table of every synced workspace, keyed by canonical root.
@@ -147,6 +176,8 @@ impl SyncRuntime {
             reindexing: Mutex::new(()),
             embed_wanted: Mutex::new(std::collections::HashSet::new()),
             embedding: Mutex::new(()),
+            embed_running: Mutex::new(std::collections::HashSet::new()),
+            backfill: std::sync::Mutex::new(BackfillTiming::default()),
             bridge_endpoint: None,
             live: Mutex::new(HashMap::new()),
             last_peers: Mutex::new(None),
@@ -162,6 +193,16 @@ impl SyncRuntime {
     pub fn with_bridge_endpoint(mut self, endpoint: sapphire_ipc::Endpoint) -> SyncRuntime {
         self.bridge_endpoint = Some(endpoint);
         self
+    }
+
+    /// Pace the primary device's backfill differently: for tests, which cannot wait ten
+    /// minutes.
+    pub fn set_backfill_timing(&self, timing: BackfillTiming) {
+        *self.backfill.lock().expect("backfill timing") = timing;
+    }
+
+    fn backfill_timing(&self) -> BackfillTiming {
+        *self.backfill.lock().expect("backfill timing")
     }
 
     pub(crate) fn set_host(&self, host: Arc<WorkspaceHost>) {
@@ -382,6 +423,7 @@ impl SyncRuntime {
                 last_error: None,
                 bridge_available,
                 topology: proto::Topology::Mesh,
+                embedding: None,
             };
         };
         let synced = self.synced.lock().await;
@@ -398,6 +440,7 @@ impl SyncRuntime {
                         .as_ref()
                         .and_then(|p| p.roles_for(entry.workspace_id)),
                 ),
+                embedding: self.embedding_progress(&key).await,
             },
             None => SyncStatus {
                 enabled: false,
@@ -407,8 +450,24 @@ impl SyncRuntime {
                 last_error: None,
                 bridge_available,
                 topology: proto::Topology::Mesh,
+                embedding: None,
             },
         }
+    }
+
+    /// How far `key`'s embedding has got, when this host embeds it. Reads the open
+    /// workspace's index; never opens one, so a status call stays cheap.
+    async fn embedding_progress(&self, key: &Path) -> Option<proto::EmbeddingProgress> {
+        let host = self.host.get()?;
+        let backend = host.open_backend(key)?;
+        let state = backend.state();
+        state.embedder()?;
+        let info = state.db_info().ok()?;
+        Some(proto::EmbeddingProgress {
+            vectors: info.vector_count,
+            pending: info.pending_count,
+            running: self.embed_running.lock().await.contains(key),
+        })
     }
 
     /// Bring the replica's view of the files up to date.
@@ -541,7 +600,9 @@ impl SyncRuntime {
             let _one_at_a_time = runtime.embedding.lock().await;
             // Taken off the list as the pass starts: a change during the pass asks again.
             runtime.embed_wanted.lock().await.remove(&key);
+            runtime.embed_running.lock().await.insert(key.clone());
             runtime.embed_pass(&key).await;
+            runtime.embed_running.lock().await.remove(&key);
         });
     }
 
@@ -578,7 +639,11 @@ impl SyncRuntime {
         let primary = self.is_primary(workspace_id).await;
         // The replica's view, read once: which content each path has, and which of those
         // versions this replica wrote.
-        let (mine, live) = {
+        let grace_ms = self.backfill_timing().grace.as_millis() as u64;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as u64);
+        let (mine, settled, live) = {
             let replica = replica.lock().await;
             let me = replica.replica_id();
             let states = match replica.states() {
@@ -589,6 +654,8 @@ impl SyncRuntime {
                 }
             };
             let mut mine = HashMap::new();
+            // Other devices' versions old enough for the primary to fill in.
+            let mut settled = HashMap::new();
             let mut live = std::collections::HashSet::new();
             for (path, path_state) in states {
                 let winner = path_state.winner();
@@ -598,17 +665,22 @@ impl SyncRuntime {
                 let hash = hash.to_hex();
                 if winner.dot.replica == me {
                     mine.insert(path, hash.clone());
+                } else if now_ms.saturating_sub(winner.hlc.wall_ms) >= grace_ms {
+                    settled.insert(path, hash.clone());
                 }
                 live.insert(hash);
             }
-            (mine, live)
+            (mine, settled, live)
         };
         let root = key.to_owned();
         let result = tokio::task::spawn_blocking(move || {
+            // The author embeds its own versions at once; the primary device fills in other
+            // devices' versions once they have settled, racing nobody.
             let policy = |rel: &str, hash: &str| {
-                primary || mine.get(rel).is_some_and(|h| h.as_str() == hash)
+                mine.get(rel).is_some_and(|h| h.as_str() == hash)
+                    || (primary && settled.get(rel).is_some_and(|h| h.as_str() == hash))
             };
-            let embedded = state.embed_pending_with(&policy)?;
+            let embedded = state.embed_pending_with(&policy, PASS_BATCH)?;
             let removed = if primary {
                 state.remove_stale_vectors(&live, STALE_VECTOR_AGE)
             } else {
@@ -895,6 +967,8 @@ impl SyncRuntime {
         let mut failures: HashMap<GrainId, u32> = HashMap::new();
         // The workspaces this host was the primary device of at the last walk.
         let mut primary_of: std::collections::HashSet<GrainId> = Default::default();
+        // When the primary device last ran a backfill pass with nothing prompting it.
+        let mut last_backfill = std::time::Instant::now();
         loop {
             tick.tick().await;
             let roots = self.roots().await;
@@ -930,13 +1004,19 @@ impl SyncRuntime {
                 .iter()
                 .map(|(root, entry)| (root.clone(), entry.workspace_id))
                 .collect();
+            // And every so often anyway: an author that never embedded leaves files only the
+            // primary will fill in, and nothing else would prompt it (#188).
+            let backfill_due = last_backfill.elapsed() >= self.backfill_timing().interval;
+            if backfill_due {
+                last_backfill = std::time::Instant::now();
+            }
             for (root, workspace_id) in ids {
                 let primary = peers
                     .roles_for(workspace_id)
                     .is_some_and(|r| r.primary == Some(me));
                 if !primary {
                     primary_of.remove(&workspace_id);
-                } else if primary_of.insert(workspace_id) {
+                } else if primary_of.insert(workspace_id) || backfill_due {
                     self.request_embed(&root);
                 }
             }

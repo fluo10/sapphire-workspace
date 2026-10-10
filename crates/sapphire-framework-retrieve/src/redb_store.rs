@@ -559,7 +559,7 @@ impl RetrieveStore for RedbStore {
         // Set when the loop broke on a fully-failed batch: the caller is told,
         // even if earlier batches embedded (#194).
         let mut broke_early = false;
-        for batch in pending.chunks(100) {
+        for batch in pending.chunks(source.batch_size().max(1)) {
             let texts: Vec<&str> = batch.iter().map(|(_, _, t)| t.as_str()).collect();
             let (vectors, outage): (Vec<(i64, Vec<f32>)>, bool) = match embedder.embed_texts(&texts)
             {
@@ -1574,5 +1574,48 @@ mod tests {
             0
         );
         assert_eq!(store.vec_info().unwrap().pending_count, 1);
+    }
+
+    /// Embeds everything, `n` texts per request.
+    struct SmallBatches(usize);
+    impl crate::retrieve_store::VectorSource for SmallBatches {
+        fn find(&self, _: &str, _: &str) -> Option<Vec<f32>> {
+            None
+        }
+        fn may_embed(&self, _: &str, _: &str) -> bool {
+            true
+        }
+        fn embedded(&self, _: &str, _: &str, _: &[f32]) {}
+        fn batch_size(&self) -> usize {
+            self.0
+        }
+    }
+
+    /// Records how many texts each request carried.
+    struct BatchRecorder(std::sync::Mutex<Vec<usize>>);
+    impl Embedder for BatchRecorder {
+        fn embed_texts(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+            self.0.lock().unwrap().push(texts.len());
+            FakeEmbedder.embed_texts(texts)
+        }
+    }
+
+    #[test]
+    fn the_source_sets_how_many_texts_go_in_one_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RedbStore::open(dir.path(), Some(3)).unwrap();
+        for i in 0..5 {
+            store
+                .upsert_document(&doc(i, &format!("/w/{i}.md"), "text"))
+                .unwrap();
+        }
+        let embedder = BatchRecorder(Default::default());
+        assert_eq!(
+            store
+                .embed_pending(&embedder, &SmallBatches(2), &|_, _| {})
+                .unwrap(),
+            5
+        );
+        assert_eq!(*embedder.0.lock().unwrap(), vec![2, 2, 1]);
     }
 }

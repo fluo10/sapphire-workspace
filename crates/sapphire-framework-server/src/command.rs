@@ -429,8 +429,17 @@ pub async fn render_workspace_list(client: &sapphire_ipc::Client, out: &mut Stri
         } else {
             ""
         };
-        writeln!(out, "{} {} {state}{star}", row.id, row.root.display())
-            .expect("writing to a String cannot fail");
+        let pending = match &row.sync.embedding {
+            Some(e) if e.pending > 0 => format!(", embedding {} pending", e.pending),
+            _ => String::new(),
+        };
+        writeln!(
+            out,
+            "{} {} {state}{star}{pending}",
+            row.id,
+            row.root.display()
+        )
+        .expect("writing to a String cannot fail");
     }
     Ok(0)
 }
