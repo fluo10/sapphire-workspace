@@ -222,15 +222,15 @@ impl WorkspaceState {
     /// Open (or create) the retrieve DB for `workspace`.
     pub fn open(workspace: Workspace) -> Result<Self> {
         let backend = Self::open_initial_backend(&workspace)?;
-        let mut track_db = Self::open_initial_track(&workspace)?;
+        let track_db = Self::open_initial_track(&workspace)?;
         if index_lost_its_documents(backend.as_ref(), track_db.as_ref())? {
             // The retrieve store was reset (an old schema or redb file format)
             // but the track store still has a stamp for every file, so an
-            // incremental sync would skip them all. Start the track store over,
-            // as `rebuild` does, so the next sync re-indexes the workspace.
-            drop(track_db);
-            let _ = std::fs::remove_file(workspace.track_db_path());
-            track_db = Self::open_initial_track(&workspace)?;
+            // incremental sync would skip them all. Forget every stamp, so the
+            // next sync re-indexes the workspace. Cleared in place rather than by
+            // deleting the file: a delete that fails (a virus scanner holding the
+            // file on Windows) would leave the stamps behind in silence (#195).
+            track_db.clear()?;
         }
         Ok(Self {
             retrieve_db: Mutex::new(backend),
@@ -247,10 +247,13 @@ impl WorkspaceState {
         // index and the track store start from a consistent (empty) state.
         // The orphaned pre-#118 `track_v1.redb` goes with it, so a rebuild
         // also clears any stale second-resolution snapshot.
-        let _ = std::fs::remove_file(workspace.track_db_path());
+        // The orphan is never read again, so a failed delete costs only disk space. The
+        // live track store is cleared in place below, which cannot fail silently the way
+        // a delete can (#195).
         let _ = std::fs::remove_file(workspace.cache_dir().join("track_v1.redb"));
         let backend = Self::open_initial_backend(&workspace)?;
         let track_db = Self::open_initial_track(&workspace)?;
+        track_db.clear()?;
         Ok(Self {
             retrieve_db: Mutex::new(backend),
             track_db,
