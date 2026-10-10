@@ -19,6 +19,8 @@ impl EmbedProvider for ServiceProvider {
             model: i.model,
             dimension: i.dimension,
             template_version: i.template_version,
+            revision: None,
+            max_tokens: i.max_tokens,
         })
     }
 

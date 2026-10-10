@@ -13,6 +13,12 @@ pub const IGNORE_FILE: &str = ".sapphireignore";
 /// Prefix of a conflict copy of the ignore file (`merge::conflict_path`).
 const IGNORE_FILE_CONFLICT_PREFIX: &str = ".sapphireignore.conflict-";
 
+/// The tag `merge::conflict_path` puts in a conflict copy's file name.
+const CONFLICT_TAG: &str = ".conflict-";
+
+/// The app directory's subdirectory of synced vectors (#187).
+pub const EMBEDDED_DIR: &str = "embedded";
+
 /// Declarative sync filter: the built-in rule for an app name plus `.sapphireignore`.
 pub struct SyncFilter {
     app_dir: String,
@@ -61,12 +67,36 @@ impl SyncFilter {
         {
             return false;
         }
+        // Two vectors at one path were computed from the same input, so the newest wins and
+        // a conflict copy would only be clutter that nothing reads. Built in rather than left
+        // to `.sapphireignore`, which a user may edit.
+        if self.is_embedded_conflict(rel) {
+            return false;
+        }
         match &self.ignore {
             Some(gi) => !gi
                 .matched_path_or_any_parents(paths::to_native(Path::new(""), rel), is_dir)
                 .is_ignore(),
             None => true,
         }
+    }
+}
+
+impl SyncFilter {
+    /// Whether `rel` is a conflict copy under `.<app>/embedded/`.
+    fn is_embedded_conflict(&self, rel: &str) -> bool {
+        let Some(inside) = rel
+            .strip_prefix(self.app_dir.as_str())
+            .and_then(|r| r.strip_prefix('/'))
+            .and_then(|r| r.strip_prefix(EMBEDDED_DIR))
+            .and_then(|r| r.strip_prefix('/'))
+        else {
+            return false;
+        };
+        inside
+            .rsplit('/')
+            .next()
+            .is_some_and(|name| name.contains(CONFLICT_TAG))
     }
 }
 
@@ -95,6 +125,24 @@ mod tests {
         assert!(!f.allows("a/.hidden", false));
         assert!(!f.allows(".other-app/x", false));
         assert!(!f.allows("../escape", false));
+    }
+
+    #[test]
+    fn no_conflict_copies_of_synced_vectors() {
+        let (_d, f) = filter_with(None);
+        let copy = crate::merge::conflict_path(
+            ".test-app/embedded/m-8-0011aabb/abc.vec",
+            &crate::vv::Dot {
+                replica: crate::id::ReplicaId(uuid::Uuid::from_u128(7)),
+                counter: 3,
+            },
+        );
+        assert!(copy.contains(".conflict-"), "{copy}");
+        assert!(!f.allows(&copy, false), "{copy}");
+        assert!(f.allows(".test-app/embedded/m-8-0011aabb/abc.vec", false));
+        // Elsewhere, a conflict copy is the user's data and syncs.
+        assert!(f.allows("notes/a.conflict-0000-1.md", false));
+        assert!(f.allows(".test-app/state.conflict-0000-1.toml", false));
     }
 
     #[test]

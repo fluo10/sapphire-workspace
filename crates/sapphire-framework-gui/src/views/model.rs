@@ -673,6 +673,8 @@ mod tests {
                 model: "m".into(),
                 dimension: 8,
                 template_version: 0,
+                revision: None,
+                max_tokens: None,
             }),
             loaded: true,
             note: Some(EmbedNote::KeyMissing),

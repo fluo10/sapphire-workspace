@@ -29,6 +29,8 @@ pub struct ModelInfo {
     pub dimension: u32,
     /// The prompt template applied before embedding; `0` when none is (REST).
     pub template_version: u32,
+    /// Content tokens kept before embedding (local); `None` when the provider decides (REST).
+    pub max_tokens: Option<u32>,
 }
 
 /// The model unloads after this long without a request.
@@ -59,6 +61,7 @@ impl EmbedService {
             model: model.model.clone(),
             dimension: model.dimension,
             template_version: TEMPLATE_VERSION,
+            max_tokens: Some(model.max_tokens as u32),
         };
         let loader = local_loader(model.clone(), cache_dir);
         Self::with_loader(info, loader, IDLE_UNLOAD, RETRY_BACKOFF)
@@ -70,6 +73,7 @@ impl EmbedService {
             model: model.model.clone(),
             dimension: model.dimension,
             template_version: 0,
+            max_tokens: None,
         };
         let model = model.clone();
         let loader: Loader =
@@ -284,6 +288,7 @@ mod tests {
             model: "fake".into(),
             dimension: 1,
             template_version: 1,
+            max_tokens: None,
         }
     }
 
@@ -455,6 +460,7 @@ mod tests {
                 model: crate::LOCAL_MODEL.into(),
                 dimension: 1024,
                 template_version: crate::TEMPLATE_VERSION,
+                max_tokens: Some(1024),
             }
         );
         assert!(!local.loaded());
@@ -473,6 +479,7 @@ mod tests {
                 model: "m".into(),
                 dimension: 8,
                 template_version: 0,
+                max_tokens: None,
             }
         );
     }

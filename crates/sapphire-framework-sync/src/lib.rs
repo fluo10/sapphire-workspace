@@ -20,7 +20,7 @@ mod vv;
 
 pub use entry::{Content, Entry, PathUpdate};
 pub use error::{Error, Result};
-pub use filter::{IGNORE_FILE, SyncFilter};
+pub use filter::{EMBEDDED_DIR, IGNORE_FILE, SyncFilter};
 pub use hash::{ContentHash, ParseHashError};
 pub use hlc::{Clock, Hlc, MAX_DRIFT_MS, SystemClock};
 pub use id::ReplicaId;

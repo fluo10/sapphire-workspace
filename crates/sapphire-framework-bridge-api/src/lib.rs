@@ -345,6 +345,12 @@ pub struct EmbedModelInfo {
     pub dimension: u32,
     /// The version of the text template applied before embedding.
     pub template_version: u32,
+    /// The model's pinned revision, when the bridge pins one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+    /// Content tokens kept before embedding, when the bridge truncates (the local model).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
 }
 
 /// Result of [`EMBED_INFO`].
@@ -486,6 +492,8 @@ mod tests {
                 model: "m".into(),
                 dimension: 384,
                 template_version: 1,
+                revision: None,
+                max_tokens: None,
             }),
             loaded: true,
             note: Some(EmbedNote::KeyMissing),

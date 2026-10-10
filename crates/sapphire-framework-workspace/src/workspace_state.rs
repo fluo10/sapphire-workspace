@@ -640,6 +640,8 @@ impl WorkspaceState {
                 model: model.to_owned(),
                 dimension: dim,
                 template_version: 0,
+                revision: None,
+                max_tokens: None,
             },
         }));
         Ok(())
@@ -1224,6 +1226,8 @@ mod tests {
                     model: "other-3d".into(),
                     dimension: 3,
                     template_version: 0,
+                    revision: None,
+                    max_tokens: None,
                 }),
                 ..Default::default()
             }
