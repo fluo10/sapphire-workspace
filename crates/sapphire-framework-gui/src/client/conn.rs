@@ -86,11 +86,14 @@ impl Connections {
             } else {
                 (Vec::new(), Vec::new(), Vec::new())
             };
+            // A bridge older than 2.3 has no such method: the screen says so.
+            let embedding = c.embed_settings().await.ok();
             Ok::<_, sapphire_ipc::Error>(Some(BridgeState {
                 status,
                 peers,
                 peer_roles,
                 ledger,
+                embedding,
             }))
         })
         .await;

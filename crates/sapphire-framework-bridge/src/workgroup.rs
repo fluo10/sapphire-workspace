@@ -437,6 +437,13 @@ impl Workgroup {
         }
     }
 
+    /// The workgroup's embedding models, `root/embedding.toml`, inside the synced root.
+    pub fn embedding_toml(&self) -> PathBuf {
+        self.dir
+            .join("root")
+            .join(crate::embed_settings::SETTINGS_FILE)
+    }
+
     /// The workgroup's published `root/net.toml`, inside the synced root.
     fn net_toml(&self) -> PathBuf {
         self.dir.join("root").join("net.toml")

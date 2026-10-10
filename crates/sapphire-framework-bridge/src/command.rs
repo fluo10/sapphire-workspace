@@ -16,13 +16,15 @@ use std::sync::Arc;
 use std::io::Write as _;
 
 use sapphire_bridge_api::{
-    BRIDGE_NAME, BridgeClient, EmbedInfoResult, InviteParams, JoinParams, PeerInfo, StatusResult,
+    BRIDGE_NAME, BridgeClient, EmbedInfoResult, EmbedRequest, EmbedSettingsResult,
+    EmbeddingCommand, InviteParams, JoinParams, PeerInfo, StatusResult,
 };
 use sapphire_framework_service::{Environment, ServiceCommand, ServiceSpec, SystemManager};
 use sapphire_ipc::Endpoint;
 
 #[cfg(feature = "node")]
 use crate::NetConfig;
+use crate::embed_settings;
 use crate::error::{Error, Result};
 use crate::status::StatusFile;
 use crate::workgroup::Workgroup;
@@ -67,6 +69,10 @@ pub enum BridgeCommand {
     /// The workgroup's devices.
     #[command(subcommand)]
     Device(DeviceCommand),
+    /// The embedding models: the workgroup's local and remote one, and this device's
+    /// switches and API key.
+    #[command(subcommand)]
+    Embedding(EmbeddingCommand),
 }
 
 /// The service this binary installs.
@@ -155,8 +161,8 @@ impl BridgeCommand {
         self.dispatch_with(version, None).await
     }
 
-    /// As [`BridgeCommand::dispatch`], with a factory for the embedding provider that
-    /// `serve` installs once the bridge directory is open.
+    /// As [`BridgeCommand::dispatch`], with the factory `serve` builds embedding providers
+    /// with, from the settings, for as long as it runs.
     pub async fn dispatch_with(
         self,
         version: &'static str,
@@ -199,8 +205,49 @@ impl BridgeCommand {
                     device_priority(version, &selector, priority).await
                 }
             },
+            BridgeCommand::Embedding(command) => embedding(version, command).await,
         }
     }
+}
+
+// ── embedding ───────────────────────────────────────────────────────────────
+
+/// `embedding …`: through the running bridge, or — when none runs — on the files, so a
+/// device can be set up before its bridge starts.
+async fn embedding(version: &str, command: EmbeddingCommand) -> Result<i32> {
+    let request = command.request()?;
+    let (report, offline) = match connect(version).await? {
+        Some(client) => (client.embed_request(request).await?, false),
+        None => (embedding_offline(&BridgeDir::open()?, request)?, true),
+    };
+    for line in sapphire_bridge_api::describe(&report) {
+        println!("{line}");
+    }
+    if offline {
+        println!("(the bridge is not running; it applies these settings when it starts)");
+    }
+    Ok(0)
+}
+
+/// Carry out `request` on the files of `dir`, and report what they resolve to. Nothing is
+/// loaded, so the report says only whether the bridge would embed.
+fn embedding_offline(dir: &BridgeDir, request: EmbedRequest) -> Result<EmbedSettingsResult> {
+    match request {
+        EmbedRequest::Show => {}
+        EmbedRequest::ModelSet(params) => embed_settings::set_model(dir, params)?,
+        EmbedRequest::DeviceSet(params) => {
+            embed_settings::set_device(dir, params.slot, params.enabled)?
+        }
+        EmbedRequest::KeySet(key) => embed_settings::set_key(dir, &key)?,
+        EmbedRequest::KeyClear => embed_settings::clear_key(dir)?,
+    }
+    let (resolved, _) = embed_settings::load(dir, embed_settings::avx2())?;
+    let info = EmbedInfoResult {
+        enabled: resolved.active.is_some(),
+        note: resolved.note.clone(),
+        ..EmbedInfoResult::default()
+    };
+    Ok(resolved.report(info))
 }
 
 // ── run ─────────────────────────────────────────────────────────────────────
@@ -236,10 +283,9 @@ async fn run(version: &'static str, embed: Option<crate::EmbedFactory>) -> Resul
         "sapphire-bridge {version} starting (pid {})",
         std::process::id()
     );
-    let provider = embed.and_then(|factory| factory(&dir));
     let mut bridge = build_bridge(dir, version).await?;
-    if let Some(provider) = provider {
-        bridge = bridge.embed_provider(provider);
+    if let Some(factory) = embed {
+        bridge = bridge.embed_factory(factory);
     }
     bridge.run().await?;
     Ok(0)
@@ -949,6 +995,7 @@ mod status_fallback_tests {
                         template_version: 1,
                     }),
                     loaded: true,
+                    note: None,
                 }),
                 relays: vec![],
             };
@@ -989,6 +1036,7 @@ mod status_fallback_tests {
                 template_version: 1,
             }),
             loaded: true,
+            note: None,
         };
         assert_eq!(
             embedding_line(&enabled),
@@ -1102,6 +1150,56 @@ mod pairing_cli_tests {
         ] {
             assert!(Probe::try_parse_from(&args).is_ok(), "{args:?}");
         }
+    }
+
+    #[test]
+    fn offline_embedding_commands_write_the_files_and_set_replaces() {
+        use sapphire_bridge_api::{
+            ApiKey, EmbedModelSetParams, ModelSource, RemoteModel, Slot, SlotModel,
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = BridgeDir::at(tmp.path().to_path_buf()).unwrap();
+        let set = |model: RemoteModel| {
+            EmbedRequest::ModelSet(EmbedModelSetParams {
+                slot: Slot::Remote,
+                model: Some(SlotModel::Remote(model)),
+            })
+        };
+        embedding_offline(
+            &dir,
+            set(RemoteModel {
+                endpoint: "https://one.example".into(),
+                model: "a".into(),
+                dimension: 8,
+            }),
+        )
+        .unwrap();
+        let report = embedding_offline(
+            &dir,
+            set(RemoteModel {
+                endpoint: "https://two.example".into(),
+                model: "b".into(),
+                dimension: 16,
+            }),
+        )
+        .unwrap();
+        assert_eq!(report.source, Some(ModelSource::Device));
+        let remote = report.models.remote.unwrap();
+        assert_eq!(
+            (
+                remote.endpoint.as_str(),
+                remote.model.as_str(),
+                remote.dimension
+            ),
+            ("https://two.example", "b", 16)
+        );
+        assert!(report.info.enabled);
+        assert!(!report.info.loaded, "nothing runs offline");
+
+        let report = embedding_offline(&dir, EmbedRequest::KeySet(ApiKey::new("k"))).unwrap();
+        assert!(report.key_set);
+        assert!(dir.embedding_key().is_file());
     }
 }
 

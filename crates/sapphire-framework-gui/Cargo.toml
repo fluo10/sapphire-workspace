@@ -12,7 +12,7 @@ categories = ["gui"]
 # egui context. All consuming apps must use the same egui major version.
 [dependencies]
 sapphire-backend = { package = "sapphire-framework-backend", version = "0.14.0", path = "../sapphire-framework-backend", default-features = false }
-sapphire-bridge-api = { package = "sapphire-framework-bridge-api", version = "2", path = "../sapphire-framework-bridge-api" }
+sapphire-bridge-api = { package = "sapphire-framework-bridge-api", version = "2.3.0", path = "../sapphire-framework-bridge-api" }
 sapphire-ipc = { package = "sapphire-framework-ipc", version = "0.14.0", path = "../sapphire-framework-ipc" }
 egui = "0.36"
 fontdb = "0.23"

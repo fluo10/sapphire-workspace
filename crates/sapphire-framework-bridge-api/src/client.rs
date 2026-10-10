@@ -6,9 +6,11 @@ use sapphire_ipc::{Client, ClientInfo, Endpoint, connect_or_absent};
 use tokio::sync::broadcast;
 
 use crate::{
-    Ack, BRIDGE_DATA_NAME, BRIDGE_NAME, DEVICE_PRIORITY_SET, DEVICE_RETIRE, DataHeader,
+    Ack, ApiKey, BRIDGE_DATA_NAME, BRIDGE_NAME, DEVICE_PRIORITY_SET, DEVICE_RETIRE, DataHeader,
     DevicePrioritySetParams, DevicePrioritySetResult, DeviceRetireParams, DeviceRetireResult,
-    EMBED, EMBED_INFO, EmbedInfoResult, EmbedParams, EmbedResult, GrainId, INVITE, IncomingParams,
+    EMBED, EMBED_DEVICE_SET, EMBED_INFO, EMBED_KEY_CLEAR, EMBED_KEY_SET, EMBED_MODEL_SET,
+    EMBED_SETTINGS, EmbedDeviceSetParams, EmbedInfoResult, EmbedKeySetParams, EmbedModelSetParams,
+    EmbedParams, EmbedRequest, EmbedResult, EmbedSettingsResult, GrainId, INVITE, IncomingParams,
     InviteParams, InviteResult, JOIN, JoinParams, JoinResult, PEERS, PeersResult, REGISTER,
     RegisterParams, RegisterResult, STATUS, StatusResult, UNREGISTER, UnregisterParams,
     WORKGROUP_CREATE, WORKSPACES, WorkgroupCreateParams, WorkgroupCreateResult, WorkspacesResult,
@@ -173,6 +175,57 @@ impl BridgeClient {
     /// Embed `texts` with the bridge's model; one vector per text, in order.
     pub async fn embed(&self, texts: Vec<String>) -> sapphire_ipc::Result<EmbedResult> {
         self.client.call(EMBED, EmbedParams { texts }).await
+    }
+
+    /// The embedding settings and what they resolve to.
+    pub async fn embed_settings(&self) -> sapphire_ipc::Result<EmbedSettingsResult> {
+        self.client
+            .call(EMBED_SETTINGS, serde_json::json!({}))
+            .await
+    }
+
+    /// Set (`Some`) or clear (`None`) one model slot.
+    pub async fn embed_model_set(
+        &self,
+        params: EmbedModelSetParams,
+    ) -> sapphire_ipc::Result<EmbedSettingsResult> {
+        self.client.call(EMBED_MODEL_SET, params).await
+    }
+
+    /// Switch one slot on this device; `None` is auto.
+    pub async fn embed_device_set(
+        &self,
+        params: EmbedDeviceSetParams,
+    ) -> sapphire_ipc::Result<EmbedSettingsResult> {
+        self.client.call(EMBED_DEVICE_SET, params).await
+    }
+
+    /// Store the remote slot's API key on this device.
+    pub async fn embed_key_set(&self, key: ApiKey) -> sapphire_ipc::Result<EmbedSettingsResult> {
+        self.client
+            .call(EMBED_KEY_SET, EmbedKeySetParams { key })
+            .await
+    }
+
+    /// Remove the remote slot's API key from this device.
+    pub async fn embed_key_clear(&self) -> sapphire_ipc::Result<EmbedSettingsResult> {
+        self.client
+            .call(EMBED_KEY_CLEAR, serde_json::json!({}))
+            .await
+    }
+
+    /// Carry out one settings request.
+    pub async fn embed_request(
+        &self,
+        request: EmbedRequest,
+    ) -> sapphire_ipc::Result<EmbedSettingsResult> {
+        match request {
+            EmbedRequest::Show => self.embed_settings().await,
+            EmbedRequest::ModelSet(params) => self.embed_model_set(params).await,
+            EmbedRequest::DeviceSet(params) => self.embed_device_set(params).await,
+            EmbedRequest::KeySet(key) => self.embed_key_set(key).await,
+            EmbedRequest::KeyClear => self.embed_key_clear().await,
+        }
     }
 
     /// Ask the bridge to create an invite, and get the ticket back.

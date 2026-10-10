@@ -18,9 +18,9 @@ use hf_hub::api::sync::{ApiBuilder, ApiRepo};
 use tokenizers::{PaddingDirection, PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
 
 use crate::service::Embed;
-use crate::settings::{EmbeddingSettings, LOCAL_MODEL};
 use crate::template::{mrl, truncate_at, wrap};
 use crate::{Error, Result};
+use sapphire_bridge_api::{LOCAL_MODEL, LocalModel};
 
 /// Room for the template's tokens on top of `max_tokens`.
 const TEMPLATE_TOKENS: usize = 64;
@@ -41,7 +41,7 @@ pub struct LocalQwen {
 impl LocalQwen {
     /// Load the model at f32 on the CPU. The files are downloaded into `cache_dir` (hf-hub
     /// layout) on first use: about 4 GB, about 7 GB resident once loaded.
-    pub fn load(settings: &EmbeddingSettings, cache_dir: &Path) -> Result<Self> {
+    pub fn load(settings: &LocalModel, cache_dir: &Path) -> Result<Self> {
         let load_err = |what: &str, e: &dyn std::fmt::Display| {
             Error::Load(format!("{LOCAL_MODEL}: {what}: {e}"))
         };
@@ -201,16 +201,7 @@ mod tests {
     #[test]
     #[ignore]
     fn real_model_embeds_japanese_sensibly() {
-        let settings = EmbeddingSettings {
-            enabled: true,
-            provider: crate::Provider::Local,
-            model: LOCAL_MODEL.into(),
-            dimension: 1024,
-            max_tokens: 1024,
-            endpoint: None,
-            api_key_env: None,
-            cache_dir: None,
-        };
+        let settings = LocalModel::default();
         let cache = std::env::var("SAPPHIRE_EMBED_TEST_CACHE")
             .map(PathBuf::from)
             .unwrap_or_else(|_| {

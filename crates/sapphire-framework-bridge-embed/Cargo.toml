@@ -22,9 +22,9 @@ tokenizers = { version = "0.23.2", default-features = false, features = ["onig"]
 # explicit cache directory (fastembed's `from_hf` would use the working directory).
 hf-hub = { version = "0.5.0", default-features = false, features = ["ureq", "native-tls"], optional = true }
 ureq = { version = "3.3", features = ["json"] }
+sapphire-bridge-api = { package = "sapphire-framework-bridge-api", version = "2.3.0", path = "../sapphire-framework-bridge-api" }
 serde.workspace = true
 serde_json.workspace = true
-toml.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tokio = { workspace = true, features = ["sync", "rt"] }
