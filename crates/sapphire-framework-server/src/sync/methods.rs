@@ -73,6 +73,7 @@ impl From<crate::sync::SyncStatus> for proto::SyncStatusResult {
             last_error: status.last_error,
             bridge_available: status.bridge_available,
             topology: status.topology,
+            embedding: status.embedding,
         }
     }
 }

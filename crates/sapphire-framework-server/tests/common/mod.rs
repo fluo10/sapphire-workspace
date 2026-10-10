@@ -269,6 +269,11 @@ async fn build(
         // Embedding asks this host's own bridge, not the process environment's.
         .with_bridge_endpoint(control.clone()),
     );
+    // A test cannot wait ten minutes: the primary fills in at once, and looks every second.
+    runtime.set_backfill_timing(sapphire_framework_server::BackfillTiming {
+        grace: Duration::ZERO,
+        interval: Duration::from_secs(1),
+    });
     let server = AppServer::new(ctx, VERSION)
         .endpoint(endpoint.clone())
         .sync(Arc::clone(&runtime));

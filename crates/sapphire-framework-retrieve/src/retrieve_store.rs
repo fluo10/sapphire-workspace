@@ -194,6 +194,12 @@ pub trait VectorSource: Sync {
     fn may_embed(&self, path: &str, text: &str) -> bool;
     /// A vector was just computed and stored in the index: keep it.
     fn embedded(&self, path: &str, text: &str, vector: &[f32]);
+
+    /// How many texts go to the embedder in one call. A background backfill keeps this
+    /// small, so a search query waiting on the same model is not stuck behind it.
+    fn batch_size(&self) -> usize {
+        100
+    }
 }
 
 /// Finds nothing, embeds everything, keeps nothing: an index on its own.
