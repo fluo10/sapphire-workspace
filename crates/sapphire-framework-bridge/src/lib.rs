@@ -17,6 +17,7 @@ mod election;
 mod embed;
 pub mod embed_settings;
 mod error;
+mod external;
 mod hello;
 mod invite;
 #[cfg(feature = "node")]

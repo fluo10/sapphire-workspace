@@ -173,6 +173,80 @@ pub fn read_key() -> std::io::Result<ApiKey> {
     Ok(key)
 }
 
+/// Add, list, retire, restore and rotate the workgroup's external devices: clients that
+/// reach its apps with a key instead of syncing.
+#[derive(Debug, clap::Subcommand)]
+pub enum ExternalDeviceCommand {
+    /// List the external devices.
+    List,
+    /// Add one, and print its token — the only time it is shown.
+    Add {
+        /// Its name.
+        name: String,
+        /// An application it may use; repeat for several.
+        #[arg(long = "app")]
+        apps: Vec<String>,
+        /// A note.
+        #[arg(long)]
+        description: Option<String>,
+    },
+    /// Retire one: its token stops working; the record stays.
+    Retire {
+        /// Its name or id.
+        selector: String,
+    },
+    /// Bring a retired one back, with the token it had.
+    Restore {
+        /// Its name or id.
+        selector: String,
+    },
+    /// Give one a new token, keeping its id; the old token stops working at once.
+    Rotate {
+        /// Its name or id.
+        selector: String,
+    },
+    /// Set the applications one may use (none: it may use nothing).
+    Apps {
+        /// Its name or id.
+        selector: String,
+        /// The applications.
+        apps: Vec<String>,
+    },
+}
+
+impl ExternalDeviceCommand {
+    /// The request these words make. An `add` that names no application gets
+    /// `default_app` — the application whose CLI ran it — when there is one.
+    pub fn request(self, default_app: Option<&str>) -> crate::ExternalDeviceRequest {
+        use crate::{ExternalDeviceAddParams, ExternalDeviceRequest, ExternalDeviceSetAppsParams};
+        match self {
+            ExternalDeviceCommand::List => ExternalDeviceRequest::List,
+            ExternalDeviceCommand::Add {
+                name,
+                mut apps,
+                description,
+            } => {
+                if apps.is_empty()
+                    && let Some(app) = default_app
+                {
+                    apps.push(app.to_owned());
+                }
+                ExternalDeviceRequest::Add(ExternalDeviceAddParams {
+                    name,
+                    description,
+                    apps,
+                })
+            }
+            ExternalDeviceCommand::Retire { selector } => ExternalDeviceRequest::Retire(selector),
+            ExternalDeviceCommand::Restore { selector } => ExternalDeviceRequest::Restore(selector),
+            ExternalDeviceCommand::Rotate { selector } => ExternalDeviceRequest::Rotate(selector),
+            ExternalDeviceCommand::Apps { selector, apps } => {
+                ExternalDeviceRequest::SetApps(ExternalDeviceSetAppsParams { selector, apps })
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use clap::Parser;
@@ -238,5 +312,30 @@ mod tests {
             panic!("not a model set");
         };
         assert_eq!((p.slot, p.model), (Slot::Remote, None));
+    }
+
+    #[derive(clap::Parser)]
+    struct XCli {
+        #[command(subcommand)]
+        command: ExternalDeviceCommand,
+    }
+
+    #[test]
+    fn add_defaults_to_the_running_app_and_takes_several() {
+        let parse = |args: &[&str], app| {
+            let mut argv = vec!["x"];
+            argv.extend_from_slice(args);
+            XCli::parse_from(argv).command.request(app)
+        };
+        let crate::ExternalDeviceRequest::Add(p) = parse(&["add", "pendant"], Some("agent")) else {
+            panic!("not an add")
+        };
+        assert_eq!(p.apps, vec!["agent"]);
+        let crate::ExternalDeviceRequest::Add(p) =
+            parse(&["add", "hook", "--app", "a", "--app", "b"], Some("agent"))
+        else {
+            panic!("not an add")
+        };
+        assert_eq!(p.apps, vec!["a", "b"], "named apps replace the default");
     }
 }

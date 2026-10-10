@@ -17,7 +17,7 @@ use std::io::Write as _;
 
 use sapphire_bridge_api::{
     BRIDGE_NAME, BridgeClient, EmbedInfoResult, EmbedRequest, EmbedSettingsResult,
-    EmbeddingCommand, InviteParams, JoinParams, PeerInfo, StatusResult,
+    EmbeddingCommand, ExternalDeviceCommand, InviteParams, JoinParams, PeerInfo, StatusResult,
 };
 use sapphire_framework_service::{Environment, ServiceCommand, ServiceSpec, SystemManager};
 use sapphire_ipc::Endpoint;
@@ -73,6 +73,9 @@ pub enum BridgeCommand {
     /// switches and API key.
     #[command(subcommand)]
     Embedding(EmbeddingCommand),
+    /// The workgroup's external devices: clients that reach its apps with a key.
+    #[command(subcommand)]
+    ExternalDevice(ExternalDeviceCommand),
 }
 
 /// The service this binary installs.
@@ -206,8 +209,32 @@ impl BridgeCommand {
                 }
             },
             BridgeCommand::Embedding(command) => embedding(version, command).await,
+            BridgeCommand::ExternalDevice(command) => external_device(version, command).await,
         }
     }
+}
+
+// ── external devices ────────────────────────────────────────────────────────
+
+/// `external-device …`: through the running bridge, or on the ledger when none runs.
+async fn external_device(version: &str, command: ExternalDeviceCommand) -> Result<i32> {
+    // The bridge's own CLI is no application: `add` names its applications itself.
+    let request = command.request(None);
+    let outcome = match connect(version).await? {
+        Some(client) => client.external_device_request(request).await?,
+        None => {
+            let dir = BridgeDir::open()?;
+            let Some(workgroup) = Workgroup::open(&dir)? else {
+                println!("this host has not joined a workgroup");
+                return Ok(1);
+            };
+            crate::external::carry_out(&workgroup, request)?
+        }
+    };
+    for line in sapphire_bridge_api::describe_external_outcome(&outcome) {
+        println!("{line}");
+    }
+    Ok(0)
 }
 
 // ── embedding ───────────────────────────────────────────────────────────────

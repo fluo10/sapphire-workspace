@@ -176,6 +176,14 @@ impl Workgroup {
         Ok(Devices::open(&self.devices_dir)?)
     }
 
+    /// The external device ledger, `root/external_devices/` (#199), read from disk now: it
+    /// is synced, so a change made on another device counts at once.
+    pub fn external_devices(&self) -> Result<sapphire_registry::ExternalDevices> {
+        Ok(sapphire_registry::ExternalDevices::open(
+            &self.dir.join("root").join("external_devices"),
+        )?)
+    }
+
     /// This host's own record: the one whose `node_id` is this host's.
     ///
     /// A `join`ed host did not found its workgroup, so its record may sort anywhere in the

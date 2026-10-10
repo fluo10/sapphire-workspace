@@ -12,8 +12,11 @@ use sapphire_bridge_api::{
     Ack, BRIDGE_NAME, DEVICE_PRIORITY_SET, DEVICE_RETIRE, DevicePrioritySetParams,
     DevicePrioritySetResult, DeviceRetireParams, DeviceRetireResult, EMBED, EMBED_DEVICE_SET,
     EMBED_INFO, EMBED_KEY_CLEAR, EMBED_KEY_SET, EMBED_MODEL_SET, EMBED_SETTINGS,
-    EmbedDeviceSetParams, EmbedInfoResult, EmbedKeySetParams, EmbedModelSetParams, EmbedParams,
-    EmbedResult, EmbedSettingsResult, INVITE, InviteParams, InviteResult, JOIN, JoinParams,
+    EXTERNAL_DEVICE_ADD, EXTERNAL_DEVICE_AUTHENTICATE, EXTERNAL_DEVICE_LIST,
+    EXTERNAL_DEVICE_RESTORE, EXTERNAL_DEVICE_RETIRE, EXTERNAL_DEVICE_ROTATE,
+    EXTERNAL_DEVICE_SET_APPS, EmbedDeviceSetParams, EmbedInfoResult, EmbedKeySetParams,
+    EmbedModelSetParams, EmbedParams, EmbedResult, EmbedSettingsResult,
+    ExternalDeviceAuthenticateParams, INVITE, InviteParams, InviteResult, JOIN, JoinParams,
     JoinResult, PEERS, PeerInfo, PeersResult, REGISTER, RegisterParams, RegisterResult,
     RouteStatus, STATUS, StatusResult, UNREGISTER, UnregisterParams, WORKGROUP_CREATE, WORKSPACES,
     WorkgroupCreateParams, WorkgroupCreateResult, WorkgroupStatus, WorkgroupWorkspaceInfo,
@@ -215,6 +218,66 @@ fn router(bridge: Arc<Bridge>, session: Arc<Session>) -> Router {
             move |ctx| {
                 let bridge = Arc::clone(&bridge);
                 async move { embed(&bridge, ctx).await }
+            }
+        })
+        .method(EXTERNAL_DEVICE_LIST, {
+            let bridge = Arc::clone(&bridge);
+            move |ctx| {
+                let bridge = Arc::clone(&bridge);
+                async move { external_device(&bridge, ctx, ExternalKind::List) }
+            }
+        })
+        .method(EXTERNAL_DEVICE_ADD, {
+            let bridge = Arc::clone(&bridge);
+            move |ctx| {
+                let bridge = Arc::clone(&bridge);
+                async move { external_device(&bridge, ctx, ExternalKind::Add) }
+            }
+        })
+        .method(EXTERNAL_DEVICE_RETIRE, {
+            let bridge = Arc::clone(&bridge);
+            move |ctx| {
+                let bridge = Arc::clone(&bridge);
+                async move { external_device(&bridge, ctx, ExternalKind::Retire) }
+            }
+        })
+        .method(EXTERNAL_DEVICE_RESTORE, {
+            let bridge = Arc::clone(&bridge);
+            move |ctx| {
+                let bridge = Arc::clone(&bridge);
+                async move { external_device(&bridge, ctx, ExternalKind::Restore) }
+            }
+        })
+        .method(EXTERNAL_DEVICE_ROTATE, {
+            let bridge = Arc::clone(&bridge);
+            move |ctx| {
+                let bridge = Arc::clone(&bridge);
+                async move { external_device(&bridge, ctx, ExternalKind::Rotate) }
+            }
+        })
+        .method(EXTERNAL_DEVICE_SET_APPS, {
+            let bridge = Arc::clone(&bridge);
+            move |ctx| {
+                let bridge = Arc::clone(&bridge);
+                async move { external_device(&bridge, ctx, ExternalKind::SetApps) }
+            }
+        })
+        .method(EXTERNAL_DEVICE_AUTHENTICATE, {
+            let bridge = Arc::clone(&bridge);
+            move |ctx| {
+                let bridge = Arc::clone(&bridge);
+                async move {
+                    let p: ExternalDeviceAuthenticateParams =
+                        parse(ctx, "external_device.authenticate")?;
+                    let workgroup = bridge
+                        .workgroup()
+                        .map_err(failed)?
+                        .ok_or(Error::NoWorkgroup)
+                        .map_err(failed)?;
+                    crate::external::authenticate(&workgroup, &p.token, &p.app)
+                        .map_err(failed)
+                        .and_then(encode)
+                }
             }
         })
         .method(EMBED_SETTINGS, {
@@ -466,6 +529,55 @@ pub(crate) fn embed_info(bridge: &Bridge) -> EmbedInfoResult {
         loaded: info.is_some() && provider.is_some_and(|p| p.loaded()),
         model: info,
         note: bridge.embed_note(),
+    }
+}
+
+/// Which external device method a call is.
+#[derive(Clone, Copy)]
+enum ExternalKind {
+    List,
+    Add,
+    Retire,
+    Restore,
+    Rotate,
+    SetApps,
+}
+
+/// `external_device.*` — manage the workgroup's external devices. Each answer is the
+/// record (and, for `add` and `rotate`, its token) as the wire carries it.
+fn external_device(
+    bridge: &Bridge,
+    ctx: RequestCtx,
+    kind: ExternalKind,
+) -> std::result::Result<Value, RpcError> {
+    use sapphire_bridge_api::{
+        ExternalDeviceListResult, ExternalDeviceOutcome, ExternalDeviceRequest,
+        ExternalDeviceSelectParams,
+    };
+    let select = |ctx: RequestCtx| -> std::result::Result<String, RpcError> {
+        Ok(parse::<ExternalDeviceSelectParams>(ctx, "external_device")?.selector)
+    };
+    let request = match kind {
+        ExternalKind::List => ExternalDeviceRequest::List,
+        ExternalKind::Add => ExternalDeviceRequest::Add(parse(ctx, "external_device.add")?),
+        ExternalKind::Retire => ExternalDeviceRequest::Retire(select(ctx)?),
+        ExternalKind::Restore => ExternalDeviceRequest::Restore(select(ctx)?),
+        ExternalKind::Rotate => ExternalDeviceRequest::Rotate(select(ctx)?),
+        ExternalKind::SetApps => {
+            ExternalDeviceRequest::SetApps(parse(ctx, "external_device.set_apps")?)
+        }
+    };
+    let workgroup = bridge
+        .workgroup()
+        .map_err(failed)?
+        .ok_or(Error::NoWorkgroup)
+        .map_err(failed)?;
+    match crate::external::carry_out(&workgroup, request).map_err(failed)? {
+        ExternalDeviceOutcome::List(external_devices) => {
+            encode(ExternalDeviceListResult { external_devices })
+        }
+        ExternalDeviceOutcome::One(info) => encode(info),
+        ExternalDeviceOutcome::WithToken(result) => encode(result),
     }
 }
 
@@ -1476,5 +1588,103 @@ mod tests {
                 .to_string();
             assert!(!answer.contains("sk-very-secret"), "{method}: {answer}");
         }
+    }
+
+    #[tokio::test]
+    async fn external_devices_are_managed_and_authenticated_per_app() {
+        use sapphire_bridge_api::{
+            ExternalDeviceAuthenticateResult, ExternalDeviceInfo, ExternalDeviceListResult,
+            ExternalDeviceTokenResult,
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let bridge = bridge(&tmp);
+        let (client, _serving) = connect(&bridge).await;
+
+        let added: ExternalDeviceTokenResult = serde_json::from_value(
+            call(
+                &client,
+                EXTERNAL_DEVICE_ADD,
+                serde_json::json!({ "name": "pendant", "apps": ["agent"] }),
+            )
+            .await,
+        )
+        .unwrap();
+        let token = added.token.expose().to_owned();
+        let auth = |token: &str, app: &str| {
+            let client = &client;
+            let params = serde_json::json!({ "token": token, "app": app });
+            async move {
+                client
+                    .call::<_, ExternalDeviceAuthenticateResult>(
+                        EXTERNAL_DEVICE_AUTHENTICATE,
+                        params,
+                    )
+                    .await
+            }
+        };
+
+        let who = auth(&token, "agent").await.unwrap();
+        assert_eq!(
+            (who.id, who.name.as_str()),
+            (added.external_device.id, "pendant")
+        );
+        let refused = auth(&token, "journal").await.unwrap_err();
+        assert!(refused.to_string().contains("refused"), "{refused}");
+
+        // A list never carries the token, nor its hash.
+        let listed = call(&client, EXTERNAL_DEVICE_LIST, serde_json::json!({})).await;
+        let text = listed.to_string();
+        assert!(!text.contains(&token), "{text}");
+        assert!(
+            !text.contains(&sapphire_registry::token_hash(&token)),
+            "{text}"
+        );
+        let listed: ExternalDeviceListResult = serde_json::from_value(listed).unwrap();
+        assert_eq!(listed.external_devices.len(), 1);
+
+        // Rotate: the old token dies, the id stays.
+        let rotated: ExternalDeviceTokenResult = serde_json::from_value(
+            call(
+                &client,
+                EXTERNAL_DEVICE_ROTATE,
+                serde_json::json!({ "selector": "pendant" }),
+            )
+            .await,
+        )
+        .unwrap();
+        assert_eq!(rotated.external_device.id, added.external_device.id);
+        assert!(auth(&token, "agent").await.is_err());
+        let fresh = rotated.token.expose().to_owned();
+        assert!(auth(&fresh, "agent").await.is_ok());
+
+        // Retire and restore.
+        let retired: ExternalDeviceInfo = serde_json::from_value(
+            call(
+                &client,
+                EXTERNAL_DEVICE_RETIRE,
+                serde_json::json!({ "selector": "pendant" }),
+            )
+            .await,
+        )
+        .unwrap();
+        assert!(retired.retired_at.is_some());
+        assert!(auth(&fresh, "agent").await.is_err());
+        call(
+            &client,
+            EXTERNAL_DEVICE_RESTORE,
+            serde_json::json!({ "selector": "pendant" }),
+        )
+        .await;
+        assert!(auth(&fresh, "agent").await.is_ok());
+
+        // A second application.
+        call(
+            &client,
+            EXTERNAL_DEVICE_SET_APPS,
+            serde_json::json!({ "selector": "pendant", "apps": ["agent", "journal"] }),
+        )
+        .await;
+        assert!(auth(&fresh, "journal").await.is_ok());
     }
 }
