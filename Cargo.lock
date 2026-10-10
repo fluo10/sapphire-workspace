@@ -5652,20 +5652,18 @@ dependencies = [
 name = "sapphire-framework-keys"
 version = "0.14.0"
 dependencies = [
+ "async-trait",
  "axum",
- "base64 0.23.1",
- "chrono",
- "getrandom 0.4.3",
  "grain-id",
  "http-body-util",
- "serde",
+ "sapphire-framework-bridge",
+ "sapphire-framework-bridge-api",
+ "sapphire-framework-ipc",
+ "sha2",
  "tempfile",
- "thiserror 2.0.20",
  "tokio",
- "toml",
  "tower",
  "tracing",
- "uuid",
 ]
 
 [[package]]

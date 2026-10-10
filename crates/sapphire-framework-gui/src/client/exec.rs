@@ -40,7 +40,8 @@ pub(crate) async fn execute(
         | Command::DeviceInvite { .. }
         | Command::DeviceRetire { .. }
         | Command::DevicePrioritySet { .. }
-        | Command::Embedding(_) => {
+        | Command::Embedding(_)
+        | Command::ExternalDevice(_) => {
             let result = tokio::time::timeout(limit, bridge_command(cfg, conns, command))
                 .await
                 .unwrap_or_else(|_| Err(unanswered("sapphire-bridge", limit)));
@@ -102,6 +103,16 @@ async fn bridge_command(
             .device_priority_set(DevicePrioritySetParams { selector, priority })
             .await
             .map(|_| CommandOutput::Done),
+        Command::ExternalDevice(request) => {
+            c.external_device_request(request)
+                .await
+                .map(|outcome| match outcome {
+                    sapphire_bridge_api::ExternalDeviceOutcome::WithToken(r) => {
+                        CommandOutput::Token(r.token.expose().to_owned())
+                    }
+                    _ => CommandOutput::Done,
+                })
+        }
         Command::Embedding(request) => c.embed_request(request).await.map(|_| CommandOutput::Done),
         _ => unreachable!("execute routes only bridge commands here"),
     };
