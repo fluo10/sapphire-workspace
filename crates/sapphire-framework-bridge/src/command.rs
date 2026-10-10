@@ -563,7 +563,7 @@ async fn device_list(version: &str) -> Result<i32> {
             })
             .collect();
         println!(
-            "{} {} {} p{}{}{}",
+            "{} {} {} p{}{}{}{}",
             peer.name,
             peer.device_id,
             if peer.node_id.is_empty() {
@@ -572,6 +572,9 @@ async fn device_list(version: &str) -> Result<i32> {
                 peer.node_id
             },
             peer.priority,
+            peer.availability
+                .map(|a| format!(" a{a}"))
+                .unwrap_or_default(),
             if peer.connected { " (online)" } else { "" },
             if held.is_empty() {
                 String::new()

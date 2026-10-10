@@ -9,6 +9,7 @@
 
 #![warn(missing_docs)]
 
+mod availability;
 mod command;
 mod control;
 mod data;
@@ -121,6 +122,9 @@ pub struct Bridge {
     hello_tx: tokio::sync::watch::Sender<Option<hello::Hello>>,
     /// The roles this bridge last computed, per workspace it hosts.
     roles: Mutex<std::collections::BTreeMap<GrainId, election::Roles>>,
+    /// This host's availability tier, as its record last measured it (#190). `None` with
+    /// too little history.
+    availability: Mutex<Option<u8>>,
 }
 
 impl Bridge {
@@ -153,6 +157,7 @@ impl Bridge {
             neighbours: Arc::default(),
             hello_tx: tokio::sync::watch::channel(None).0,
             roles: Mutex::default(),
+            availability: Mutex::new(None),
         })
     }
 
@@ -311,6 +316,7 @@ impl Bridge {
             result = Arc::clone(&bridge).watch_embed_settings() => result,
             result = data::listen(Arc::clone(&bridge), data_endpoint) => result,
             result = hello::run(Arc::clone(&bridge)) => result,
+            result = availability::run(Arc::clone(&bridge)) => result,
             result = data::inbound(bridge, net) => result,
         };
         drop(status);
@@ -318,6 +324,15 @@ impl Bridge {
     }
 
     // ── what the loops share ────────────────────────────────────────────────
+
+    /// This host's availability tier, as last measured.
+    pub(crate) fn availability(&self) -> Option<u8> {
+        *self.availability.lock().expect("availability")
+    }
+
+    pub(crate) fn set_availability(&self, tier: Option<u8>) {
+        *self.availability.lock().expect("availability") = tier;
+    }
 
     /// How this host reaches other devices.
     pub(crate) fn transport(&self) -> &dyn PeerTransport {
