@@ -5,8 +5,9 @@
 //! live here, beside the [`WorkspaceBackend`](crate::WorkspaceBackend) trait they mirror,
 //! rather than in `sapphire-framework-ipc`, which must stay free of the search stack.
 //!
-//! Every request carries `ws`, the workspace root, so a request never depends on anything
-//! the connection remembers.
+//! A server serves one workspace at a time (#215), so no request names one: every
+//! `workspace.*` and `sync.*` method acts on the server's current workspace, which
+//! [`WORKSPACE_SELECT`] and [`WORKSPACE_INIT`] change and [`WORKSPACE_CURRENT`] reports.
 
 use std::path::PathBuf;
 
@@ -24,7 +25,10 @@ use crate::{BackendEvent, FileSearchResult, SearchMode};
 /// 2: `workspace.list`, `workspace.forget`.
 ///
 /// 3: search results carry `snippet` in place of `chunks` (#184).
-pub const API_VERSION: u32 = 3;
+///
+/// 4: one workspace per server (#215): no `ws` parameter, `workspace.select` and
+/// `workspace.current` in place of `workspace.list` and `workspace.forget`.
+pub const API_VERSION: u32 = 4;
 
 /// Search the workspace.
 pub const SEARCH: &str = "workspace.search";
@@ -44,11 +48,44 @@ pub const LIST_DIR: &str = "workspace.list_dir";
 /// means "walk the files and update the index", which reads as peer-to-peer sync once the
 /// bridge exists.
 pub const REINDEX: &str = "workspace.reindex";
-/// Start receiving [`EVENT`] notifications for a workspace.
+/// Start receiving [`EVENT`] notifications for the current workspace, and for whichever
+/// workspace is current after a switch.
 pub const SUBSCRIBE: &str = "workspace.subscribe";
-/// Create this app's workspace home in a directory: the marker, a registry entry and a
-/// sync id.
+/// Create this app's workspace home in a directory — the marker and a registry entry —
+/// and make it the current workspace.
 pub const WORKSPACE_INIT: &str = "workspace.init";
+/// Make an existing workspace of this app the current one.
+pub const WORKSPACE_SELECT: &str = "workspace.select";
+/// Report the current workspace.
+pub const WORKSPACE_CURRENT: &str = "workspace.current";
+
+/// Parameters of [`WORKSPACE_SELECT`].
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct WorkspaceSelectParams {
+    /// The workspace's root: absolute, or relative to the server's cwd.
+    pub dir: PathBuf,
+}
+
+/// Result of [`WORKSPACE_CURRENT`].
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct WorkspaceCurrentResult {
+    /// The current workspace; `None` before one is selected.
+    pub workspace: Option<CurrentWorkspace>,
+}
+
+/// The workspace a server serves, as [`WORKSPACE_CURRENT`] and [`WORKSPACE_SELECT`]
+/// report it.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct CurrentWorkspace {
+    /// Its root on this host.
+    pub root: PathBuf,
+    /// Its identity across devices, when one has been minted. Read, never minted.
+    pub workspace_id: Option<grain_id::GrainId>,
+    /// Whether the root still holds this application's marker directory.
+    pub reachable: bool,
+    /// Its replication state, as [`SYNC_STATUS`] reports it.
+    pub sync: SyncStatusResult,
+}
 
 /// Parameters of [`WORKSPACE_INIT`].
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -73,18 +110,9 @@ pub const EVENT: &str = "workspace.event";
 /// What the server knows about itself.
 pub const SERVER_INFO: &str = "server.info";
 
-/// Parameters naming only a workspace.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct WsParams {
-    /// The workspace root.
-    pub ws: PathBuf,
-}
-
-/// Parameters naming a path inside a workspace.
+/// Parameters naming a path inside the workspace.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PathParams {
-    /// The workspace root.
-    pub ws: PathBuf,
     /// Workspace-relative path.
     pub path: PathBuf,
 }
@@ -92,8 +120,6 @@ pub struct PathParams {
 /// Parameters naming a path and the text to put there.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ContentParams {
-    /// The workspace root.
-    pub ws: PathBuf,
     /// Workspace-relative path.
     pub path: PathBuf,
     /// The text.
@@ -103,8 +129,6 @@ pub struct ContentParams {
 /// Parameters of [`SEARCH`].
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SearchParams {
-    /// The workspace root.
-    pub ws: PathBuf,
     /// The query.
     pub query: String,
     /// Maximum number of files to return.
@@ -163,7 +187,7 @@ pub struct Ack {}
 /// Parameters of an [`EVENT`] notification.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EventParams {
-    /// The workspace the event came from.
+    /// The root of the workspace the event came from: the current one when it was sent.
     pub ws: PathBuf,
     /// What happened.
     pub event: BackendEvent,
@@ -183,7 +207,6 @@ mod tests {
     #[test]
     fn search_parameters_round_trip() {
         let params = SearchParams {
-            ws: PathBuf::from("/tmp/ws"),
             query: "hello".into(),
             limit: 10,
             mode: SearchMode::Fts,
@@ -211,7 +234,7 @@ mod tests {
 
     #[test]
     fn a_missing_mode_defaults_to_hybrid() {
-        let value = serde_json::json!({ "ws": "/tmp/ws", "query": "q", "limit": 5 });
+        let value = serde_json::json!({ "query": "q", "limit": 5 });
         let params: SearchParams = serde_json::from_value(value).unwrap();
         assert_eq!(params.mode, SearchMode::Hybrid);
     }
@@ -282,28 +305,32 @@ mod tests {
     }
 
     #[test]
-    fn workspace_list_and_forget_round_trip() {
-        let entry = WorkspaceListEntry {
-            id: "notes".into(),
-            name: Some("Notes".into()),
+    fn the_current_workspace_round_trips() {
+        let current = CurrentWorkspace {
             root: PathBuf::from("/home/me/notes"),
-            reachable: true,
             workspace_id: Some(grain_id::GrainId::random()),
+            reachable: true,
             sync: SyncStatusResult::not_synced(),
         };
-        let back = round_trip(&WorkspaceListResult {
-            workspaces: vec![entry.clone()],
+        let back = round_trip(&WorkspaceCurrentResult {
+            workspace: Some(current.clone()),
         });
-        assert_eq!(back.workspaces[0].id, "notes");
-        assert_eq!(back.workspaces[0].workspace_id, entry.workspace_id);
-        assert!(!back.workspaces[0].sync.enabled);
-        assert_eq!(
-            round_trip(&WorkspaceForgetParams { id: "notes".into() }).id,
-            "notes"
+        let back = back.workspace.unwrap();
+        assert_eq!(back.root, current.root);
+        assert_eq!(back.workspace_id, current.workspace_id);
+        assert!(
+            round_trip(&WorkspaceCurrentResult::default())
+                .workspace
+                .is_none()
         );
-        assert_eq!(WORKSPACE_LIST, "workspace.list");
-        assert_eq!(WORKSPACE_FORGET, "workspace.forget");
-        assert_eq!(API_VERSION, 3);
+        assert_eq!(
+            round_trip(&WorkspaceSelectParams {
+                dir: PathBuf::from("/x")
+            })
+            .dir,
+            PathBuf::from("/x")
+        );
+        assert_eq!(API_VERSION, 4);
     }
 
     #[test]
@@ -318,8 +345,8 @@ mod tests {
             REINDEX,
             SUBSCRIBE,
             WORKSPACE_INIT,
-            WORKSPACE_LIST,
-            WORKSPACE_FORGET,
+            WORKSPACE_SELECT,
+            WORKSPACE_CURRENT,
         ] {
             assert!(name.starts_with("workspace."), "{name}");
         }
@@ -327,17 +354,17 @@ mod tests {
     }
 }
 
-/// Start syncing a workspace.
+/// Start syncing the current workspace.
 pub const SYNC_ENABLE: &str = "sync.enable";
-/// Stop syncing a workspace. Files stay.
+/// Stop syncing the current workspace. Files stay.
 pub const SYNC_DISABLE: &str = "sync.disable";
-/// Report a workspace's replication state.
+/// Report the current workspace's replication state.
 pub const SYNC_STATUS: &str = "sync.status";
 
 /// Place a workspace's directory, by name or id.
 pub const SYNC_MAP: &str = "sync.map";
 
-/// Parameters of [`SYNC_MAP`].
+/// Parameters of [`SYNC_MAP`]. The mapped directory becomes the current workspace.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SyncMapParams {
     /// The workspace, by name or id, as the workgroup lists it.
@@ -401,42 +428,6 @@ pub struct EmbeddingProgress {
     pub pending: u64,
     /// Whether an embedding pass is running now.
     pub running: bool,
-}
-
-/// List this application's workspaces on this host, with their sync state.
-pub const WORKSPACE_LIST: &str = "workspace.list";
-/// Drop a workspace from this host's list. Files stay; sync stops first.
-pub const WORKSPACE_FORGET: &str = "workspace.forget";
-
-/// Result of [`WORKSPACE_LIST`].
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct WorkspaceListResult {
-    /// One entry per workspace this server has on record, in the order they were added.
-    pub workspaces: Vec<WorkspaceListEntry>,
-}
-
-/// One row of [`WorkspaceListResult`].
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct WorkspaceListEntry {
-    /// The host registry's id for it.
-    pub id: String,
-    /// A display name, when one was given.
-    pub name: Option<String>,
-    /// Its root on this host.
-    pub root: PathBuf,
-    /// Whether the root still holds this application's marker directory.
-    pub reachable: bool,
-    /// Its identity across devices, when one has been minted. Read, never minted, by listing.
-    pub workspace_id: Option<grain_id::GrainId>,
-    /// Its replication state, as [`SYNC_STATUS`] reports it.
-    pub sync: SyncStatusResult,
-}
-
-/// Parameters of [`WORKSPACE_FORGET`].
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct WorkspaceForgetParams {
-    /// The host registry's id, as [`WorkspaceListEntry::id`] carries it.
-    pub id: String,
 }
 
 impl SyncStatusResult {

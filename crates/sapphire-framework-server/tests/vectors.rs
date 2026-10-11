@@ -52,7 +52,6 @@ async fn write(host: &common::Host, rel: &str, content: &str) {
         .call(
             proto::WRITE_FILE,
             proto::ContentParams {
-                ws: host.ws.clone(),
                 path: PathBuf::from(rel),
                 content: content.into(),
             },
@@ -189,7 +188,7 @@ async fn the_primary_waits_out_the_grace_period_then_backfills_on_its_own() {
     // B reports the file as pending.
     let status: proto::SyncStatusResult = b
         .client
-        .call(proto::SYNC_STATUS, proto::WsParams { ws: b.ws.clone() })
+        .call(proto::SYNC_STATUS, serde_json::json!({}))
         .await
         .unwrap();
     let progress = status.embedding.expect("B embeds");

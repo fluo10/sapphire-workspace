@@ -274,8 +274,10 @@ async fn build(
         grace: Duration::ZERO,
         interval: Duration::from_secs(1),
     });
+    // Each host its own selection: the hosts share this process's config directory.
     let server = AppServer::new(ctx, VERSION)
         .endpoint(endpoint.clone())
+        .selection_file(tmp.path().join("workspace.toml"))
         .sync(Arc::clone(&runtime));
     let server_task = tokio::spawn(async move { server.run().await });
     wait_until_listening(&endpoint, "the app server").await;
@@ -284,6 +286,15 @@ async fn build(
         .await
         .unwrap()
         .expect("the app server is listening");
+    // The host's one workspace, as a client selects it. On a restart the server has
+    // already come back to it, and this is a no-op.
+    let _: proto::CurrentWorkspace = client
+        .call(
+            proto::WORKSPACE_SELECT,
+            proto::WorkspaceSelectParams { dir: root.clone() },
+        )
+        .await
+        .expect("selecting the host's workspace");
 
     Host {
         tmp: Some(tmp),
@@ -536,12 +547,7 @@ async fn wait_until_listening(endpoint: &Endpoint, what: &str) {
 pub async fn enable_sync(host: &Host) {
     let _: proto::SyncEnableResult = host
         .client
-        .call(
-            proto::SYNC_ENABLE,
-            proto::WsParams {
-                ws: host.ws.clone(),
-            },
-        )
+        .call(proto::SYNC_ENABLE, serde_json::json!({}))
         .await
         .unwrap();
 }
@@ -560,12 +566,7 @@ pub async fn enable_sync_after_restart(host: &Host) {
     loop {
         let answer: std::result::Result<proto::SyncEnableResult, _> = host
             .client
-            .call(
-                proto::SYNC_ENABLE,
-                proto::WsParams {
-                    ws: host.ws.clone(),
-                },
-            )
+            .call(proto::SYNC_ENABLE, serde_json::json!({}))
             .await;
         match answer {
             Ok(_) => return,

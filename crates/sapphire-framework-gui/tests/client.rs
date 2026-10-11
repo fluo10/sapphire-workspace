@@ -185,9 +185,7 @@ async fn nothing_running_reads_absent_twice() {
     let s = (*client.snapshot()).clone();
     assert!(matches!(s.bridge, Conn::Absent));
     assert!(matches!(s.server, Conn::Absent));
-    let id = client.send(Command::SyncEnable {
-        root: f.tmp.path().into(),
-    });
+    let id = client.send(Command::SyncEnable);
     let err = outcome(&client, id).await.unwrap_err();
     assert!(err.contains("not running"), "{err}");
 }
@@ -245,7 +243,7 @@ async fn create_invite_and_retire_round_trip() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn workspace_init_sync_toggle_and_forget() {
+async fn workspace_init_sync_toggle_and_switch() {
     let f = fixture();
     let _bridge = start_bridge(&f).await;
     let client = spawn(&f);
@@ -257,50 +255,41 @@ async fn workspace_init_sync_toggle_and_forget() {
     outcome(&client, id).await.unwrap();
     let _server = start_server(&f).await;
     wait(|| async { client.snapshot().server.up().is_some() }).await;
+    let current = |client: &FrameworkClient| {
+        client
+            .snapshot()
+            .server
+            .up()
+            .and_then(|s| s.current.clone())
+    };
 
-    let dir = f.tmp.path().join("notes");
-    std::fs::create_dir_all(&dir).unwrap();
+    let notes = f.tmp.path().join("notes");
+    std::fs::create_dir_all(&notes).unwrap();
     let id = client.send(Command::WorkspaceInit {
-        dir: dir.clone(),
+        dir: notes.clone(),
         sync: true,
     });
     outcome(&client, id).await.unwrap();
-    wait(|| async {
-        client
-            .snapshot()
-            .server
-            .up()
-            .map(|s| s.workspaces.iter().any(|w| w.sync.enabled))
-            == Some(true)
-    })
-    .await;
-    let row = client.snapshot().server.up().unwrap().workspaces[0].clone();
+    wait(|| async { current(&client).is_some_and(|w| w.sync.enabled) }).await;
+    let notes = current(&client).unwrap().root;
 
-    let id = client.send(Command::SyncDisable {
-        root: row.root.clone(),
+    let id = client.send(Command::SyncDisable);
+    outcome(&client, id).await.unwrap();
+    wait(|| async { current(&client).is_some_and(|w| !w.sync.enabled) }).await;
+
+    // Another folder becomes the workspace; then back to the first, which syncs again
+    // because it has a sync id.
+    let other = f.tmp.path().join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    let id = client.send(Command::WorkspaceInit {
+        dir: other.clone(),
+        sync: false,
     });
     outcome(&client, id).await.unwrap();
-    wait(|| async {
-        client
-            .snapshot()
-            .server
-            .up()
-            .map(|s| !s.workspaces[0].sync.enabled)
-            == Some(true)
-    })
-    .await;
-
-    let id = client.send(Command::WorkspaceForget { id: row.id.clone() });
+    wait(|| async { current(&client).is_some_and(|w| w.root.ends_with("other")) }).await;
+    let id = client.send(Command::WorkspaceSelect { dir: notes.clone() });
     outcome(&client, id).await.unwrap();
-    wait(|| async {
-        client
-            .snapshot()
-            .server
-            .up()
-            .map(|s| s.workspaces.is_empty())
-            == Some(true)
-    })
-    .await;
+    wait(|| async { current(&client).is_some_and(|w| w.root == notes && w.sync.enabled) }).await;
 }
 
 /// A workgroup, a running server, and one synced workspace published into the ledger.
@@ -338,23 +327,15 @@ async fn workspace_map_creates_the_folder_and_syncs_it_under_the_ledger_id() {
     let _server = start_server(&f).await;
     let (client, workspace_id) = published_workspace(&f).await;
 
-    // This host already has the workspace: stop syncing it and drop it from the list, so
-    // the ledger entry is one this host does not have — what "Bring to this host…" offers.
-    let row = client.snapshot().server.up().unwrap().workspaces[0].clone();
-    let id = client.send(Command::SyncDisable {
-        root: row.root.clone(),
+    // Switch this host to another workspace, so the published one is one it does not
+    // serve — what "Bring to this host…" offers.
+    let plain = f.tmp.path().join("plain");
+    std::fs::create_dir_all(&plain).unwrap();
+    let id = client.send(Command::WorkspaceInit {
+        dir: plain,
+        sync: false,
     });
     outcome(&client, id).await.unwrap();
-    let id = client.send(Command::WorkspaceForget { id: row.id.clone() });
-    outcome(&client, id).await.unwrap();
-    wait(|| async {
-        client
-            .snapshot()
-            .server
-            .up()
-            .is_some_and(|s| s.workspaces.is_empty())
-    })
-    .await;
 
     // A folder that does not exist yet, as `bring_target` makes it.
     let dir = f.tmp.path().join("elsewhere").join("notes");
@@ -369,9 +350,9 @@ async fn workspace_map_creates_the_folder_and_syncs_it_under_the_ledger_id() {
     );
     wait(|| async {
         client.snapshot().server.up().is_some_and(|s| {
-            s.workspaces
-                .iter()
-                .any(|w| w.sync.enabled && w.workspace_id == Some(workspace_id))
+            s.current
+                .as_ref()
+                .is_some_and(|w| w.sync.enabled && w.workspace_id == Some(workspace_id))
         })
     })
     .await;
@@ -466,9 +447,7 @@ async fn a_process_that_never_answers_reads_error_and_does_not_stall_the_loop() 
     assert!(client.snapshot().fetched);
     assert!(matches!(client.snapshot().server, Conn::Absent));
     // A command queued behind the hung bridge still gets an outcome.
-    let id = client.send(Command::SyncEnable {
-        root: f.tmp.path().into(),
-    });
+    let id = client.send(Command::SyncEnable);
     let err = outcome(&client, id).await.unwrap_err();
     assert!(err.contains("not running"), "{err}");
 }

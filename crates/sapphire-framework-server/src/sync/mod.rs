@@ -266,13 +266,6 @@ impl SyncRuntime {
         if let Err(err) = self.sync_now(&key).await {
             tracing::warn!(root = %key.display(), "the first session after enabling failed: {err}");
         }
-
-        // Remembered for the next start: restart restore re-enables what this flag says.
-        if let Err(err) =
-            crate::registry::HostRegistry::for_app(self.ctx).set_synced(&key, true, true)
-        {
-            tracing::warn!(root = %key.display(), "could not record the workspace as synced: {err}");
-        }
         Ok(workspace_id)
     }
 
@@ -300,11 +293,6 @@ impl SyncRuntime {
                 .map_err(|e| Error::Bridge(e.to_string()))?;
             self.reregister().await?;
         }
-        if let Err(err) =
-            crate::registry::HostRegistry::for_app(self.ctx).set_synced(&key, false, false)
-        {
-            tracing::warn!(root = %key.display(), "could not record the workspace as not synced: {err}");
-        }
         Ok(())
     }
 
@@ -320,16 +308,15 @@ impl SyncRuntime {
             .map_err(|e| Error::Bridge(e.to_string()))
     }
 
-    /// Map a workgroup workspace onto a directory of this host, and sync it.
+    /// Place a workgroup workspace at a directory of this host: write its identity and
+    /// map there, returning the canonical root. [`Current::map`](crate::Current::map)
+    /// then selects it and syncs it.
     ///
     /// `selector` is the workspace's name or id, as [`workspaces`] lists it; `dir` must
     /// already be a workspace of this application — the directory is placed, not made.
-    /// Writing the map and enabling sync are one step: a path mapped but not enabled would
-    /// converge on the next start anyway, but a workspace believed synced with no id to
-    /// converge under is the state the sync id's error discipline exists to prevent.
     ///
     /// [`workspaces`]: SyncRuntime::workspaces
-    pub async fn map(self: &Arc<Self>, selector: &str, dir: &Path) -> Result<GrainId> {
+    pub async fn place(&self, selector: &str, dir: &Path) -> Result<PathBuf> {
         let workgroup = self.workspaces().await?;
         let wanted = workgroup
             .workspaces
@@ -400,8 +387,7 @@ impl SyncRuntime {
             .join(WORKSPACE_MAP_FILE);
         let workspace_id = wanted.workspace_id.to_string();
         std::fs::write(&map_path, format!("{workspace_id}\n")).map_err(Error::Io)?;
-
-        self.enable(&root).await
+        Ok(root)
     }
 
     /// What `sync.status` answers with.
@@ -560,7 +546,7 @@ impl SyncRuntime {
         let _serialised = self.reindexing.lock().await;
         // Opening the workspace is itself blocking work, and it is where the exclusive
         // retrieve-store lock is taken, so it happens here rather than inside the sweep.
-        let backend = match host.backend(&root).await {
+        let backend = match host.backend_at(&root).await {
             Ok(backend) => backend,
             Err(err) => {
                 tracing::warn!(root = %root.display(), "re-indexing after a session failed: {err}");
@@ -618,7 +604,7 @@ impl SyncRuntime {
                 None => return,
             }
         };
-        let backend = match host.backend(key).await {
+        let backend = match host.backend_at(key).await {
             Ok(backend) => backend,
             Err(err) => {
                 tracing::warn!(root = %key.display(), "embedding pass: {err}");
@@ -1577,10 +1563,14 @@ mod tests {
         f.runtime.enable(&f.root).await.unwrap();
 
         let host = Arc::new(crate::WorkspaceHost::new(&CTX));
-        let router = Arc::new(crate::workspace_router_with_sync(
+        host.select(&f.root, false).await.unwrap();
+        let current = Arc::new(crate::Current::new(
+            &CTX,
             host,
             Some(Arc::clone(&f.runtime)),
+            crate::selection::SelectionFile::at(f._tmp.path().join("workspace.toml")),
         ));
+        let router = Arc::new(crate::workspace_router(current));
         let (client_conn, server_conn) = sapphire_ipc::Connection::pair();
         tokio::spawn(async move {
             let info = sapphire_ipc::ServerInfo {
@@ -1605,7 +1595,6 @@ mod tests {
             .call(
                 sapphire_backend::protocol::WRITE_FILE,
                 sapphire_backend::protocol::ContentParams {
-                    ws: f.root.clone(),
                     path: PathBuf::from("through-the-server.md"),
                     content: "written by the server".into(),
                 },

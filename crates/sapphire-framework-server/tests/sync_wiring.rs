@@ -138,6 +138,13 @@ impl Fixture {
             .await
             .unwrap()
             .expect("the server is listening");
+        let _: proto::CurrentWorkspace = client
+            .call(
+                proto::WORKSPACE_SELECT,
+                proto::WorkspaceSelectParams { dir: root.clone() },
+            )
+            .await
+            .unwrap();
 
         Fixture {
             _tmp: tmp,
@@ -152,12 +159,7 @@ impl Fixture {
 
     async fn enable(&self) -> proto::SyncEnableResult {
         self.client
-            .call(
-                proto::SYNC_ENABLE,
-                proto::WsParams {
-                    ws: self.root.clone(),
-                },
-            )
+            .call(proto::SYNC_ENABLE, serde_json::json!({}))
             .await
             .unwrap()
     }
@@ -182,7 +184,7 @@ async fn a_synced_server_answers_sync_enable_and_registers_with_the_bridge() {
 
     let status: proto::SyncStatusResult = f
         .client
-        .call(proto::SYNC_STATUS, proto::WsParams { ws: f.root.clone() })
+        .call(proto::SYNC_STATUS, serde_json::json!({}))
         .await
         .unwrap();
     assert!(status.enabled);
@@ -210,12 +212,7 @@ async fn a_server_without_sync_does_not_answer_sync_enable() {
         .expect("the server is listening");
 
     let err = client
-        .call::<_, proto::SyncEnableResult>(
-            proto::SYNC_ENABLE,
-            proto::WsParams {
-                ws: tmp.path().join("ws"),
-            },
-        )
+        .call::<_, proto::SyncEnableResult>(proto::SYNC_ENABLE, serde_json::json!({}))
         .await
         .expect_err("without a runtime there is no sync.enable");
     assert!(!err.to_string().is_empty());
@@ -248,7 +245,6 @@ async fn a_write_through_the_server_is_scanned_without_the_watcher() {
         .call(
             proto::WRITE_FILE,
             proto::ContentParams {
-                ws: f.root.clone(),
                 path: PathBuf::from("via-ipc.md"),
                 content: "through the server".into(),
             },
@@ -264,7 +260,6 @@ async fn a_write_through_the_server_is_scanned_without_the_watcher() {
         .call(
             proto::READ_FILE,
             proto::PathParams {
-                ws: f.root.clone(),
                 path: PathBuf::from("via-ipc.md"),
             },
         )
@@ -272,4 +267,79 @@ async fn a_write_through_the_server_is_scanned_without_the_watcher() {
         .unwrap();
     assert_eq!(read.content, "through the server");
     let _ = &f.endpoint;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn switching_moves_sync_to_the_new_workspace_and_back() {
+    let f = Fixture::start().await;
+    let first = f.enable().await.workspace_id;
+
+    // Another workspace of the app, never synced: selecting it stops syncing the first
+    // and registers nothing new.
+    let other = f._tmp.path().join("other");
+    std::fs::create_dir_all(other.join(".sapphire-syncwiring")).unwrap();
+    let switched: proto::CurrentWorkspace = f
+        .client
+        .call(
+            proto::WORKSPACE_SELECT,
+            proto::WorkspaceSelectParams { dir: other.clone() },
+        )
+        .await
+        .unwrap();
+    assert!(!switched.sync.enabled);
+    assert!(
+        f.stub.last_workspaces().is_empty(),
+        "the first is unregistered"
+    );
+
+    // Files go to the new one now.
+    let _: proto::Ack = f
+        .client
+        .call(
+            proto::WRITE_FILE,
+            proto::ContentParams {
+                path: PathBuf::from("here.md"),
+                content: "x".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(other.join("here.md").is_file());
+    assert!(!f.root.join("here.md").exists());
+
+    // Back to the first, which has a sync id: it syncs again by itself.
+    let back: proto::CurrentWorkspace = f
+        .client
+        .call(
+            proto::WORKSPACE_SELECT,
+            proto::WorkspaceSelectParams {
+                dir: f.root.clone(),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(back.sync.enabled);
+    assert_eq!(f.stub.last_workspaces(), vec![first]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn selecting_a_directory_that_is_not_a_workspace_keeps_the_current_one() {
+    let f = Fixture::start().await;
+    let plain = f._tmp.path().join("plain");
+    std::fs::create_dir_all(&plain).unwrap();
+    let err = f
+        .client
+        .call::<_, proto::CurrentWorkspace>(
+            proto::WORKSPACE_SELECT,
+            proto::WorkspaceSelectParams { dir: plain },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, sapphire_ipc::Error::Rpc(_)), "{err:?}");
+    let current: proto::WorkspaceCurrentResult = f
+        .client
+        .call(proto::WORKSPACE_CURRENT, serde_json::json!({}))
+        .await
+        .unwrap();
+    assert_eq!(current.workspace.unwrap().root, f.root);
 }

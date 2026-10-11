@@ -20,12 +20,12 @@ async fn synced_pair(net: &LoopbackNetwork) -> (Host, Host) {
     common::introduce(&a, &b);
     let _: proto::SyncEnableResult = a
         .client
-        .call(proto::SYNC_ENABLE, proto::WsParams { ws: a.ws.clone() })
+        .call(proto::SYNC_ENABLE, serde_json::json!({}))
         .await
         .unwrap();
     let _: proto::SyncEnableResult = b
         .client
-        .call(proto::SYNC_ENABLE, proto::WsParams { ws: b.ws.clone() })
+        .call(proto::SYNC_ENABLE, serde_json::json!({}))
         .await
         .unwrap();
     (a, b)
@@ -57,7 +57,6 @@ async fn a_write_made_through_the_ipc_client_is_synced() {
         .call(
             proto::WRITE_FILE,
             proto::ContentParams {
-                ws: a.ws.clone(),
                 path: PathBuf::from("note.md"),
                 content: "from host a".into(),
             },
@@ -89,7 +88,6 @@ async fn the_search_index_on_the_receiving_host_finds_the_new_file() {
         .call(
             proto::WRITE_FILE,
             proto::ContentParams {
-                ws: a.ws.clone(),
                 path: PathBuf::from("searchable.md"),
                 content: "the quick brown fox".into(),
             },
@@ -106,7 +104,6 @@ async fn the_search_index_on_the_receiving_host_finds_the_new_file() {
             .call(
                 proto::SEARCH,
                 proto::SearchParams {
-                    ws: b.ws.clone(),
                     query: "brown".into(),
                     limit: 10,
                     mode: sapphire_backend::SearchMode::Fts,
@@ -138,7 +135,6 @@ async fn a_host_that_was_offline_catches_up_when_it_returns() {
         .call(
             proto::WRITE_FILE,
             proto::ContentParams {
-                ws: a.ws.clone(),
                 path: PathBuf::from("while-away.md"),
                 content: "written while b was down".into(),
             },
@@ -150,7 +146,7 @@ async fn a_host_that_was_offline_catches_up_when_it_returns() {
     let b = b.restart(&net).await;
     let _: proto::SyncEnableResult = b
         .client
-        .call(proto::SYNC_ENABLE, proto::WsParams { ws: b.ws.clone() })
+        .call(proto::SYNC_ENABLE, serde_json::json!({}))
         .await
         .unwrap();
 
@@ -172,7 +168,6 @@ async fn with_the_bridge_down_the_app_server_still_serves_files() {
         .call(
             proto::WRITE_FILE,
             proto::ContentParams {
-                ws: a.ws.clone(),
                 path: PathBuf::from("offline.md"),
                 content: "still works".into(),
             },
@@ -182,7 +177,7 @@ async fn with_the_bridge_down_the_app_server_still_serves_files() {
 
     let status: proto::SyncStatusResult = a
         .client
-        .call(proto::SYNC_STATUS, proto::WsParams { ws: a.ws.clone() })
+        .call(proto::SYNC_STATUS, serde_json::json!({}))
         .await
         .expect("status must answer even with the bridge down");
     assert!(!status.bridge_available);

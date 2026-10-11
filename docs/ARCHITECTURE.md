@@ -201,7 +201,7 @@ redb のキャッシュは排他ロックで 1 プロセスしか開けない。
 つまり各アプリの **サーバ** がワークスペースを所有する。CLI・stdio MCP・desktop は
 `sapphire-framework-ipc` 経由でサーバに接続する（UDS / named pipe / プロセス内チャネル上の
 NDJSON JSON-RPC。**同一 OS ユーザー前提でトークンなし** — Unix はピア uid を検査して切断する）。
-1 アプリ 1 サーバで複数ワークスペースを多重管理（LRU 閉じ）。サーバは SIGTERM/SIGINT
+1 アプリ 1 サーバ、**1 サーバ 1 ワークスペース**（#215）。サーバは SIGTERM/SIGINT
 まで常駐し、OS サービス（systemd / LaunchAgent / タスクスケジューラ）として走る。CLI は
 サーバを起動しない — サーバが無ければそれを報告して exit 1（start-on-demand と
 `SpawnConfig` / idle-exit は廃止。起動するのは `serve` とサービスマネージャだけ）。
@@ -211,10 +211,14 @@ CLI は全アプリ共通のフラット語彙 `serve` / `status` / `service` / 
 制御面の路由は所有権に従う: `workspace` コマンドはアプリのサーバへ、`workgroup` / `device`
 コマンドは bridge へ直接。`status` の報告書は CLI と IPC `server.info` が同じ
 `StatusReport` 型を共有する（`backend::protocol` にあり、サーバ crate からも re-export）。
-サーバは**ホストのワークスペース台帳**（`<config dir>/workspaces.toml`）を持ち、`workspace.list` が
-それを返す（CLI の `workspace list` は稼働中のサーバに聞く）。`workspace.forget` は台帳から外して
-同期も止める — ルートが既に無いワークスペースでも停止する。`serve` は起動時に台帳から同期中の
-ワークスペースを復元する（再起動後に手動で有効化し直さなくてよい）。詳細はプロセス構成仕様 §2, §4。
+どのワークスペースを提供するかはサーバが持つ（`<config dir>/workspace.toml` に `root` と
+`sync`）。クライアント（CLI・GUI・MCP/ACP）はワークスペースを指定しない — `workspace.*` /
+`sync.*` は常に現在のワークスペースに対して働く。切り替えは `workspace.select`（`init` と
+`sync.map` も切り替える）で、プロセスは再起動せず、開けなければ元のまま。選択時、sync id を持つ
+ワークスペースなら同期がオンになる。同期するのは現在のワークスペースだけで、bridge にもそれだけを
+登録する。CLI はカレントディレクトリに従わず、別のワークスペースの中で実行されたらエラーにする
+（`IpcBackend::check_cwd`）。`serve` は起動時に `workspace.toml` のワークスペースとその同期を
+復元する。詳細はプロセス構成仕様 §2, §4 と[1 サーバ 1 ワークスペース仕様](superpowers/specs/2026-10-11-single-workspace-server-design.md)。
 
 ### bridge はホスト常駐の交換台（`apps/sapphire-bridge`）
 

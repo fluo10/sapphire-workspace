@@ -47,7 +47,6 @@ async fn write(host: &common::Host, rel: &str, content: &str) {
         .call(
             proto::WRITE_FILE,
             proto::ContentParams {
-                ws: host.ws.clone(),
                 path: PathBuf::from(rel),
                 content: content.into(),
             },

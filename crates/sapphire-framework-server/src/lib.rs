@@ -1,8 +1,9 @@
 //! The app server skeleton.
 //!
 //! An application builds one of these, adds its own methods, and runs it. Everything a
-//! sapphire app needs on the server side — owning the workspaces, answering `workspace.*`,
-//! pushing events — is here.
+//! sapphire app needs on the server side — owning its workspace, answering `workspace.*`,
+//! pushing events — is here. A server serves one workspace at a time (#215): see
+//! [`Current`].
 //!
 //! See `docs/superpowers/specs/2026-09-16-process-architecture-design.md` §4.
 //!
@@ -20,16 +21,14 @@
 
 #![warn(missing_docs)]
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use std::path::Path;
-
 use sapphire_backend::protocol as proto;
-use sapphire_backend::{WorkspaceEntry, WorkspaceRegistry};
 use sapphire_framework_service::ServiceSpec;
-use sapphire_ipc::{Endpoint, ManagedBy, Router, RpcError, ServerInfo, serve};
-use sapphire_workspace::{AppContext, Workspace};
+use sapphire_ipc::{Endpoint, ManagedBy, Router, ServerInfo, serve};
+use sapphire_workspace::AppContext;
 
 /// How long a server's shutdown waits for its open connections to wind down on their own.
 ///
@@ -40,25 +39,26 @@ use sapphire_workspace::{AppContext, Workspace};
 const SERVE_GRACE: Duration = Duration::from_secs(2);
 
 mod command;
+mod current;
 mod error;
 mod events;
 mod handlers;
 mod host;
-mod listing;
-mod registry;
+mod selection;
 pub mod sync;
 #[cfg(test)]
 mod test_support;
 
 pub use command::{
     DeviceCommand, FrameworkCommand, StatusReport, StatusRow, WorkgroupCommand, WorkspaceCommand,
-    render_workspace_list,
+    render_workspace,
 };
+pub use current::Current;
 pub use error::{Error, Result};
 pub use events::subscribe_method;
-pub use handlers::{workspace_router, workspace_router_with_sync};
-pub use host::{DEFAULT_IDLE, DEFAULT_MAX_OPEN, WorkspaceHost};
-pub use registry::{HOST_REGISTRY_FILE, HostEntry, HostRegistry};
+pub use handlers::workspace_router;
+pub use host::WorkspaceHost;
+pub use selection::{SELECTION_FILE, Selection, SelectionFile};
 pub use sync::{BackfillTiming, SyncRuntime, SyncStatus, sync_router};
 
 /// An application's server.
@@ -66,8 +66,8 @@ pub struct AppServer {
     ctx: &'static AppContext,
     version: &'static str,
     endpoint: Option<Endpoint>,
-    max_open: usize,
-    workspace_idle: Duration,
+    /// Where `workspace.toml` lives; `None` is the config directory's.
+    selection_file: Option<PathBuf>,
     host: Arc<WorkspaceHost>,
     sync: Option<Arc<SyncRuntime>>,
     extend: Option<Box<dyn FnOnce(Router) -> Router + Send>>,
@@ -130,8 +130,7 @@ impl AppServer {
             ctx,
             version,
             endpoint: None,
-            max_open: DEFAULT_MAX_OPEN,
-            workspace_idle: DEFAULT_IDLE,
+            selection_file: None,
             host: Arc::new(WorkspaceHost::new(ctx)),
             sync: None,
             extend: None,
@@ -153,23 +152,22 @@ impl AppServer {
         self
     }
 
-    /// How many workspaces to keep open, and how long a cold one may linger.
-    pub fn limits(mut self, max_open: usize, idle: Duration) -> AppServer {
-        self.max_open = max_open;
-        self.workspace_idle = idle;
-        self.host = Arc::new(WorkspaceHost::with_limits(self.ctx, max_open, idle));
+    /// Keep the selected workspace (`workspace.toml`) at `path` rather than in the
+    /// application's config directory: for fixtures that run several hosts in one process.
+    pub fn selection_file(mut self, path: PathBuf) -> AppServer {
+        self.selection_file = Some(path);
         self
     }
 
-    /// Serve `sync.enable`, `sync.disable` and `sync.status`, and keep a replica of each
-    /// synced workspace in step with its files.
+    /// Serve `sync.enable`, `sync.disable`, `sync.map` and `sync.status`, and keep a replica
+    /// of the workspace in step with its files while it is synced.
     ///
     /// Without this the server has no sync at all: an application that does not call it
     /// never talks to the bridge. The runtime is built by the caller because it needs the
     /// bridge connection, which is the caller's to open and to close.
     pub fn sync(mut self, runtime: Arc<SyncRuntime>) -> AppServer {
         // The runtime re-indexes what a session writes, and the index belongs to this host:
-        // tell it where the workspaces live before anything can arrive.
+        // tell it where the workspace lives before anything can arrive.
         runtime.set_host(Arc::clone(&self.host));
         self.sync = Some(runtime);
         self
@@ -208,8 +206,8 @@ impl AppServer {
         self
     }
 
-    /// The workspaces this server has open. An application's own handlers use it to reach a
-    /// workspace the same way the framework's do.
+    /// The workspace this server has open. An application's own handlers use it to reach
+    /// the workspace the same way the framework's do: [`WorkspaceHost::backend`].
     pub fn host(&self) -> &Arc<WorkspaceHost> {
         &self.host
     }
@@ -220,11 +218,11 @@ impl AppServer {
             ctx,
             version,
             endpoint,
+            selection_file,
             host,
             sync,
             extend,
             status_rows,
-            ..
         } = self;
 
         let endpoint = match endpoint {
@@ -249,20 +247,24 @@ impl AppServer {
 
         let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
 
+        let file = match selection_file {
+            Some(path) => SelectionFile::at(path),
+            None => SelectionFile::for_app(ctx),
+        };
+        let current = Arc::new(Current::new(ctx, Arc::clone(&host), sync.clone(), file));
+        // Back to the workspace this host had, before the first client can ask for it.
+        let restoring = current.restore().await;
+
         let mut router = subscribe_method(
             Arc::clone(&host),
-            workspace_init_method(
-                ctx,
-                workspace_router_with_sync(Arc::clone(&host), sync.clone()),
-            ),
+            current::current_methods(Arc::clone(&current), workspace_router(Arc::clone(&current))),
         );
-        if let Some(runtime) = &sync {
-            // `sync_router` is applied *under* the framework's own methods so a later
+        if sync.is_some() {
+            // `sync_router` is applied *under* the application's own methods so a later
             // `extend` can still replace one, and after `subscribe_method` so the
             // `workspace.*` namespace is complete.
-            router = sync_router(Arc::clone(runtime), router);
+            router = sync_router(Arc::clone(&current), router);
         }
-        router = listing::listing_methods(ctx, sync.clone(), router);
         // `server.info` answers the typed [`StatusReport`] — the same shape the CLI's
         // `status` renders — so the CLI and a future GUI read one record. The rows come
         // from the application's builder, called once per report.
@@ -344,26 +346,9 @@ impl AppServer {
                         tracing::warn!("the live dial loop ended: {err}");
                     }
                 });
-                // What the registry says was synced comes back on every start.
-                let restoring = tokio::spawn(listing::restore(ctx, Arc::clone(runtime)));
-                Some((announcements, watching, dialling, restoring))
+                Some((announcements, watching, dialling))
             }
             None => None,
-        };
-
-        // Close cold workspaces as their idle limit passes. The server itself no longer
-        // exits on idle — it is service-managed for keeps — but an open workspace still
-        // holds its cache's exclusive lock, so the LRU sweep stays.
-        let ticker = {
-            let host = Arc::clone(&host);
-            tokio::spawn(async move {
-                let mut interval = tokio::time::interval(Duration::from_secs(60));
-                interval.tick().await;
-                loop {
-                    interval.tick().await;
-                    host.close_idle();
-                }
-            })
         };
 
         let mut connections = tokio::task::JoinSet::new();
@@ -394,9 +379,10 @@ impl AppServer {
             }
         }
 
-        ticker.abort();
-        if let Some((announcements, watching, dialling, restoring)) = _sync_tasks {
+        if let Some(restoring) = restoring {
             restoring.abort();
+        }
+        if let Some((announcements, watching, dialling)) = _sync_tasks {
             announcements.abort();
             watching.abort();
             dialling.abort();
@@ -408,7 +394,7 @@ impl AppServer {
             // server is gone (spec §2.2: cancellation is disconnection).
             runtime.drop_connections().await;
         }
-        host.close_all();
+        host.close();
         drop(listener); // removes the socket file on Unix
 
         // Reap the per-connection serve tasks. Each one pins the router, the router pins
@@ -426,129 +412,6 @@ impl AppServer {
         while connections.join_next().await.is_some() {}
         Ok(())
     }
-}
-
-/// Add [`WORKSPACE_INIT`] to `router`.
-///
-/// The CLI hands the request over IPC; the server does the creating (spec decision 1/7 of
-/// `2026-09-24-app-command-system-design.md`), so a workspace created through the CLI or
-/// the GUI is one this server already knows. What one call creates:
-///
-/// - the marker directory `.<app_name>` under the requested root, idempotently;
-/// - the registry entry in the marker's `config.toml`, as the `[workspace.<id>]` table
-///   the CLI and the GUI both read.
-///
-/// The marker's sync id is deliberately not minted here: it is the replica's to name, so
-/// `sync.enable` / `sync.map` mint it on first use.
-fn workspace_init_method(ctx: &'static AppContext, router: Router) -> Router {
-    router.method(proto::WORKSPACE_INIT, move |req| {
-        async move {
-            let params: proto::WorkspaceInitParams = serde_json::from_value(req.params)
-                .map_err(|e| RpcError::invalid_params(format!("bad parameters: {e}")))?;
-            let result = init_workspace(ctx, &params.dir).map_err(|e| {
-                // The caller's mistake is the caller's to fix: a bad path is INVALID_PARAMS,
-                // anything else is the server's problem.
-                if matches!(
-                    e,
-                    Error::Workspace(
-                        sapphire_workspace::Error::MarkerDirMissing { .. }
-                            | sapphire_workspace::Error::MarkerNotFound { .. }
-                            | sapphire_workspace::Error::PathEscapesWorkspace { .. }
-                    )
-                ) {
-                    RpcError::invalid_params(e.to_string())
-                } else {
-                    RpcError::internal(e.to_string())
-                }
-            })?;
-            serde_json::to_value(result).map_err(|e| RpcError::internal(e.to_string()))
-        }
-    })
-}
-
-/// Create the workspace home at `dir`: the marker directory and the registry entry,
-/// idempotently. The sync id is `sync.enable` / `sync.map`'s to mint, not this call's.
-///
-/// A relative `dir` is resolved against the server's cwd — the CLI's `dir` argument names
-/// the same tree whatever process resolves it, and the server is the process that opens
-/// the workspace afterwards. The registry entry's id is the root's directory name,
-/// slugified; `created` is `false` when the marker was already there, and an already
-/// registered root keeps its entry as it is.
-fn init_workspace(ctx: &'static AppContext, dir: &Path) -> Result<proto::WorkspaceInitResult> {
-    let root = std::env::current_dir()
-        .map_err(Error::Io)?
-        .join(dir)
-        .canonicalize()
-        .map_err(Error::Io)?;
-    let marker = root.join(format!(".{}", ctx.app_name));
-    let created = !marker.is_dir();
-    if created {
-        std::fs::create_dir(&marker).map_err(Error::Io)?;
-    }
-
-    // Reads the marker's `config.toml`, keyed the way the apps' CLIs key their
-    // `--workspace` selectors. The registry lives in the marker, so it travels with the
-    // workspace when it syncs.
-    let workspace = Workspace::from_root(ctx, &root)?;
-    let id = registry::slug(&root);
-    let config_path = workspace.config_path();
-    let registry = read_registry(&config_path)?;
-    if registry.get(&id).is_none() {
-        let mut registry = registry;
-        registry.insert(id.clone(), WorkspaceEntry::local(&root));
-        write_registry(&config_path, &registry)?;
-    }
-    // The host-wide list of workspaces, which `workspace.list` reads. `root` is canonical.
-    registry::HostRegistry::for_app(ctx).upsert(&root)?;
-
-    Ok(proto::WorkspaceInitResult {
-        root,
-        workspace_id: id,
-        created,
-    })
-}
-
-/// The registry as the marker's `config.toml` holds it, or an empty one.
-///
-/// A file another application wrote without a `[workspace]` table is an empty registry,
-/// not an error: the marker's config is the app's own file, and a workspace created
-/// before this table existed is a workspace with no entries.
-fn read_registry(path: &Path) -> Result<WorkspaceRegistry> {
-    #[derive(serde::Deserialize, Default)]
-    struct Config {
-        #[serde(default)]
-        workspace: WorkspaceRegistry,
-    }
-    match std::fs::read_to_string(path) {
-        Ok(text) => {
-            let config: Config = toml::from_str(&text).map_err(|e| Error::SyncId(e.to_string()))?;
-            Ok(config.workspace)
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(WorkspaceRegistry::default()),
-        Err(e) => Err(Error::Io(e)),
-    }
-}
-
-/// Write the registry back into the marker's `config.toml`, keeping the rest of the file.
-///
-/// The read-modify-write is what the plan's risk note asks for: the marker's config is the
-/// app's own document, and a rewrite that dropped the rest of it would eat an
-/// application's settings.
-fn write_registry(path: &Path, registry: &WorkspaceRegistry) -> Result<()> {
-    #[derive(serde::Deserialize, serde::Serialize, Default)]
-    struct Config {
-        #[serde(default, skip_serializing_if = "WorkspaceRegistry::is_empty")]
-        workspace: WorkspaceRegistry,
-    }
-    let text = match std::fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => return Err(Error::Io(e)),
-    };
-    let mut config: Config = toml::from_str(&text).unwrap_or_default();
-    config.workspace = registry.clone();
-    let out = toml::to_string_pretty(&config).map_err(|e| Error::SyncId(e.to_string()))?;
-    std::fs::write(path, out).map_err(Error::Io)
 }
 
 #[cfg(test)]

@@ -144,7 +144,7 @@ mod tests {
         // The flat command vocabulary an app flattens beside its own verbs.
         let _serve: FrameworkCommand = FrameworkCommand::Serve;
         let _status: FrameworkCommand = FrameworkCommand::Status;
-        let _workspace: FrameworkCommand = FrameworkCommand::Workspace(WorkspaceCommand::List);
+        let _workspace: FrameworkCommand = FrameworkCommand::Workspace(WorkspaceCommand::Show);
         let _workgroup: FrameworkCommand = FrameworkCommand::Workgroup(WorkgroupCommand::List);
         let _device: FrameworkCommand = FrameworkCommand::Device(DeviceCommand::List);
 

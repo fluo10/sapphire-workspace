@@ -31,7 +31,8 @@ pub enum FrameworkCommand {
     /// Install, remove or report this application's operating-system service.
     #[command(subcommand)]
     Service(ServiceCommand),
-    /// Create, list and map this application's workspaces.
+    /// Create, select, show and map this application's workspace. The server serves one
+    /// at a time.
     #[command(subcommand)]
     Workspace(WorkspaceCommand),
     /// Found, show or join the workgroup this device belongs to.
@@ -82,15 +83,16 @@ impl FrameworkCommand {
     }
 }
 
-/// The `workspace` subcommands (spec decisions 1/6/7).
+/// The `workspace` subcommands (#215: one workspace per server).
 ///
-/// `init` and `map`'s write go to the app's server over IPC, because the server owns the
-/// marker directories, the registries and the sync ids; `list` asks the server for this
-/// host's workspaces and then the bridge for the workgroup's ledger;
-/// `map`'s selector resolution is the workgroup's word, so it goes to the bridge first.
+/// `init`, `select` and `map`'s write go to the app's server over IPC, because the server
+/// owns the marker directories, the sync ids and which workspace it serves; `show` asks the
+/// server for its workspace and then the bridge for the workgroup's ledger; `map`'s
+/// selector resolution is the workgroup's word, so it goes to the bridge first. These are
+/// the only verbs that take a path: everything else acts on the server's workspace.
 #[derive(Debug, clap::Subcommand)]
 pub enum WorkspaceCommand {
-    /// Create this app's workspace home in the given directory.
+    /// Create this app's workspace home in the given directory, and switch the server to it.
     Init {
         /// Where the workspace root goes. Defaults to the current directory.
         dir: Option<PathBuf>,
@@ -98,9 +100,14 @@ pub enum WorkspaceCommand {
         #[arg(long)]
         sync: bool,
     },
-    /// List this host's workspaces (from the server), then the workgroup's.
-    List,
-    /// Tie a local directory to a workspace the workgroup knows.
+    /// Switch the server to an existing workspace of this app.
+    Select {
+        /// The workspace's root. Defaults to the current directory.
+        dir: Option<PathBuf>,
+    },
+    /// Show the server's workspace, then the workgroup's workspaces of this app.
+    Show,
+    /// Bring a workspace the workgroup knows to a local directory, and switch to it.
     Map {
         /// The workspace, by name or id, as the workgroup lists it.
         selector: String,
@@ -117,7 +124,8 @@ impl WorkspaceCommand {
     pub async fn dispatch(self, app: &'static str, version: &'static str) -> Result<i32> {
         match self {
             WorkspaceCommand::Init { dir, sync } => workspace_init(app, version, dir, sync).await,
-            WorkspaceCommand::List => workspace_list(app, version).await,
+            WorkspaceCommand::Select { dir } => workspace_select(app, version, dir).await,
+            WorkspaceCommand::Show => workspace_show(app, version).await,
             WorkspaceCommand::Map { selector, dir } => {
                 workspace_map(app, version, &selector, dir).await
             }
@@ -385,7 +393,8 @@ async fn workspace_init(
         return Ok(1);
     };
 
-    let dir = dir.unwrap_or_else(|| PathBuf::from("."));
+    // Resolved here: the server's cwd is not the user's.
+    let dir = std::env::current_dir()?.join(dir.unwrap_or_else(|| PathBuf::from(".")));
     let result: proto::WorkspaceInitResult = client
         .call(proto::WORKSPACE_INIT, proto::WorkspaceInitParams { dir })
         .await?;
@@ -398,25 +407,16 @@ async fn workspace_init(
             result.workspace_id
         );
     }
+    println!("the {app} server now serves {}", result.root.display());
 
     if sync {
         let enabled: proto::SyncEnableResult = client
-            .call(
-                proto::SYNC_ENABLE,
-                proto::WsParams {
-                    ws: result.root.clone(),
-                },
-            )
+            .call(proto::SYNC_ENABLE, serde_json::json!({}))
             .await?;
         // Never fails on account of the bridge: the workspace is synced either way, and
         // the status is the user's word for what the workgroup does not know yet.
         let status: proto::SyncStatusResult = client
-            .call(
-                proto::SYNC_STATUS,
-                proto::WsParams {
-                    ws: result.root.clone(),
-                },
-            )
+            .call(proto::SYNC_STATUS, serde_json::json!({}))
             .await
             .unwrap_or(proto::SyncStatusResult {
                 enabled: true,
@@ -433,52 +433,50 @@ async fn workspace_init(
     Ok(0)
 }
 
-/// Render the server's `workspace.list` as the CLI prints it: `id root state`.
+/// Render the server's workspace as the CLI prints it: `root state`.
 ///
-/// Public so the integration tests can capture it; the `workspace list` verb writes it to
-/// standard output.
-pub async fn render_workspace_list(client: &sapphire_ipc::Client, out: &mut String) -> Result<i32> {
-    let list: proto::WorkspaceListResult = client
-        .call(proto::WORKSPACE_LIST, serde_json::json!({}))
+/// Public so the integration tests can capture it; `workspace show` writes it to standard
+/// output.
+pub async fn render_workspace(client: &sapphire_ipc::Client, out: &mut String) -> Result<i32> {
+    let current: proto::WorkspaceCurrentResult = client
+        .call(proto::WORKSPACE_CURRENT, serde_json::json!({}))
         .await?;
-    if list.workspaces.is_empty() {
-        writeln!(out, "no workspaces on this host").expect("writing to a String cannot fail");
-    }
-    for row in list.workspaces {
-        let state = if !row.reachable {
-            "unreachable"
-        } else if row.sync.enabled {
-            "synced"
-        } else {
-            "not synced"
-        };
-        let star = if matches!(row.sync.topology, proto::Topology::Star { .. }) {
-            " (star)"
-        } else {
-            ""
-        };
-        let pending = match &row.sync.embedding {
-            Some(e) if e.pending > 0 => format!(", embedding {} pending", e.pending),
-            _ => String::new(),
-        };
+    let Some(ws) = current.workspace else {
         writeln!(
             out,
-            "{} {} {state}{star}{pending}",
-            row.id,
-            row.root.display()
+            "no workspace yet; run `workspace init <dir>` or `workspace select <dir>`"
         )
         .expect("writing to a String cannot fail");
-    }
+        return Ok(1);
+    };
+    writeln!(out, "{} {}", ws.root.display(), describe_state(&ws))
+        .expect("writing to a String cannot fail");
     Ok(0)
 }
 
-/// `workspace list`: this host's workspaces from the server, then the workgroup's ledger.
-///
-/// The server owns the host registry, so the first half is its `workspace.list`; nothing
-/// listening → the one line and exit 1, like `init`. The workgroup's ledger is the bridge's
-/// to answer, and the bridge being down is not the server half's failure: the ledger's
-/// absence is one line, and the exit is 0.
-async fn workspace_list(app: &'static str, version: &'static str) -> Result<i32> {
+/// `synced (star), embedding 3 pending` and the like.
+fn describe_state(ws: &proto::CurrentWorkspace) -> String {
+    let state = if !ws.reachable {
+        "unreachable"
+    } else if ws.sync.enabled {
+        "synced"
+    } else {
+        "not synced"
+    };
+    let star = if matches!(ws.sync.topology, proto::Topology::Star { .. }) {
+        " (star)"
+    } else {
+        ""
+    };
+    let pending = match &ws.sync.embedding {
+        Some(e) if e.pending > 0 => format!(", embedding {} pending", e.pending),
+        _ => String::new(),
+    };
+    format!("{state}{star}{pending}")
+}
+
+/// Connect to `app`'s server, or say none is running.
+async fn connect_app(app: &str, version: &str) -> Result<Option<sapphire_ipc::Client>> {
     let endpoint = Endpoint::for_app(app)?;
     let client_info = ClientInfo {
         kind: "cli".to_owned(),
@@ -486,35 +484,67 @@ async fn workspace_list(app: &'static str, version: &'static str) -> Result<i32>
         api: proto::API_VERSION,
         pid: std::process::id(),
     };
-    let Some((client, _)) = sapphire_ipc::connect_or_absent(&endpoint, app, client_info).await?
-    else {
+    let client = sapphire_ipc::connect_or_absent(&endpoint, app, client_info).await?;
+    if client.is_none() {
         println!("no {app} server is running");
+    }
+    Ok(client.map(|(c, _)| c))
+}
+
+/// `workspace select`: switch the server to an existing workspace.
+async fn workspace_select(
+    app: &'static str,
+    version: &'static str,
+    dir: Option<PathBuf>,
+) -> Result<i32> {
+    let Some(client) = connect_app(app, version).await? else {
+        return Ok(1);
+    };
+    // Resolved here: the server's cwd is not the user's.
+    let dir = std::env::current_dir()?.join(dir.unwrap_or_else(|| PathBuf::from(".")));
+    let ws: proto::CurrentWorkspace = client
+        .call(
+            proto::WORKSPACE_SELECT,
+            proto::WorkspaceSelectParams { dir },
+        )
+        .await?;
+    println!("{} {}", ws.root.display(), describe_state(&ws));
+    Ok(0)
+}
+
+/// `workspace show`: the server's workspace, then the workgroup's workspaces of this app.
+///
+/// The workgroup's ledger is the bridge's to answer, and the bridge being down is not the
+/// server half's failure: the ledger's absence is one line, and the exit is the server
+/// half's.
+async fn workspace_show(app: &'static str, version: &'static str) -> Result<i32> {
+    let Some(client) = connect_app(app, version).await? else {
         return Ok(1);
     };
     let mut out = String::new();
-    let code = render_workspace_list(&client, &mut out).await?;
+    let code = render_workspace(&client, &mut out).await?;
     for line in out.lines() {
         println!("{line}");
-    }
-    if code != 0 {
-        return Ok(code);
     }
 
     let Some(client) = BridgeClient::connect_running("cli", version).await.ok() else {
         println!("no sapphire-bridge is running");
-        return Ok(0);
+        return Ok(code);
     };
     let workspaces = client.workspaces().await.map_err(Error::from)?;
-    if !workspaces.workspaces.is_empty() {
+    let mine: Vec<_> = workspaces
+        .workspaces
+        .into_iter()
+        .filter(|w| w.app_name == app)
+        .collect();
+    if !mine.is_empty() {
         println!();
-        for workspace in workspaces.workspaces {
-            println!(
-                "{} {} {}",
-                workspace.name, workspace.workspace_id, workspace.app_name
-            );
+        println!("in the workgroup:");
+        for workspace in mine {
+            println!("{} {}", workspace.name, workspace.workspace_id);
         }
     }
-    Ok(0)
+    Ok(code)
 }
 
 /// `workspace map`: the bridge resolves the selector, the server takes the write.
@@ -554,7 +584,7 @@ async fn workspace_map(
         return Ok(1);
     };
 
-    let dir = dir.unwrap_or_else(|| PathBuf::from("."));
+    let dir = std::env::current_dir()?.join(dir.unwrap_or_else(|| PathBuf::from(".")));
     let mapped: proto::SyncEnableResult = client
         .call(
             proto::SYNC_MAP,
@@ -564,7 +594,10 @@ async fn workspace_map(
             },
         )
         .await?;
-    println!("mapped {} as {}", wanted.name, mapped.workspace_id);
+    println!(
+        "mapped {} as {}; the {app} server now serves it",
+        wanted.name, mapped.workspace_id
+    );
     Ok(0)
 }
 
@@ -694,7 +727,8 @@ mod tests {
             vec!["app", "workspace", "init"],
             vec!["app", "workspace", "init", "papers"],
             vec!["app", "workspace", "init", "--sync"],
-            vec!["app", "workspace", "list"],
+            vec!["app", "workspace", "show"],
+            vec!["app", "workspace", "select", "papers"],
             vec!["app", "workspace", "map", "papers", "papers-remote"],
             vec![
                 "app",
@@ -777,6 +811,8 @@ mod status_tests {
         let endpoint = sapphire_ipc::Endpoint::in_dir("status-test", tmp.path().to_path_buf());
         let server = AppServer::new(&CTX, "0.0.0")
             .endpoint(endpoint.clone())
+            // This context's directories are never initialised here.
+            .selection_file(tmp.path().join("workspace.toml"))
             .status_rows(std::sync::Arc::new(|| {
                 vec![StatusRow {
                     name: "sync".into(),

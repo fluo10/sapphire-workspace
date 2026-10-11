@@ -23,6 +23,25 @@ pub enum Error {
     /// workspace id).
     #[error("invalid workspace configuration: {0}")]
     InvalidWorkspace(String),
+
+    /// The current directory is inside another workspace than the one the server serves
+    /// (#215): acting would write where the user is not looking.
+    #[error(
+        "the current directory is inside the workspace {cwd_workspace}, but the server serves \
+         {current}; run `workspace select {cwd_workspace}` to switch"
+    )]
+    OtherWorkspace {
+        /// The workspace the current directory is in.
+        cwd_workspace: std::path::PathBuf,
+        /// The workspace the server serves.
+        current: std::path::PathBuf,
+    },
+
+    /// The server has no workspace yet.
+    #[error(
+        "the server has no workspace yet; run `workspace init <dir>` or `workspace select <dir>`"
+    )]
+    NoWorkspace,
 }
 
 impl From<tokio::task::JoinError> for Error {
