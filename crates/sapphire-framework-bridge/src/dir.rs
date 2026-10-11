@@ -103,6 +103,11 @@ impl BridgeDir {
         self.root.join(crate::embed_settings::KEY_FILE)
     }
 
+    /// How much of the time the bridge has been running here (not synced).
+    pub fn availability_toml(&self) -> PathBuf {
+        self.root.join("availability.toml")
+    }
+
     /// The routing table.
     pub fn routes_toml(&self) -> PathBuf {
         self.root.join("routes.toml")

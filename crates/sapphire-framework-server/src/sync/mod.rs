@@ -1027,10 +1027,13 @@ impl SyncRuntime {
                     }
                 };
                 let roles = peers.roles_for(workspace_id);
-                // Entering a star closes what it no longer needs. The hubs carry it all.
-                table
-                    .retain(|d| topology::link(me, *d, roles) != topology::Link::Skip)
-                    .await;
+                // Entering a star closes what it no longer needs. The hubs carry it all —
+                // once one of them is reachable from here (#192).
+                if topology::may_close_skipped(me, roles, &table.devices().await) {
+                    table
+                        .retain(|d| topology::link(me, *d, roles) != topology::Link::Skip)
+                        .await;
+                }
                 for peer in peers.peers.iter().filter(|p| {
                     p.connected && topology::link(me, p.device_id, roles) == topology::Link::Dial
                 }) {

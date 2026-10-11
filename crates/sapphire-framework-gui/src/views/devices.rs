@@ -192,6 +192,13 @@ impl DeviceList {
                         for role in role_badges(peer, &bridge.peer_roles) {
                             ui.small(format!("[{role}]"));
                         }
+                        if let Some(tier) = peer.availability {
+                            ui.small(format!("availability {tier}/3")).on_hover_text(
+                                "How much of the last week this device's bridge was running: \
+                                 3 is 99 % or more, 2 is 95 %, 1 is 80 %, 0 is less. \
+                                 A device with under a week of history is one lower.",
+                            );
+                        }
                         let this = is_this_device(peer, &bridge.status.node_id);
                         if this {
                             ui.small("(this device)");

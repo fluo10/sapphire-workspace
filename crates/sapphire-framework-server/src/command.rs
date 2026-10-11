@@ -257,9 +257,13 @@ impl DeviceCommand {
                 }
                 for peer in peers.peers {
                     println!(
-                        "{} {}{}",
+                        "{} {} p{}{}{}",
                         peer.name,
                         peer.device_id,
+                        peer.priority,
+                        peer.availability
+                            .map(|a| format!(" a{a}"))
+                            .unwrap_or_default(),
                         if peer.connected { " (online)" } else { "" }
                     );
                 }

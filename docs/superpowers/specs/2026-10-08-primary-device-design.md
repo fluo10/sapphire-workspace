@@ -197,7 +197,11 @@ Where the rule applies:
 - **`dial_loop` and `sync_now`** filter peers through `link`.
 - **Entering the star.** When roles appear for a workspace and this host is neither, live
   sessions with peers that `link` now skips are closed (`LivePeers::retain(..)`). Nothing is
-  lost: the primary and secondary devices hold and relay everything.
+  lost: the primary and secondary devices hold and relay everything. They are closed only
+  once this host holds a session with a primary or secondary device of its own view
+  (`may_close_skipped`, #192): during a handover two hosts can name different hubs for a
+  Hello round, and a host that closed its session with the just-promoted device, while the
+  hub it names still refused it, would be left with no path at all.
 - **Inbound sessions.** `run()` drops an announced stream from a peer that `link` would skip.
   Both ends compute from the same Hellos, so this is only a safety net for the moment their
   views differ.
@@ -227,6 +231,11 @@ and `sapphire-<app> status` prints it.
   (floor 0). A freshly installed host does not outrank one with a long record.
 - The tier is announced in Hello and shown in `device list` and the GUI. It is never written
   to the ledger (decision 5).
+- Implementation notes: the days are UTC days, and the window is the last 7 of them
+  (today included), starting no earlier than the history. Each tick credits the monotonic
+  clock's progress, capped by the wall clock's and by two ticks, so sleep is not counted
+  whether or not the platform's monotonic clock stops during it. With under an hour of
+  history the tier is `None`.
 
 ## GUI (`sapphire-framework-gui`)
 
