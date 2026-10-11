@@ -69,6 +69,44 @@ name = "sapphire-framework-server-api"
 name = "sapphire-framework-bridge-client"
 version_group = "framework"
 
+# プロセス構成（#136）で増えた crate。いずれも framework と同じバージョンで動く。
+
+[[package]]
+name = "sapphire-framework-ipc"
+version_group = "framework"
+
+[[package]]
+name = "sapphire-framework-sync"
+version_group = "framework"
+
+[[package]]
+name = "sapphire-framework-session"
+version_group = "framework"
+
+[[package]]
+name = "sapphire-framework-server"
+version_group = "framework"
+
+[[package]]
+name = "sapphire-framework-service"
+version_group = "framework"
+
+[[package]]
+name = "sapphire-framework-keys"
+version_group = "framework"
+
+[[package]]
+name = "sapphire-framework-bridge"
+version_group = "framework"
+
+[[package]]
+name = "sapphire-framework-bridge-embed"
+version_group = "framework"
+
+[[package]]
+name = "sapphire-bridge"
+version_group = "framework"
+
 # 単一依存ファサード（#95）。
 [[package]]
 name = "sapphire-framework"

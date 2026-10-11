@@ -5483,7 +5483,7 @@ dependencies = [
 
 [[package]]
 name = "sapphire-bridge"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "async-trait",
  "clap",
@@ -5499,7 +5499,7 @@ dependencies = [
 
 [[package]]
 name = "sapphire-framework"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "sapphire-framework-backend",
  "sapphire-framework-bridge",
@@ -5519,7 +5519,7 @@ dependencies = [
 
 [[package]]
 name = "sapphire-framework-backend"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -5540,7 +5540,7 @@ dependencies = [
 
 [[package]]
 name = "sapphire-framework-bridge"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -5590,7 +5590,7 @@ dependencies = [
 
 [[package]]
 name = "sapphire-framework-bridge-client"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "sapphire-framework-bridge-api",
  "sapphire-framework-ipc",
@@ -5601,7 +5601,7 @@ dependencies = [
 
 [[package]]
 name = "sapphire-framework-bridge-embed"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "candle-core",
  "candle-nn",
@@ -5621,7 +5621,7 @@ dependencies = [
 
 [[package]]
 name = "sapphire-framework-gui"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "egui",
  "fontdb",
@@ -5643,7 +5643,7 @@ dependencies = [
 
 [[package]]
 name = "sapphire-framework-ipc"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "dirs",
  "libc",
@@ -5660,7 +5660,7 @@ dependencies = [
 
 [[package]]
 name = "sapphire-framework-keys"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -5679,7 +5679,7 @@ dependencies = [
 
 [[package]]
 name = "sapphire-framework-registry"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -5694,7 +5694,7 @@ dependencies = [
 
 [[package]]
 name = "sapphire-framework-retrieve"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "redb",
  "serde",
@@ -5708,7 +5708,7 @@ dependencies = [
 
 [[package]]
 name = "sapphire-framework-server"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "async-trait",
  "clap",
@@ -5746,7 +5746,7 @@ dependencies = [
 
 [[package]]
 name = "sapphire-framework-service"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "clap",
  "libc",
@@ -5760,7 +5760,7 @@ dependencies = [
 
 [[package]]
 name = "sapphire-framework-session"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "grain-id",
  "sapphire-framework-sync",
@@ -5774,7 +5774,7 @@ dependencies = [
 
 [[package]]
 name = "sapphire-framework-sync"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "grain-id",
  "ignore",
@@ -5793,7 +5793,7 @@ dependencies = [
 
 [[package]]
 name = "sapphire-framework-track"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "redb",
  "tempfile",
@@ -5803,7 +5803,7 @@ dependencies = [
 
 [[package]]
 name = "sapphire-framework-workspace"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "chrono",
  "clap",

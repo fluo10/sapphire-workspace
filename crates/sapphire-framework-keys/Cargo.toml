@@ -17,8 +17,8 @@ axum = { workspace = true, optional = true }
 async-trait.workspace = true
 grain-id.workspace = true
 sapphire-bridge-api = { package = "sapphire-framework-bridge-api", version = "2.3.0", path = "../sapphire-framework-bridge-api" }
-sapphire-bridge-client = { package = "sapphire-framework-bridge-client", version = "0.14.0", path = "../sapphire-framework-bridge-client" }
-sapphire-ipc = { package = "sapphire-framework-ipc", version = "0.14.0", path = "../sapphire-framework-ipc" }
+sapphire-bridge-client = { package = "sapphire-framework-bridge-client", version = "0.15.0", path = "../sapphire-framework-bridge-client" }
+sapphire-ipc = { package = "sapphire-framework-ipc", version = "0.15.0", path = "../sapphire-framework-ipc" }
 sha2.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 tracing.workspace = true

@@ -8,6 +8,8 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-10-11
+
 ### Added
 
 - External devices (#199): clients that reach the workgroup's applications with a key instead of syncing — a recording pendant, a remote ACP client, a webhook. They live in a synced ledger beside the devices, `<workgroup root>/external_devices/<grain-id>.toml`, each listing the applications it may use (one external device may use several; none by default). The token (`sapphire-ed-…`) is shown once by `add` and `rotate`; the ledger keeps only its SHA-256. `retire` keeps the record, `restore` brings it back, `rotate` keeps the id. Managed with `sapphire-bridge external-device …`, every app's `external-device …` (whose `add` allows that app), and the sync panel's External devices screen. `sapphire-framework-bridge-api` 2.3.0 adds the `external_device.*` methods; `sapphire-framework-registry` adds `ExternalDevices`.

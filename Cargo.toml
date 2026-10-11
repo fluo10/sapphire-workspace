@@ -23,7 +23,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.14.0"
+version = "0.15.0"
 description = "Local-first framework for file-based workspaces: indexing, search, sync, remote and WASM backends"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/fluo10/sapphire-framework"
