@@ -293,6 +293,10 @@ CLI は `sapphire-bridge`（`serve` / `status` / `service` / `workspace` / `work
 が 1 台だけでも代表は選ばれ、priority 0 の他のデバイスはその代表を介してのみ同期する。代表が
 選ばれない場合（候補がいない＝全員 priority 0、旧版の bridge だけ、など）や、起動直後でまだ誰も
 代表を名乗っていない間は、従来どおりのフルメッシュになる。
+priority が同じ候補の間では、可用性（#190）の高いデバイスが上位になる。bridge は 1 分ごとに
+自分が動いていた時間を `<bridge dir>/availability.toml` に日ごとに記録し（直近 7 日、スリープ中は
+数えない）、稼働率を段階（99 % 以上 → 3、95 % → 2、80 % → 1、それ未満 → 0。履歴が 7 日未満なら
+1 段階下げる）に丸めて Hello で伝える。段階は台帳には書かない。
 詳細は[設計仕様](superpowers/specs/2026-10-08-primary-device-design.md)。
 
 ### セッションはエンドツーエンド

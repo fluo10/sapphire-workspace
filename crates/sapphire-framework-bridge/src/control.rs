@@ -500,6 +500,7 @@ fn peers(bridge: &Bridge) -> Result<PeersResult> {
 /// caller to ask it first.
 pub(crate) fn peer_infos(bridge: &Bridge, workgroup: &Workgroup) -> Result<Vec<PeerInfo>> {
     let devices = workgroup.devices()?;
+    let own_node = bridge.transport().node_id();
     Ok(devices
         .entries()
         .iter()
@@ -513,7 +514,12 @@ pub(crate) fn peer_infos(bridge: &Bridge, workgroup: &Workgroup) -> Result<Vec<P
                 name: d.name.clone(),
                 connected: !node_id.is_empty() && bridge.transport().is_connected(&node_id),
                 priority: d.priority,
-                availability: bridge.neighbours().get(d.id).and_then(|h| h.availability),
+                // A bridge hears no Hello from itself; its own tier is its own measurement.
+                availability: if node_id == own_node {
+                    bridge.availability()
+                } else {
+                    bridge.neighbours().get(d.id).and_then(|h| h.availability)
+                },
                 node_id,
             }
         })
@@ -971,6 +977,35 @@ mod tests {
                 .priority,
             7
         );
+    }
+
+    #[tokio::test]
+    async fn peers_reports_this_hosts_own_availability() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bridge = bridge(&tmp);
+        bridge
+            .workgroup()
+            .unwrap()
+            .unwrap()
+            .devices()
+            .unwrap()
+            .add("laptop", Some("bbbb".into()), None)
+            .unwrap();
+        bridge.set_availability(Some(2));
+        let (client, _serving) = connect(&bridge).await;
+
+        let peers: PeersResult =
+            serde_json::from_value(call(&client, PEERS, serde_json::json!({})).await).unwrap();
+        let tier = |name: &str| {
+            peers
+                .peers
+                .iter()
+                .find(|p| p.name == name)
+                .unwrap()
+                .availability
+        };
+        assert_eq!(tier("host-a"), Some(2));
+        assert_eq!(tier("laptop"), None, "no Hello heard from it");
     }
 
     #[tokio::test]

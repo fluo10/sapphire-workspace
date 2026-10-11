@@ -231,6 +231,11 @@ and `sapphire-<app> status` prints it.
   (floor 0). A freshly installed host does not outrank one with a long record.
 - The tier is announced in Hello and shown in `device list` and the GUI. It is never written
   to the ledger (decision 5).
+- Implementation notes: the days are UTC days, and the window is the last 7 of them
+  (today included), starting no earlier than the history. Each tick credits the monotonic
+  clock's progress, capped by the wall clock's and by two ticks, so sleep is not counted
+  whether or not the platform's monotonic clock stops during it. With under an hour of
+  history the tier is `None`.
 
 ## GUI (`sapphire-framework-gui`)
 

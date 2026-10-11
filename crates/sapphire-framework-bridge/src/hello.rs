@@ -260,7 +260,7 @@ pub(crate) async fn run(bridge: Arc<Bridge>) -> crate::Result<()> {
             .collect();
         let own = Own {
             priority: me.priority,
-            availability: None,
+            availability: bridge.availability(),
             hosting,
         };
         let Ok(devices) = workgroup.devices() else {
