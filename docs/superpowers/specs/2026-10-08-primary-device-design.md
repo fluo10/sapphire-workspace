@@ -197,7 +197,11 @@ Where the rule applies:
 - **`dial_loop` and `sync_now`** filter peers through `link`.
 - **Entering the star.** When roles appear for a workspace and this host is neither, live
   sessions with peers that `link` now skips are closed (`LivePeers::retain(..)`). Nothing is
-  lost: the primary and secondary devices hold and relay everything.
+  lost: the primary and secondary devices hold and relay everything. They are closed only
+  once this host holds a session with a primary or secondary device of its own view
+  (`may_close_skipped`, #192): during a handover two hosts can name different hubs for a
+  Hello round, and a host that closed its session with the just-promoted device, while the
+  hub it names still refused it, would be left with no path at all.
 - **Inbound sessions.** `run()` drops an announced stream from a peer that `link` would skip.
   Both ends compute from the same Hellos, so this is only a safety net for the moment their
   views differ.
