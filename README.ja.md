@@ -1,7 +1,8 @@
 # sapphire-framework（日本語）
+
 > 言語: [English](README.md) | **日本語**
 
-ファイルベースのワークスペースのためのローカルファーストフレームワーク：インデックス、検索、同期、（予定の）リモート／WASMバックエンド。 かつて `sapphire-workspace` として公開されており、再利用可能なクレートは現在 `sapphire-framework-*` プレフィックス付きでここに置かれています。
+人間とAIエージェントの協働のために作られた、ローカルファースト・ファイルベースのワークスペースフレームワーク：インデックス、検索、同期、リモート／WASMバックエンド。 かつて `sapphire-workspace` として公開されており、再利用可能なクレートは現在 `sapphire-framework-*` プレフィックス付きでここに置かれています。
 
 `sapphire-framework-workspace` クレートは `sapphire-framework-retrieve`（全文＋ベクトル検索）を、ファイルベースのドキュメントに対する単一で使いやすいAPIにまとめます。同時編集は中央のリモートサーバー（`sapphire-framework-remote-*`）が処理し、ローカルでの自動同期は行いません。gitは手動で使います。
 
