@@ -2,7 +2,7 @@
 name = "sapphire-framework"
 version.workspace = true
 edition.workspace = true
-description = "Local-first framework for file-based workspaces — single-dependency facade over the sapphire-framework-* crates"
+description = "Local-first, file-based workspace framework made for human-agent collaboration - single-dependency facade over the sapphire-framework-* crates"
 license.workspace = true
 repository.workspace = true
 keywords = ["local-first", "workspace", "search", "sync"]

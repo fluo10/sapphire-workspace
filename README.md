@@ -1,8 +1,9 @@
 # sapphire-framework
 
-Local-first framework for file-based workspaces: indexing, search, sync, and (planned)
-remote / WASM backends. Formerly published as `sapphire-workspace`; the reusable crates
-now live here under the `sapphire-framework-*` prefix.
+The foundation of the sapphire ecosystem: a local-first, file-based workspace framework
+made for human-agent collaboration — indexing, search and sync over plain-text files,
+with remote / WASM backends. Formerly published as `sapphire-workspace`; the reusable
+crates now live here under the `sapphire-framework-*` prefix.
 
 The `sapphire-framework-workspace` crate ties `sapphire-framework-retrieve`
 (full-text + vector search) into a single, ergonomic API over file-based
