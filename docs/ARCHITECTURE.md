@@ -115,15 +115,17 @@ Cargo workspace（モノレポ）。削除済みの crate も削除線で残す 
 | `sapphire-framework-sync` | 転送非依存のレプリケーションコア（wire 型・`ReplicaStore`(redb)・merge・HLC・コンフリクトコピー・フィルタ・外部編集検知） |
 | `sapphire-framework-session` | 2 つのレプリカ間のセッション（フレーミング・vv 交換・差分と内容の転送） |
 | `sapphire-framework-ipc` | ローカル IPC（UDS / 名前付きパイプ / プロセス内チャネル上の NDJSON JSON-RPC、ルータ、`connect` / `probe`） |
+| `sapphire-framework-server-api` | アプリサーバ共通 API の wire 型（`workspace.*` / `sync.*` / `server.info` のメソッド名・引数・結果、`BackendEvent`・`SearchMode`・`FileSearchResult`）。serde と grain-id のみに依存。**単独でバージョン管理**（4.0.0 — メジャー == `API_VERSION`）。各アプリの API crate はこれに依存する |
 | `sapphire-framework-server` | アプリサーバ骨格（`workspace.*` 名前空間・多重管理・`FrameworkCommand` — `serve` / `status` / `service` / `workspace` / `workgroup` / `device` フラット語彙・同期ランタイム） |
-| `sapphire-framework-bridge-api` | bridge 制御プレーンのプロトコルとクライアント（serde のみ・iroh 非依存）。**単独でバージョン管理**（2.0.0 — メジャー == 制御面 `API_VERSION`。`version.workspace` ではない） |
+| `sapphire-framework-bridge-api` | bridge 制御プレーンの wire 型（メソッド名・引数・結果。serde と grain-id のみに依存し、ipc にも iroh にも依存しない）。**単独でバージョン管理**（メジャー == 制御面 `API_VERSION`。`version.workspace` ではない） |
+| `sapphire-framework-bridge-client` | bridge 制御プレーンの型付きクライアント `BridgeClient` とデータプレーンの `handshake_data`（ipc 上）。framework と同じバージョンで動く |
 | `sapphire-framework-bridge` | ホスト常駐デーモン本体（デバイス同一性・workgroup 認可・ペアリング・交換台・iroh）。埋め込みは `EmbedProvider` フック越しに受け取り、この crate 自体は埋め込みコンポーネントに依存しない |
 | `sapphire-framework-bridge-embed` | bridge の埋め込みコンポーネント（ローカル Qwen3-VL-Embedding-2B を candle で、または OpenAI 互換 REST）。ファサード feature は `bridge-embed`（既定ではなく `native` にも入らない — fastembed / candle が重いため）。**bridge をプロセス内に持つモバイルアプリがあるため framework crate に残す** |
 | `apps/sapphire-bridge` | 上記のバイナリと CLI（`serve` / `status` / `log` / `service` / `workspace` / `workgroup` / `device`） |
 | `sapphire-framework-registry` | デバイス台帳（`<dir>/<grain-id>.toml` を 1 デバイス 1 ファイル。`node_id` を保持。users は撤去） |
 | `sapphire-framework-keys` | `protect` / `AuthConfig` / `BridgeVerifier`。HTTP エンドポイントで external device の Bearer トークンを bridge に確かめる（#199） |
 | `sapphire-framework-service` | OS のサービスマネージャへの登録（`ServiceSpec`・systemd user unit・LaunchAgent・タスクスケジューラ） |
-| `sapphire-framework-backend` | GUI 向け**非同期** `WorkspaceBackend` + `IpcBackend` / `LocalBackend`、`BackendEvent` |
+| `sapphire-framework-backend` | GUI 向け**非同期** `WorkspaceBackend` + `IpcBackend` / `LocalBackend`。`protocol` は `sapphire-framework-server-api` の re-export |
 | `sapphire-framework-gui` | app 非依存の egui `WorkspaceManager` / `WorkspaceRegistry` と同期 GUI 部品（下記「GUI 部品」） |
 | ~~`sapphire-framework-rpc`~~ / ~~`-remote-client`~~ / ~~`-remote-server`~~ / ~~`-blob`~~ | **削除**（HTTP 同期スタック。表面テスト `tests/surface.rs` で存在を封じる。内容はファイル原本から直接供給される — sync 仕様 §2.3） |
 
@@ -210,7 +212,18 @@ CLI は全アプリ共通のフラット語彙 `serve` / `status` / `service` / 
 `device` を `FrameworkCommand` として自分のサブコマンドの隣に flatten する（issue #142）。
 制御面の路由は所有権に従う: `workspace` コマンドはアプリのサーバへ、`workgroup` / `device`
 コマンドは bridge へ直接。`status` の報告書は CLI と IPC `server.info` が同じ
-`StatusReport` 型を共有する（`backend::protocol` にあり、サーバ crate からも re-export）。
+`StatusReport` 型を共有する（`sapphire-framework-server-api` にあり、`backend::protocol` として
+re-export）。
+
+**API のバージョン**: 公開 API（クライアントとサーバが合意すべきもの）は wire 型だけの crate に
+切り出し、crate のメジャーをそのまま `API_VERSION` にする — bridge 制御面は
+`sapphire-framework-bridge-api`、アプリサーバ共通は `sapphire-framework-server-api`。framework の
+リリースはこれらを動かさないので、API が変わらない限りサービスの再起動も不要。API crate は
+ipc にも framework の他の crate にも依存しない（0.x の framework crate に依存すると、framework の
+リリースのたびに API crate も出し直しになるため）。ハンドシェイク（`sapphire-framework-ipc` の
+`ClientInfo` / `ServerInfo`）は 2 本立て: `api` が共通 API、`app_api` がアプリ独自 API
+（アプリの API crate のメジャー。`AppServer::app_api` で報告し、アプリのメソッドを呼ぶ
+クライアントが `ClientInfo.app_api` で要求する）。どちらかが食い違えば接続を拒否する。
 どのワークスペースを提供するかはサーバが持つ（`<config dir>/workspace.toml` に `root` と
 `sync`）。クライアント（CLI・GUI・MCP/ACP）はワークスペースを指定しない — `workspace.*` /
 `sync.*` は常に現在のワークスペースに対して働く。切り替えは `workspace.select`（`init` と

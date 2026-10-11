@@ -94,6 +94,7 @@ fn client_info() -> ClientInfo {
         kind: "test".into(),
         version: "0.0.0".into(),
         api: sapphire_backend::protocol::API_VERSION,
+        app_api: None,
         pid: std::process::id(),
     }
 }

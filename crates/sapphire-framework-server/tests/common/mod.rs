@@ -21,11 +21,12 @@ use std::time::{Duration, Instant};
 
 use grain_id::GrainId;
 use sapphire_backend::protocol as proto;
-use sapphire_bridge_api::{BridgeClient, ManagedBy};
+use sapphire_bridge_client::BridgeClient;
 use sapphire_framework_bridge::{
     Bridge, BridgeDir, HelloTiming, LoopbackNetwork, NetConfig, Workgroup,
 };
 use sapphire_framework_server::{AppServer, SyncRuntime};
+use sapphire_ipc::ManagedBy;
 use sapphire_ipc::{Client, ClientInfo, Endpoint, connect_or_absent};
 use sapphire_workspace::AppContext;
 
@@ -499,6 +500,7 @@ fn client_info(kind: &str) -> ClientInfo {
         kind: kind.to_owned(),
         version: VERSION.to_owned(),
         api: sapphire_backend::protocol::API_VERSION,
+        app_api: None,
         pid: std::process::id(),
     }
 }

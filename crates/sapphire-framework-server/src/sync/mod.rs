@@ -11,9 +11,9 @@ use std::sync::Arc;
 
 use grain_id::GrainId;
 use sapphire_backend::protocol as proto;
-use sapphire_bridge_api::{
-    BridgeClient, ManagedBy, PeersResult, RegisterParams, WorkspaceRegistration, WorkspacesResult,
-};
+use sapphire_bridge_api::{PeersResult, RegisterParams, WorkspaceRegistration, WorkspacesResult};
+use sapphire_bridge_client::BridgeClient;
+use sapphire_ipc::ManagedBy;
 use sapphire_sync::{PathUpdate, PauseReason, Replica, ReplicaConfig, ScanOutcome, SystemClock};
 use sapphire_workspace::{AppContext, Workspace};
 use tokio::sync::{Mutex, OnceCell, broadcast, mpsc};
@@ -1246,7 +1246,7 @@ impl SyncRuntime {
             .register(RegisterParams {
                 app_name: self.ctx.app_name.to_owned(),
                 exe_path: self.exe_path.clone(),
-                managed_by: self.managed_by,
+                managed_by: wire_managed_by(self.managed_by),
                 workspaces,
             })
             .await
@@ -1293,7 +1293,7 @@ impl SyncRuntime {
             .register(RegisterParams {
                 app_name: self.ctx.app_name.to_owned(),
                 exe_path: self.exe_path.clone(),
-                managed_by: self.managed_by,
+                managed_by: wire_managed_by(self.managed_by),
                 workspaces: Vec::new(),
             })
             .await
@@ -1306,6 +1306,14 @@ impl SyncRuntime {
     fn state_dir(&self, root: &Path) -> Result<PathBuf> {
         let workspace = Workspace::from_root(self.ctx, root)?;
         Ok(workspace.cache_dir().join("sync"))
+    }
+}
+
+/// The bridge API's copy of how this server was started, for [`RegisterParams`].
+fn wire_managed_by(managed_by: ManagedBy) -> sapphire_bridge_api::ManagedBy {
+    match managed_by {
+        ManagedBy::Service => sapphire_bridge_api::ManagedBy::Service,
+        ManagedBy::Spawned => sapphire_bridge_api::ManagedBy::Spawned,
     }
 }
 
@@ -1576,6 +1584,7 @@ mod tests {
             let info = sapphire_ipc::ServerInfo {
                 version: "0.0.0".into(),
                 api: sapphire_backend::protocol::API_VERSION,
+                app_api: None,
                 pid: std::process::id(),
                 managed_by: ManagedBy::Spawned,
             };
@@ -1585,6 +1594,7 @@ mod tests {
             kind: "test".into(),
             version: "0.0.0".into(),
             api: sapphire_backend::protocol::API_VERSION,
+            app_api: None,
             pid: std::process::id(),
         };
         let (client, _) = sapphire_ipc::Client::handshake(client_conn, "sapphire-synctest", info)

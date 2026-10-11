@@ -26,6 +26,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let info = ServerInfo {
         version,
         api: 1,
+        app_api: None,
         pid: std::process::id(),
         managed_by: ManagedBy::Service,
     };

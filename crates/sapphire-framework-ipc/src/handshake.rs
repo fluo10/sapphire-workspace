@@ -34,6 +34,12 @@ pub struct ClientInfo {
     /// A client that predates the field spoke [`FIRST_API`].
     #[serde(default = "first_api")]
     pub api: u32,
+    /// The version of the application's own API the client expects, when it calls the
+    /// application's methods as well as the framework's. An application's API crate
+    /// carries it, apart from [`api`](Self::api), so that the two move independently.
+    /// `None` for a client that calls only the framework's methods.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_api: Option<u32>,
     /// The client's process id.
     pub pid: u32,
 }
@@ -59,6 +65,11 @@ pub struct ServerInfo {
     /// talking to an installed service that has not been rebuilt.
     #[serde(default = "first_api")]
     pub api: u32,
+    /// The version of the application's own API this server speaks; see
+    /// [`ClientInfo::app_api`]. `None` for a server whose application defines no API of
+    /// its own, or that predates the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_api: Option<u32>,
     /// The server's process id.
     pub pid: u32,
     /// How the server was started, which decides what a client may do about a version

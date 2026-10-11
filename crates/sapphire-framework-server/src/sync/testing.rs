@@ -4,9 +4,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use sapphire_bridge_api::{
-    Ack, BridgeClient, GrainId, IncomingParams, PeersResult, RegisterParams, RegisterResult,
-    StatusResult, UnregisterParams, WORKSPACES, WorkgroupWorkspaceInfo, WorkspacesResult,
+    Ack, GrainId, IncomingParams, PeersResult, RegisterParams, RegisterResult, StatusResult,
+    UnregisterParams, WORKSPACES, WorkgroupWorkspaceInfo, WorkspacesResult,
 };
+use sapphire_bridge_client::BridgeClient;
 use sapphire_ipc::{ClientInfo, Connection, ManagedBy, Router, ServerInfo, serve};
 
 /// What a `StubBridge` saw.
@@ -129,6 +130,7 @@ impl StubBridge {
             let info = ServerInfo {
                 version: "stub".into(),
                 api: sapphire_bridge_api::API_VERSION,
+                app_api: None,
                 pid: std::process::id(),
                 managed_by: ManagedBy::Service,
             };
@@ -139,6 +141,7 @@ impl StubBridge {
             kind: "test".into(),
             version: "stub".into(),
             api: sapphire_bridge_api::API_VERSION,
+            app_api: None,
             pid: std::process::id(),
         };
         let (client, _) = sapphire_ipc::Client::handshake(client_conn, "bridge", info)

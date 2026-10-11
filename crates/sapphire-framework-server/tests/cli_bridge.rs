@@ -79,7 +79,7 @@ async fn workgroup_create_succeeds() {
     assert_eq!(result.unwrap(), 0, "Create should return exit code 0");
 
     // Verify the workgroup was created by connecting and checking status
-    let client = sapphire_bridge_api::BridgeClient::connect_running("test", "0.0.0")
+    let client = sapphire_bridge_client::BridgeClient::connect_running("test", "0.0.0")
         .await
         .expect("should connect to bridge");
     let status = client.status().await.expect("should get status");

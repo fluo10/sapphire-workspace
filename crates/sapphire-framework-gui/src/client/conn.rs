@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use sapphire_backend::protocol as proto;
-use sapphire_bridge_api::BridgeClient;
+use sapphire_bridge_client::BridgeClient;
 use sapphire_ipc::{Client, ClientInfo};
 
 use super::types::{BridgeState, ClientConfig, Conn, ServerState};
@@ -13,6 +13,7 @@ pub fn classify<T>(err: &sapphire_ipc::Error) -> Conn<T> {
     match err {
         sapphire_ipc::Error::NotRunning(_) => Conn::Absent,
         sapphire_ipc::Error::ApiVersionMismatch { .. }
+        | sapphire_ipc::Error::AppApiVersionMismatch { .. }
         | sapphire_ipc::Error::VersionMismatch { .. } => Conn::Incompatible(err.to_string()),
         other => Conn::Error(other.to_string()),
     }
@@ -56,6 +57,7 @@ impl Connections {
                 kind: "gui".to_owned(),
                 version: cfg.app.version.to_owned(),
                 api: proto::API_VERSION,
+                app_api: None,
                 pid: std::process::id(),
             };
             self.app = sapphire_ipc::connect_or_absent(&cfg.endpoints.app, cfg.app.app_name, info)

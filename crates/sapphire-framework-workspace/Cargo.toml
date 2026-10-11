@@ -20,6 +20,7 @@ sapphire-retrieve = { package = "sapphire-framework-retrieve", version = "0.14.0
 sapphire-track    = { package = "sapphire-framework-track", version = "0.14.0", path = "../sapphire-framework-track" }
 # Embedding is the bridge's: `BridgeEmbedder` asks it over the control plane (no iroh here).
 sapphire-bridge-api = { package = "sapphire-framework-bridge-api", version = "2.3.0", path = "../sapphire-framework-bridge-api" }
+sapphire-bridge-client = { package = "sapphire-framework-bridge-client", version = "0.14.0", path = "../sapphire-framework-bridge-client" }
 sapphire-ipc        = { package = "sapphire-framework-ipc", version = "0.14.0", path = "../sapphire-framework-ipc" }
 thiserror.workspace = true
 clap.workspace = true

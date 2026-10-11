@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use sapphire_bridge_api::BridgeClient;
+use sapphire_bridge_client::BridgeClient;
 use sapphire_framework_bridge::{Bridge, BridgeDir, LoopbackNetwork, NetConfig};
 use sapphire_framework_gui::client::*;
 use sapphire_framework_server::{AppServer, SyncRuntime};

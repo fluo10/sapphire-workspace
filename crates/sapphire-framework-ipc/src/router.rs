@@ -243,6 +243,7 @@ mod tests {
         ServerInfo {
             version: "0.0.0".into(),
             api: 1,
+            app_api: None,
             pid: 1,
             managed_by: ManagedBy::Spawned,
         }
@@ -259,6 +260,7 @@ mod tests {
                     kind: "cli".into(),
                     version: "0.0.0".into(),
                     api: 1,
+                    app_api: None,
                     pid: 2,
                 },
             })

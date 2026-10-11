@@ -29,6 +29,11 @@ impl IpcBackend {
     /// Connect to `app`'s server. It serves one workspace; this backend acts on whichever
     /// is current.
     ///
+    /// `app_api` is the version of the application's own API the caller expects, when it
+    /// will call the application's methods over [`client`](Self::client) as well; the
+    /// handshake refuses a server that speaks another. `None` asks for the framework's
+    /// methods only.
+    ///
     /// Nothing is started here: a server runs under `serve` or the OS service manager,
     /// and this only finds it. Nothing listening is an error — the caller decides whether
     /// to start one.
@@ -37,11 +42,13 @@ impl IpcBackend {
         app: &str,
         kind: &str,
         version: &str,
+        app_api: Option<u32>,
     ) -> Result<IpcBackend> {
         let info = ClientInfo {
             kind: kind.to_owned(),
             version: version.to_owned(),
             api: proto::API_VERSION,
+            app_api,
             pid: std::process::id(),
         };
         let (client, _) = connect_or_absent(endpoint, app, info)

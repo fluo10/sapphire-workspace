@@ -10,9 +10,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use grain_id::GrainId;
-use sapphire_bridge_api::{
-    BridgeClient, InviteParams, ManagedBy, RegisterParams, WorkspaceRegistration,
-};
+use sapphire_bridge_api::{InviteParams, ManagedBy, RegisterParams, WorkspaceRegistration};
+use sapphire_bridge_client::BridgeClient;
 use sapphire_framework_bridge::{
     Bridge, BridgeDir, LoopbackNetwork, NetConfig, PeerTransport, Ticket, Workgroup,
     WorkgroupReplica, adopt_workgroup,
@@ -229,6 +228,7 @@ pub fn client_info() -> ClientInfo {
         kind: "test".into(),
         version: "0.0.0".into(),
         api: sapphire_bridge_api::API_VERSION,
+        app_api: None,
         pid: std::process::id(),
     }
 }

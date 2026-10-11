@@ -79,6 +79,23 @@ pub enum Error {
         /// Crate version reported by the running server, for the message.
         server_version: String,
     },
+
+    /// A running server speaks a different version of the application's own API than
+    /// this process expects, or none at all. The fix is the same as for
+    /// [`ApiVersionMismatch`](Self::ApiVersionMismatch).
+    #[error(
+        "the running service (version {server_version}) speaks app API {}, this process \
+         speaks app API v{ours}; upgrade whichever is older and restart the service",
+        running.map_or_else(|| "none".to_owned(), |v| format!("v{v}"))
+    )]
+    AppApiVersionMismatch {
+        /// The application's API version reported by the running server, if any.
+        running: Option<u32>,
+        /// The application's API version this process expects.
+        ours: u32,
+        /// Crate version reported by the running server, for the message.
+        server_version: String,
+    },
 }
 
 /// Convenience alias for IPC results.

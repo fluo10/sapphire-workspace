@@ -74,6 +74,8 @@ pub struct AppServer {
     /// The application's own status rows, shown after the framework's in `status` and in
     /// the `server.info` report.
     status_rows: Option<Arc<dyn Fn() -> Vec<StatusRow> + Send + Sync>>,
+    /// The version of the application's own API, reported in the handshake.
+    app_api: Option<u32>,
 }
 
 /// The SIGTERM end of the server's select loop, in a shape every platform shares.
@@ -135,6 +137,7 @@ impl AppServer {
             sync: None,
             extend: None,
             status_rows: None,
+            app_api: None,
         }
     }
 
@@ -149,6 +152,15 @@ impl AppServer {
     /// Listen somewhere other than the application's default endpoint. Used by tests.
     pub fn endpoint(mut self, endpoint: Endpoint) -> AppServer {
         self.endpoint = Some(endpoint);
+        self
+    }
+
+    /// Report `version` as the application's own API version in the handshake: the major
+    /// of the application's API crate, which carries the methods it adds with
+    /// [`extend`](Self::extend). A client that calls those methods names the version it
+    /// expects, and the handshake refuses a server that speaks another.
+    pub fn app_api(mut self, version: u32) -> AppServer {
+        self.app_api = Some(version);
         self
     }
 
@@ -223,6 +235,7 @@ impl AppServer {
             sync,
             extend,
             status_rows,
+            app_api,
         } = self;
 
         let endpoint = match endpoint {
@@ -235,6 +248,7 @@ impl AppServer {
         let info = ServerInfo {
             version: version.to_owned(),
             api: proto::API_VERSION,
+            app_api,
             pid: std::process::id(),
             managed_by: ManagedBy::Service,
         };
@@ -281,7 +295,10 @@ impl AppServer {
                             running: true,
                             version: Some(info.version),
                             pid: Some(info.pid),
-                            managed_by: Some(info.managed_by),
+                            managed_by: Some(match info.managed_by {
+                                ManagedBy::Service => proto::ManagedBy::Service,
+                                ManagedBy::Spawned => proto::ManagedBy::Spawned,
+                            }),
                             app,
                         };
                         serde_json::to_value(report)
@@ -437,6 +454,7 @@ mod tests {
             kind: "test".into(),
             version: "0.0.0".into(),
             api: sapphire_backend::protocol::API_VERSION,
+            app_api: None,
             pid: std::process::id(),
         }
     }
@@ -587,6 +605,49 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn a_server_reports_its_app_api_and_the_handshake_gates_on_it() {
+        let f = prepared();
+        let endpoint = f.endpoint.clone();
+        let server = AppServer::new(&CTX, "0.0.0")
+            .endpoint(endpoint.clone())
+            .app_api(7);
+        let handle = tokio::spawn(async move { server.run().await });
+        wait_until_listening(&endpoint).await;
+
+        let wants = |app_api| ClientInfo {
+            app_api,
+            ..client_info()
+        };
+        let err = sapphire_ipc::connect_or_absent(&endpoint, CTX.app_name, wants(Some(8)))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                sapphire_ipc::Error::AppApiVersionMismatch {
+                    running: Some(7),
+                    ours: 8,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+
+        let (client, info) =
+            sapphire_ipc::connect_or_absent(&endpoint, CTX.app_name, wants(Some(7)))
+                .await
+                .unwrap()
+                .expect("the server is listening");
+        assert_eq!(info.app_api, Some(7));
+
+        let _: serde_json::Value = client
+            .call(sapphire_ipc::SHUTDOWN_METHOD, serde_json::json!({}))
+            .await
+            .unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn a_running_server_answers_server_info() {
         let f = prepared();
         let endpoint = f.endpoint.clone();
@@ -620,7 +681,7 @@ mod tests {
         assert!(report.running);
         assert_eq!(report.version.as_deref(), Some("1.2.3"));
         assert_eq!(report.pid, Some(std::process::id()));
-        assert_eq!(report.managed_by, Some(ManagedBy::Service));
+        assert_eq!(report.managed_by, Some(proto::ManagedBy::Service));
         assert!(report.app.is_empty(), "no status rows were configured");
 
         let _: serde_json::Value = client

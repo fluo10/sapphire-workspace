@@ -34,6 +34,7 @@ fn client_info() -> ClientInfo {
         kind: "cli".into(),
         version: "0.0.0".into(),
         api: 1,
+        app_api: None,
         pid: std::process::id(),
     }
 }
@@ -42,6 +43,7 @@ fn server_info() -> ServerInfo {
     ServerInfo {
         version: "0.0.0".into(),
         api: 1,
+        app_api: None,
         pid: std::process::id(),
         managed_by: ManagedBy::Spawned,
     }
@@ -290,6 +292,62 @@ async fn a_server_of_another_api_version_is_reported_not_replaced() {
         err.to_string().contains("restart the service"),
         "the error must carry the advice: {err}"
     );
+}
+
+/// The application's own API is gated beside the framework's: a client that calls the
+/// application's methods refuses a server that speaks another version of them, or none.
+#[tokio::test]
+async fn a_server_of_another_app_api_version_is_reported() {
+    for running in [Some(2), None] {
+        let (client_conn, server_conn) = Connection::pair();
+        let server = ServerInfo {
+            app_api: running,
+            ..server_info()
+        };
+        tokio::spawn(async move {
+            let _ = serve(server_conn, router(), "test-app", server).await;
+        });
+        let client = ClientInfo {
+            app_api: Some(1),
+            ..client_info()
+        };
+        let err = Client::handshake(client_conn, "test-app", client)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                sapphire_framework_ipc::Error::AppApiVersionMismatch { running: r, ours: 1, .. }
+                    if r == running
+            ),
+            "got {err:?}"
+        );
+        assert!(err.to_string().contains("restart the service"), "{err}");
+    }
+}
+
+/// A client that calls only the framework's methods does not care which application API
+/// the server speaks, and one that does connects when the versions agree.
+#[tokio::test]
+async fn the_app_api_is_compared_only_when_the_client_names_one() {
+    for (theirs, ours) in [(Some(3), None), (Some(3), Some(3)), (None, None)] {
+        let (client_conn, server_conn) = Connection::pair();
+        let server = ServerInfo {
+            app_api: theirs,
+            ..server_info()
+        };
+        tokio::spawn(async move {
+            let _ = serve(server_conn, router(), "test-app", server).await;
+        });
+        let client = ClientInfo {
+            app_api: ours,
+            ..client_info()
+        };
+        let (_client, info) = Client::handshake(client_conn, "test-app", client)
+            .await
+            .expect("a matching or unrequested app API connects");
+        assert_eq!(info.app_api, theirs);
+    }
 }
 
 /// The crate versions are not compared: an app server talks to a bridge built from

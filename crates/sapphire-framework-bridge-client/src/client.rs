@@ -5,7 +5,7 @@ use std::sync::Arc;
 use sapphire_ipc::{Client, ClientInfo, Endpoint, connect_or_absent};
 use tokio::sync::broadcast;
 
-use crate::{
+use sapphire_bridge_api::{
     Ack, ApiKey, BRIDGE_DATA_NAME, BRIDGE_NAME, DEVICE_PRIORITY_SET, DEVICE_RETIRE, DataHeader,
     DevicePrioritySetParams, DevicePrioritySetResult, DeviceRetireParams, DeviceRetireResult,
     EMBED, EMBED_DEVICE_SET, EMBED_INFO, EMBED_KEY_CLEAR, EMBED_KEY_SET, EMBED_MODEL_SET,
@@ -40,7 +40,8 @@ impl BridgeClient {
         let info = ClientInfo {
             kind: kind.to_owned(),
             version: version.to_owned(),
-            api: crate::API_VERSION,
+            api: sapphire_bridge_api::API_VERSION,
+            app_api: None,
             pid: std::process::id(),
         };
         let (client, _) = connect_or_absent(&endpoint, BRIDGE_NAME, info)
@@ -68,7 +69,8 @@ impl BridgeClient {
         let info = ClientInfo {
             kind: kind.to_owned(),
             version: version.to_owned(),
-            api: crate::API_VERSION,
+            api: sapphire_bridge_api::API_VERSION,
+            app_api: None,
             pid: std::process::id(),
         };
         Ok(connect_or_absent(endpoint, BRIDGE_NAME, info)
@@ -100,7 +102,7 @@ impl BridgeClient {
         tokio::spawn(async move {
             loop {
                 match notifications.recv().await {
-                    Ok(n) if n.method == crate::INCOMING => {
+                    Ok(n) if n.method == sapphire_bridge_api::INCOMING => {
                         match serde_json::from_value::<IncomingParams>(n.params) {
                             Ok(params) => {
                                 let _ = sender.send(params);

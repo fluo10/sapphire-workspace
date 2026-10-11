@@ -287,11 +287,12 @@ impl Bridge {
         let info = ServerInfo {
             version: bridge.version.to_owned(),
             api: sapphire_bridge_api::API_VERSION,
+            app_api: None,
             pid: std::process::id(),
             // The bridge is not installed as a service yet; it is started on demand. A
             // client that finds a mismatched version may therefore replace it, which is the
             // right answer for something this process started.
-            managed_by: ManagedBy::Spawned,
+            managed_by: sapphire_ipc::ManagedBy::Spawned,
         };
 
         // Keep `status.json` current for exactly as long as the bridge serves: the writer's

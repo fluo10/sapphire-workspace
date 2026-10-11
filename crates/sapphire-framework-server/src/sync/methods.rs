@@ -188,6 +188,7 @@ mod tests {
             let info = ServerInfo {
                 version: "0.0.0".into(),
                 api: sapphire_backend::protocol::API_VERSION,
+                app_api: None,
                 pid: std::process::id(),
                 managed_by: ManagedBy::Service,
             };
@@ -197,6 +198,7 @@ mod tests {
             kind: "cli".into(),
             version: "0.0.0".into(),
             api: sapphire_backend::protocol::API_VERSION,
+            app_api: None,
             pid: std::process::id(),
         };
         let (client, _) = Client::handshake(client_conn, "sapphire-syncmethods", info)
@@ -405,6 +407,7 @@ mod map_tests {
             let info = ServerInfo {
                 version: "0.0.0".into(),
                 api: sapphire_backend::protocol::API_VERSION,
+                app_api: None,
                 pid: std::process::id(),
                 managed_by: ManagedBy::Service,
             };
@@ -414,6 +417,7 @@ mod map_tests {
             kind: "cli".into(),
             version: "0.0.0".into(),
             api: sapphire_backend::protocol::API_VERSION,
+            app_api: None,
             pid: std::process::id(),
         };
         let (client, _) = Client::handshake(client_conn, "sapphire-syncmap", info)
