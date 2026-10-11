@@ -4,7 +4,8 @@ use std::sync::Mutex;
 use std::sync::mpsc::{Receiver, Sender};
 use std::thread;
 
-use sapphire_bridge_api::{BridgeClient, EmbedInfoResult, EmbedModelInfo, EmbedResult};
+use sapphire_bridge_api::{EmbedInfoResult, EmbedModelInfo, EmbedResult};
+use sapphire_bridge_client::BridgeClient;
 use sapphire_ipc::Endpoint;
 use sapphire_retrieve::{Embedder, Error, Result};
 
@@ -342,6 +343,7 @@ pub(crate) mod testing {
                                     let info = ServerInfo {
                                         version: "fake".into(),
                                         api: sapphire_bridge_api::API_VERSION,
+                                        app_api: None,
                                         pid: std::process::id(),
                                         managed_by: ManagedBy::Service,
                                     };

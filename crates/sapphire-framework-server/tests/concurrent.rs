@@ -17,6 +17,7 @@ fn client_info() -> ClientInfo {
         kind: "cli".into(),
         version: env!("CARGO_PKG_VERSION").into(),
         api: sapphire_backend::protocol::API_VERSION,
+        app_api: None,
         pid: std::process::id(),
     }
 }

@@ -13,10 +13,19 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 pub use grain_id::GrainId;
-pub use sapphire_ipc::ManagedBy;
 
-mod client;
-pub use client::BridgeClient;
+/// How an app server process came to exist, as it tells the bridge in [`REGISTER`].
+///
+/// The same shape as `sapphire_ipc::ManagedBy`, defined here so this crate does not
+/// depend on the transport.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ManagedBy {
+    /// Started by the OS service manager. The bridge never starts it.
+    Service,
+    /// Started on demand.
+    Spawned,
+}
 
 mod embed;
 pub use embed::{
@@ -470,33 +479,6 @@ pub struct DataAck {
     pub error: Option<String>,
 }
 
-/// Send `header`, read the acknowledgement, and hand back the stream ready for raw bytes.
-pub async fn handshake_data<S>(mut stream: S, header: DataHeader) -> sapphire_ipc::Result<S>
-where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
-{
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-
-    let mut line = serde_json::to_vec(&header)?;
-    line.push(b'\n');
-    stream.write_all(&line).await?;
-    stream.flush().await?;
-
-    // Read exactly one line without buffering past it, so the raw bytes that follow stay on
-    // the stream.
-    let mut reader = BufReader::with_capacity(1, &mut stream);
-    let mut answer = String::new();
-    reader.read_line(&mut answer).await?;
-    let ack: DataAck = serde_json::from_str(answer.trim())?;
-    if !ack.ok {
-        return Err(sapphire_ipc::Error::Protocol(
-            ack.error
-                .unwrap_or_else(|| "the bridge refused the stream".to_owned()),
-        ));
-    }
-    Ok(stream)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -560,7 +542,7 @@ mod tests {
         let params = RegisterParams {
             app_name: "sapphire-journal".into(),
             exe_path: "/usr/bin/sapphire-journal".into(),
-            managed_by: sapphire_ipc::ManagedBy::Spawned,
+            managed_by: ManagedBy::Spawned,
             workspaces: vec![WorkspaceRegistration {
                 workspace_id: id(),
                 root: "/home/me/journal".into(),

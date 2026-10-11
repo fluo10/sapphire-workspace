@@ -1107,8 +1107,9 @@ mod tests {
         ServerInfo {
             version: "0.0.0".into(),
             api: sapphire_bridge_api::API_VERSION,
+            app_api: None,
             pid: 1,
-            managed_by: sapphire_bridge_api::ManagedBy::Spawned,
+            managed_by: sapphire_ipc::ManagedBy::Spawned,
         }
     }
 
@@ -1127,6 +1128,7 @@ mod tests {
                 kind: "test".into(),
                 version: "0.0.0".into(),
                 api: sapphire_bridge_api::API_VERSION,
+                app_api: None,
                 pid: std::process::id(),
             },
         )

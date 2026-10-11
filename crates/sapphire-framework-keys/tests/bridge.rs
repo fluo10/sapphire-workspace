@@ -3,9 +3,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use sapphire_bridge_api::{
-    BridgeClient, ExternalDeviceAddParams, ExternalDeviceOutcome, ExternalDeviceRequest,
-};
+use sapphire_bridge_api::{ExternalDeviceAddParams, ExternalDeviceOutcome, ExternalDeviceRequest};
+use sapphire_bridge_client::BridgeClient;
 use sapphire_framework_bridge::{Bridge, BridgeDir, LoopbackNetwork, NetConfig, Workgroup};
 use sapphire_framework_keys::{BridgeVerifier, Verdict, Verifier};
 use sapphire_ipc::Endpoint;

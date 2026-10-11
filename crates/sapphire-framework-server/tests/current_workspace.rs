@@ -109,6 +109,7 @@ async fn client(ctx: &'static AppContext, endpoint: &Endpoint) -> Client {
         kind: "test".into(),
         version: "0.0.0".into(),
         api: proto::API_VERSION,
+        app_api: None,
         pid: std::process::id(),
     };
     connect_or_absent(endpoint, ctx.app_name, info)

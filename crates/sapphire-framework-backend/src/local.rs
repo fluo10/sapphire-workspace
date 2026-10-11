@@ -9,12 +9,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use sapphire_workspace::{
-    FileSearchResult, HybridConfig, RetrieveParams, SearchMode, WorkspaceState,
-};
+use sapphire_workspace::{HybridConfig, RetrieveParams, WorkspaceState};
 use tokio::sync::broadcast;
 
-use crate::{BackendEvent, Result, SyncSummary, WorkspaceBackend};
+use crate::{BackendEvent, FileSearchResult, Result, SearchMode, SyncSummary, WorkspaceBackend};
 
 /// Default capacity of the event broadcast channel. Slow subscribers that fall
 /// this far behind observe a lagged receiver rather than blocking producers.
@@ -29,13 +27,27 @@ pub(crate) fn search_state(
     limit: usize,
     mode: SearchMode,
 ) -> sapphire_workspace::Result<Vec<FileSearchResult>> {
+    let mode = match mode {
+        SearchMode::Fts => sapphire_workspace::SearchMode::Fts,
+        SearchMode::Semantic => sapphire_workspace::SearchMode::Semantic,
+        SearchMode::Hybrid => sapphire_workspace::SearchMode::Hybrid,
+    };
     let params = RetrieveParams {
         query,
         limit,
         mode,
         folder: None,
     };
-    state.retrieve_files(&params, &HybridConfig::default())
+    let hits = state.retrieve_files(&params, &HybridConfig::default())?;
+    Ok(hits
+        .into_iter()
+        .map(|hit| FileSearchResult {
+            id: hit.id,
+            path: hit.path,
+            score: hit.score,
+            snippet: hit.snippet,
+        })
+        .collect())
 }
 
 /// A [`WorkspaceBackend`] backed by a local [`WorkspaceState`].

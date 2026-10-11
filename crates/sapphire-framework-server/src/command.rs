@@ -5,9 +5,9 @@ use std::path::PathBuf;
 
 use sapphire_backend::protocol as proto;
 use sapphire_bridge_api::{
-    BridgeClient, DevicePrioritySetParams, DeviceRetireParams, InviteParams, JoinParams,
-    WorkgroupCreateParams,
+    DevicePrioritySetParams, DeviceRetireParams, InviteParams, JoinParams, WorkgroupCreateParams,
 };
+use sapphire_bridge_client::BridgeClient;
 use sapphire_framework_service::{Environment, ServiceCommand, SystemManager};
 use sapphire_ipc::{ClientInfo, Endpoint};
 
@@ -385,6 +385,7 @@ async fn workspace_init(
         kind: "cli".to_owned(),
         version: version.to_owned(),
         api: proto::API_VERSION,
+        app_api: None,
         pid: std::process::id(),
     };
     let Some((client, _)) = sapphire_ipc::connect_or_absent(&endpoint, app, client_info).await?
@@ -482,6 +483,7 @@ async fn connect_app(app: &str, version: &str) -> Result<Option<sapphire_ipc::Cl
         kind: "cli".to_owned(),
         version: version.to_owned(),
         api: proto::API_VERSION,
+        app_api: None,
         pid: std::process::id(),
     };
     let client = sapphire_ipc::connect_or_absent(&endpoint, app, client_info).await?;
@@ -576,6 +578,7 @@ async fn workspace_map(
         kind: "cli".to_owned(),
         version: version.to_owned(),
         api: proto::API_VERSION,
+        app_api: None,
         pid: std::process::id(),
     };
     let Some((client, _)) = sapphire_ipc::connect_or_absent(&endpoint, app, client_info).await?
@@ -637,6 +640,7 @@ async fn run_status_into(
         kind: "cli".to_owned(),
         version: version.to_owned(),
         api: proto::API_VERSION,
+        app_api: None,
         pid: std::process::id(),
     };
     let Some((client, _)) = sapphire_ipc::connect_or_absent(endpoint, app, client_info).await?
@@ -839,6 +843,7 @@ mod status_tests {
                 kind: "test".into(),
                 version: "0.0.0".into(),
                 api: sapphire_backend::protocol::API_VERSION,
+                app_api: None,
                 pid: std::process::id(),
             },
         )

@@ -27,8 +27,12 @@ use tokio::sync::broadcast;
 mod error;
 mod ipc;
 mod local;
-pub mod protocol;
 mod source;
+
+/// The methods every app server serves and their types, from
+/// `sapphire-framework-server-api`, which carries the API version in its own version.
+pub use sapphire_server_api as protocol;
+pub use sapphire_server_api::{BackendEvent, FileSearchResult, SearchMode};
 
 pub use error::{Error, Result};
 pub use ipc::IpcBackend;
@@ -38,9 +42,9 @@ pub use source::{
     WorkspaceSource,
 };
 
-// Re-export the search mode + result types (and the underlying state, which the
-// factory needs) so callers depend only on this crate.
-pub use sapphire_workspace::{FileSearchResult, SearchMode, WorkspaceState};
+// Re-export the underlying state, which the factory needs, so callers depend only on
+// this crate.
+pub use sapphire_workspace::WorkspaceState;
 
 /// Result of a sync cycle.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -49,33 +53,6 @@ pub struct SyncSummary {
     pub upserted: usize,
     /// Number of documents removed.
     pub removed: usize,
-}
-
-/// Events published by a backend so a UI can react without polling.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum BackendEvent {
-    /// A sync cycle finished.
-    Synced {
-        /// Documents added/updated.
-        upserted: usize,
-        /// Documents removed.
-        removed: usize,
-    },
-    /// A single file changed through this backend.
-    FileChanged {
-        /// The affected path.
-        path: PathBuf,
-    },
-    /// A single file was removed through this backend.
-    FileRemoved {
-        /// The affected path.
-        path: PathBuf,
-    },
-    /// A background operation failed. Carries a human-readable message.
-    Error {
-        /// Failure description.
-        message: String,
-    },
 }
 
 /// Async facade over a workspace's document operations, search and sync.

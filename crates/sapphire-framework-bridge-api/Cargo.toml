@@ -1,5 +1,7 @@
 [package]
 name = "sapphire-framework-bridge-api"
+# The major is the bridge's API version (`API_VERSION`); it moves only when the methods
+# or their types break, not with the framework's version.
 version = "2.3.0"
 edition.workspace = true
 description = "Control-plane protocol and client for the sapphire-framework bridge"
@@ -15,14 +17,9 @@ cli = ["dep:clap", "dep:rpassword"]
 [dependencies]
 clap = { workspace = true, optional = true }
 rpassword = { version = "7", optional = true }
-sapphire-ipc = { package = "sapphire-framework-ipc", version = "0.14.0", path = "../sapphire-framework-ipc" }
 grain-id.workspace = true
 serde.workspace = true
-serde_json.workspace = true
-thiserror.workspace = true
-tokio = { workspace = true, features = ["rt", "sync", "io-util"] }
-tracing.workspace = true
 
 [dev-dependencies]
 clap.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+serde_json.workspace = true

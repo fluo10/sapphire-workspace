@@ -1,0 +1,18 @@
+[package]
+name = "sapphire-framework-server-api"
+# The major is the app server's API version (`API_VERSION`); it moves only when the
+# methods or their types break, not with the framework's version.
+version = "4.0.0"
+edition.workspace = true
+description = "The methods every sapphire-framework app server serves, and their types"
+license.workspace = true
+repository.workspace = true
+keywords = ["ipc", "protocol", "local-first"]
+categories = ["network-programming"]
+
+[dependencies]
+grain-id.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

@@ -86,6 +86,7 @@ async fn an_ipc_backend_reads_back_what_it_wrote() {
         "sapphire-servertest",
         "test",
         env!("CARGO_PKG_VERSION"),
+        None,
     )
     .await
     .unwrap();
@@ -127,6 +128,7 @@ async fn events_reach_a_subscriber_of_an_ipc_backend() {
             "sapphire-servertest",
             "test",
             env!("CARGO_PKG_VERSION"),
+            None,
         )
         .await
         .unwrap(),

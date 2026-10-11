@@ -16,9 +16,10 @@ use std::sync::Arc;
 use std::io::Write as _;
 
 use sapphire_bridge_api::{
-    BRIDGE_NAME, BridgeClient, EmbedInfoResult, EmbedRequest, EmbedSettingsResult,
-    EmbeddingCommand, ExternalDeviceCommand, InviteParams, JoinParams, PeerInfo, StatusResult,
+    BRIDGE_NAME, EmbedInfoResult, EmbedRequest, EmbedSettingsResult, EmbeddingCommand,
+    ExternalDeviceCommand, InviteParams, JoinParams, PeerInfo, StatusResult,
 };
+use sapphire_bridge_client::BridgeClient;
 use sapphire_framework_service::{Environment, ServiceCommand, ServiceSpec, SystemManager};
 use sapphire_ipc::Endpoint;
 

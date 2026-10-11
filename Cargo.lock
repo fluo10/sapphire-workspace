@@ -5527,6 +5527,7 @@ dependencies = [
  "indexmap",
  "sapphire-framework-ipc",
  "sapphire-framework-server",
+ "sapphire-framework-server-api",
  "sapphire-framework-workspace",
  "serde",
  "serde_json",
@@ -5556,6 +5557,7 @@ dependencies = [
  "rustls",
  "sapphire-framework-bridge",
  "sapphire-framework-bridge-api",
+ "sapphire-framework-bridge-client",
  "sapphire-framework-ipc",
  "sapphire-framework-registry",
  "sapphire-framework-service",
@@ -5582,10 +5584,17 @@ dependencies = [
  "clap",
  "grain-id",
  "rpassword",
- "sapphire-framework-ipc",
  "serde",
  "serde_json",
- "thiserror 2.0.20",
+]
+
+[[package]]
+name = "sapphire-framework-bridge-client"
+version = "0.14.0"
+dependencies = [
+ "sapphire-framework-bridge-api",
+ "sapphire-framework-ipc",
+ "serde_json",
  "tokio",
  "tracing",
 ]
@@ -5621,6 +5630,7 @@ dependencies = [
  "sapphire-framework-backend",
  "sapphire-framework-bridge",
  "sapphire-framework-bridge-api",
+ "sapphire-framework-bridge-client",
  "sapphire-framework-ipc",
  "sapphire-framework-server",
  "sapphire-framework-workspace",
@@ -5658,6 +5668,7 @@ dependencies = [
  "http-body-util",
  "sapphire-framework-bridge",
  "sapphire-framework-bridge-api",
+ "sapphire-framework-bridge-client",
  "sapphire-framework-ipc",
  "sha2",
  "tempfile",
@@ -5708,6 +5719,7 @@ dependencies = [
  "sapphire-framework-backend",
  "sapphire-framework-bridge",
  "sapphire-framework-bridge-api",
+ "sapphire-framework-bridge-client",
  "sapphire-framework-ipc",
  "sapphire-framework-server",
  "sapphire-framework-service",
@@ -5721,6 +5733,15 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
+]
+
+[[package]]
+name = "sapphire-framework-server-api"
+version = "4.0.0"
+dependencies = [
+ "grain-id",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -5791,6 +5812,7 @@ dependencies = [
  "indexmap",
  "md-5",
  "sapphire-framework-bridge-api",
+ "sapphire-framework-bridge-client",
  "sapphire-framework-ipc",
  "sapphire-framework-retrieve",
  "sapphire-framework-track",

@@ -27,6 +27,9 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Changed
 
+- The public APIs are crates of their own, versioned by the API and not by the framework (#218): `sapphire-framework-server-api` 4.0.0 holds the app server's common methods and types (moved out of `sapphire-framework-backend`, which re-exports it as `protocol`; `API_VERSION` is its major), and `sapphire-framework-bridge-api` now holds only the bridge's wire types — its `BridgeClient` and `handshake_data` moved to the new `sapphire-framework-bridge-client`. Neither API crate depends on `sapphire-framework-ipc`; each has its own `ManagedBy`. `SearchMode`, `FileSearchResult` and `BackendEvent` on the wire are the API crate's; `LocalBackend` converts from the workspace's.
+- The handshake also carries the application's own API version (`ClientInfo.app_api` / `ServerInfo.app_api`, absent when unused): `AppServer::app_api(n)` reports it, and a client that names one refuses a server that speaks another or none (`ipc::Error::AppApiVersionMismatch`). `IpcBackend::connect` takes the `app_api` it expects.
+
 - `sapphire-framework-keys` authenticates against the workgroup's external devices: `protect(AuthConfig, router)` with a `Verifier`, normally `BridgeVerifier::new(app, version)`, which asks the bridge (`external_device.authenticate`) and caches a success for 30 seconds; a refused token is 401, a bridge that cannot be asked is 503. `Authenticated` now carries the external device's `id` and `name`. `KeyStore`, `KeyEntry` and the per-server `keys.toml` of raw tokens are removed: re-create existing keys as external devices.
 
 - A workspace syncs as a star as soon as a primary device is elected, around its primary and secondary devices. One candidate (a device at priority >= 1, the default) is enough: the devices at priority 0 then sync only through it. Set every device's priority to 0 to keep the full mesh.

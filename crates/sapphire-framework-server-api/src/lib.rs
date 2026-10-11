@@ -1,26 +1,32 @@
-//! The `workspace.*` namespace: method names and their parameter and result types.
+//! What a client says to an application's server, and how the server answers: the
+//! framework's methods every app server serves, their parameters and their results.
 //!
-//! Both sides of the connection name these types — the server in
-//! `sapphire-framework-server`, the client in [`IpcBackend`](crate::IpcBackend) — so they
-//! live here, beside the [`WorkspaceBackend`](crate::WorkspaceBackend) trait they mirror,
-//! rather than in `sapphire-framework-ipc`, which must stay free of the search stack.
+//! Kept apart from the rest of the framework so that its version moves only when this
+//! API does. An application's own API crate depends on this one and nothing heavier;
+//! a client that only talks to a server links neither the search stack nor the IPC
+//! transport through it. Its types are plain serde data: the transport is
+//! `sapphire-framework-ipc`, the typed client `IpcBackend` in
+//! `sapphire-framework-backend`.
 //!
 //! A server serves one workspace at a time (#215), so no request names one: every
 //! `workspace.*` and `sync.*` method acts on the server's current workspace, which
 //! [`WORKSPACE_SELECT`] and [`WORKSPACE_INIT`] change and [`WORKSPACE_CURRENT`] reports.
 
+#![warn(missing_docs)]
+
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{BackendEvent, FileSearchResult, SearchMode};
+pub use grain_id::GrainId;
 
 /// The version of the app server's API: the framework's methods below and their types.
 ///
-/// This, not the crate version, is what a CLI, MCP server or desktop UI must agree on
-/// with the running server, so that a release that leaves the method set alone does not
-/// demand a service restart. Bump it on a breaking change to a method, a parameter or a
-/// result here.
+/// It is this crate's major version, parsed at compile time, so the two cannot drift: a
+/// breaking change to a method, a parameter or a result here is a major release of this
+/// crate, and that release is the new API version. The handshake compares this number,
+/// not the framework's version, so a framework release that leaves this crate alone
+/// does not demand a service restart.
 ///
 /// 2: `workspace.list`, `workspace.forget`.
 ///
@@ -28,7 +34,87 @@ use crate::{BackendEvent, FileSearchResult, SearchMode};
 ///
 /// 4: one workspace per server (#215): no `ws` parameter, `workspace.select` and
 /// `workspace.current` in place of `workspace.list` and `workspace.forget`.
-pub const API_VERSION: u32 = 4;
+pub const API_VERSION: u32 = parse_major(env!("CARGO_PKG_VERSION_MAJOR"));
+
+/// `CARGO_PKG_VERSION_MAJOR` as a number. Cargo guarantees it is decimal digits.
+const fn parse_major(s: &str) -> u32 {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    let mut n = 0u32;
+    while i < bytes.len() {
+        n = n * 10 + (bytes[i] - b'0') as u32;
+        i += 1;
+    }
+    n
+}
+
+/// How a server process came to exist, as `server.info` reports it.
+///
+/// The same shape as `sapphire_ipc::ManagedBy`, defined here so this crate does not
+/// depend on the transport.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ManagedBy {
+    /// Started by the OS service manager.
+    Service,
+    /// Started on demand by a client.
+    Spawned,
+}
+
+/// Which retrieval strategy a search uses.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SearchMode {
+    /// Full-text search only (BM25 / trigram).
+    Fts,
+    /// Semantic (vector) search only. Falls back to full text if no embedder is
+    /// configured.
+    Semantic,
+    /// Combine full-text and semantic results via Reciprocal Rank Fusion (default).
+    #[default]
+    Hybrid,
+}
+
+/// One file matching a search.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FileSearchResult {
+    /// The index's id for the file. Stable only within one server's index.
+    pub id: i64,
+    /// The file's path, relative to the workspace root.
+    pub path: String,
+    /// Full text: BM25 (higher is better). Semantic: L2 distance (lower is better).
+    /// Hybrid: RRF (higher is better).
+    pub score: f64,
+    /// A short excerpt, on one line: the match's surroundings, else the leading text.
+    pub snippet: String,
+}
+
+/// Events a server publishes so a client can react without polling.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BackendEvent {
+    /// A sync cycle finished.
+    Synced {
+        /// Documents added/updated.
+        upserted: usize,
+        /// Documents removed.
+        removed: usize,
+    },
+    /// A single file changed through the server.
+    FileChanged {
+        /// The affected path.
+        path: PathBuf,
+    },
+    /// A single file was removed through the server.
+    FileRemoved {
+        /// The affected path.
+        path: PathBuf,
+    },
+    /// A background operation failed. Carries a human-readable message.
+    Error {
+        /// Failure description.
+        message: String,
+    },
+}
 
 /// Search the workspace.
 pub const SEARCH: &str = "workspace.search";
@@ -44,7 +130,7 @@ pub const DELETE_FILE: &str = "workspace.delete_file";
 pub const LIST_DIR: &str = "workspace.list_dir";
 /// Rebuild the index from disk.
 ///
-/// Named `reindex`, not `sync`: [`WorkspaceBackend::sync`](crate::WorkspaceBackend::sync)
+/// Named `reindex`, not `sync`: `WorkspaceBackend::sync`
 /// means "walk the files and update the index", which reads as peer-to-peer sync once the
 /// bridge exists.
 pub const REINDEX: &str = "workspace.reindex";
@@ -330,7 +416,7 @@ mod tests {
             .dir,
             PathBuf::from("/x")
         );
-        assert_eq!(API_VERSION, 4);
+        assert_eq!(API_VERSION, 4, "the crate's major is the API version");
     }
 
     #[test]
@@ -462,7 +548,7 @@ pub struct StatusReport {
     /// Its pid, when it is running.
     pub pid: Option<u32>,
     /// How the running server was started, when it is running.
-    pub managed_by: Option<sapphire_ipc::ManagedBy>,
+    pub managed_by: Option<ManagedBy>,
     /// The application's own rows, rendered after the framework's.
     pub app: Vec<StatusRow>,
 }

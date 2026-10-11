@@ -102,6 +102,7 @@ impl Client {
         // Remembered here so the API gate below can name both sides; the moved-out
         // `client` goes into the hello.
         let ours = client.api;
+        let ours_app = client.app_api;
         let sender = conn.sender();
         let hello = Hello {
             protocol: crate::PROTOCOL_VERSION,
@@ -142,6 +143,17 @@ impl Client {
         if welcome.server.api != ours {
             return Err(Error::ApiVersionMismatch {
                 running: welcome.server.api,
+                ours,
+                server_version: welcome.server.version,
+            });
+        }
+        // The application's own API, gated the same way, when the client calls it. A
+        // server that reports none does not serve the version the client needs either.
+        if let Some(ours) = ours_app
+            && welcome.server.app_api != Some(ours)
+        {
+            return Err(Error::AppApiVersionMismatch {
+                running: welcome.server.app_api,
                 ours,
                 server_version: welcome.server.version,
             });
@@ -253,6 +265,7 @@ mod tests {
             kind: "cli".into(),
             version: "0.0.0".into(),
             api: 1,
+            app_api: None,
             pid: std::process::id(),
         }
     }
@@ -261,6 +274,7 @@ mod tests {
         ServerInfo {
             version: "0.0.0".into(),
             api: 1,
+            app_api: None,
             pid: 1,
             managed_by: ManagedBy::Spawned,
         }

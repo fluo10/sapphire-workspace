@@ -5,7 +5,8 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use grain_id::GrainId;
-use sapphire_bridge_api::{ApiKey, BridgeClient};
+use sapphire_bridge_api::ApiKey;
+use sapphire_bridge_client::BridgeClient;
 use sapphire_ipc::Endpoint;
 use sha2::{Digest, Sha256};
 

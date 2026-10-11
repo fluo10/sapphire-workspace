@@ -303,6 +303,7 @@ mod tests {
             let info = ServerInfo {
                 version: "0.0.0".into(),
                 api: sapphire_backend::protocol::API_VERSION,
+                app_api: None,
                 pid: std::process::id(),
                 managed_by: ManagedBy::Spawned,
             };
@@ -312,6 +313,7 @@ mod tests {
             kind: "test".into(),
             version: "0.0.0".into(),
             api: sapphire_backend::protocol::API_VERSION,
+            app_api: None,
             pid: std::process::id(),
         };
         let (client, _) = Client::handshake(client_conn, "sapphire-handlertest", client_info)
