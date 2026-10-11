@@ -133,24 +133,28 @@ async fn app_command(
     let r: sapphire_ipc::Result<()> = async {
         match command {
             Command::WorkspaceInit { dir, sync } => {
-                let init: proto::WorkspaceInitResult = c
+                let _: proto::WorkspaceInitResult = c
                     .call(proto::WORKSPACE_INIT, proto::WorkspaceInitParams { dir })
                     .await?;
                 if sync {
-                    let _: proto::SyncEnableResult = c
-                        .call(proto::SYNC_ENABLE, proto::WsParams { ws: init.root })
-                        .await?;
+                    let _: proto::SyncEnableResult =
+                        c.call(proto::SYNC_ENABLE, serde_json::json!({})).await?;
                 }
             }
-            Command::SyncEnable { root } => {
-                let _: proto::SyncEnableResult = c
-                    .call(proto::SYNC_ENABLE, proto::WsParams { ws: root })
+            Command::WorkspaceSelect { dir } => {
+                let _: proto::CurrentWorkspace = c
+                    .call(
+                        proto::WORKSPACE_SELECT,
+                        proto::WorkspaceSelectParams { dir },
+                    )
                     .await?;
             }
-            Command::SyncDisable { root } => {
-                let _: proto::Ack = c
-                    .call(proto::SYNC_DISABLE, proto::WsParams { ws: root })
-                    .await?;
+            Command::SyncEnable => {
+                let _: proto::SyncEnableResult =
+                    c.call(proto::SYNC_ENABLE, serde_json::json!({})).await?;
+            }
+            Command::SyncDisable => {
+                let _: proto::Ack = c.call(proto::SYNC_DISABLE, serde_json::json!({})).await?;
             }
             Command::WorkspaceMap { workspace_id, dir } => {
                 // "Bring to this host…" names a folder inside the one picked, which does
@@ -177,11 +181,6 @@ async fn app_command(
                             dir,
                         },
                     )
-                    .await?;
-            }
-            Command::WorkspaceForget { id } => {
-                let _: proto::Ack = c
-                    .call(proto::WORKSPACE_FORGET, proto::WorkspaceForgetParams { id })
                     .await?;
             }
             _ => unreachable!("execute routes only app commands here"),
@@ -276,10 +275,7 @@ mod tests {
             ),
             Duration::from_secs(90)
         );
-        assert_eq!(
-            limit(&cfg, &Command::SyncEnable { root: "/x".into() }),
-            Duration::from_secs(30)
-        );
+        assert_eq!(limit(&cfg, &Command::SyncEnable), Duration::from_secs(30));
     }
 
     #[test]

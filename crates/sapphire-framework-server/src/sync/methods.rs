@@ -1,4 +1,4 @@
-//! The `sync.*` methods.
+//! The `sync.*` methods. Each acts on the server's current workspace (#215).
 
 use std::sync::Arc;
 
@@ -6,33 +6,33 @@ use sapphire_backend::protocol as proto;
 use sapphire_backend::protocol::{SYNC_MAP, SyncMapParams};
 use sapphire_ipc::{Router, RpcError};
 
+use crate::current::Current;
 use crate::handlers::rpc_error;
-use crate::sync::SyncRuntime;
 
 /// Add `sync.enable`, `sync.disable`, `sync.map` and `sync.status` to `router`.
-pub fn sync_router(runtime: Arc<SyncRuntime>, router: Router) -> Router {
-    let enable = Arc::clone(&runtime);
-    let map = Arc::clone(&runtime);
-    let disable = Arc::clone(&runtime);
-    let status = runtime;
+///
+/// `current` must have a sync runtime: a server without one does not serve `sync.*`.
+pub fn sync_router(current: Arc<Current>, router: Router) -> Router {
+    let enable = Arc::clone(&current);
+    let map = Arc::clone(&current);
+    let disable = Arc::clone(&current);
+    let status = current;
 
     router
-        .method(proto::SYNC_ENABLE, move |ctx| {
-            let runtime = Arc::clone(&enable);
+        .method(proto::SYNC_ENABLE, move |_| {
+            let current = Arc::clone(&enable);
             async move {
-                let p: proto::WsParams = serde_json::from_value(ctx.params)
-                    .map_err(|e| RpcError::invalid_params(format!("bad parameters: {e}")))?;
-                let workspace_id = runtime.enable(&p.ws).await.map_err(|e| rpc_error(&e))?;
+                let workspace_id = current.enable_sync().await.map_err(|e| rpc_error(&e))?;
                 serde_json::to_value(proto::SyncEnableResult { workspace_id })
                     .map_err(|e| RpcError::internal(e.to_string()))
             }
         })
         .method(SYNC_MAP, move |ctx| {
-            let runtime = Arc::clone(&map);
+            let current = Arc::clone(&map);
             async move {
                 let p: SyncMapParams = serde_json::from_value(ctx.params)
                     .map_err(|e| RpcError::invalid_params(format!("bad parameters: {e}")))?;
-                let workspace_id = runtime
+                let workspace_id = current
                     .map(&p.workspace, &p.dir)
                     .await
                     .map_err(|e| rpc_error(&e))?;
@@ -40,24 +40,19 @@ pub fn sync_router(runtime: Arc<SyncRuntime>, router: Router) -> Router {
                     .map_err(|e| RpcError::internal(e.to_string()))
             }
         })
-        .method(proto::SYNC_DISABLE, move |ctx| {
-            let runtime = Arc::clone(&disable);
+        .method(proto::SYNC_DISABLE, move |_| {
+            let current = Arc::clone(&disable);
             async move {
-                let p: proto::WsParams = serde_json::from_value(ctx.params)
-                    .map_err(|e| RpcError::invalid_params(format!("bad parameters: {e}")))?;
-                runtime.disable(&p.ws).await.map_err(|e| rpc_error(&e))?;
+                current.disable_sync().await.map_err(|e| rpc_error(&e))?;
                 serde_json::to_value(proto::Ack {}).map_err(|e| RpcError::internal(e.to_string()))
             }
         })
-        .method(proto::SYNC_STATUS, move |ctx| {
-            let runtime = Arc::clone(&status);
+        .method(proto::SYNC_STATUS, move |_| {
+            let current = Arc::clone(&status);
             async move {
-                let p: proto::WsParams = serde_json::from_value(ctx.params)
-                    .map_err(|e| RpcError::invalid_params(format!("bad parameters: {e}")))?;
                 // Never fails on account of the bridge: a status call that errored when the
                 // bridge was down would read as an outage of the app server itself.
-                let status = runtime.status(&p.ws).await;
-                serde_json::to_value(proto::SyncStatusResult::from(status))
+                serde_json::to_value(current.status().await)
                     .map_err(|e| RpcError::internal(e.to_string()))
             }
         })
@@ -81,6 +76,7 @@ impl From<crate::sync::SyncStatus> for proto::SyncStatusResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sync::SyncRuntime;
     use crate::sync::testing::StubBridge;
     use crate::test_support;
     use sapphire_ipc::{Client, ClientInfo, Connection, ManagedBy, ServerInfo, serve};
@@ -130,7 +126,23 @@ mod tests {
         _stub: StubBridge,
     }
 
+    /// [`bare`], with its workspace selected.
     async fn fixture() -> Fixture {
+        let f = bare().await;
+        let _: proto::CurrentWorkspace = f
+            .client
+            .call(
+                proto::WORKSPACE_SELECT,
+                proto::WorkspaceSelectParams {
+                    dir: f.root.clone(),
+                },
+            )
+            .await
+            .unwrap();
+        f
+    }
+
+    async fn bare() -> Fixture {
         let lock = test_support::lock();
         let tmp = tempfile::tempdir().unwrap();
         let previous = DIR_VARS.map(std::env::var_os);
@@ -160,7 +172,16 @@ mod tests {
             "/bin/true".into(),
             ManagedBy::Service,
         ));
-        let router = Arc::new(sync_router(runtime, sapphire_ipc::Router::new()));
+        let current = Arc::new(crate::current::Current::new(
+            &CTX,
+            Arc::new(crate::host::WorkspaceHost::new(&CTX)),
+            Some(runtime),
+            crate::selection::SelectionFile::at(tmp.path().join("workspace.toml")),
+        ));
+        let router = Arc::new(sync_router(
+            Arc::clone(&current),
+            crate::current::current_methods(current, sapphire_ipc::Router::new()),
+        ));
 
         let (client_conn, server_conn) = Connection::pair();
         tokio::spawn(async move {
@@ -195,7 +216,7 @@ mod tests {
         let f = fixture().await;
         let result: proto::SyncEnableResult = f
             .client
-            .call(proto::SYNC_ENABLE, proto::WsParams { ws: f.root.clone() })
+            .call(proto::SYNC_ENABLE, serde_json::json!({}))
             .await
             .unwrap();
         assert!(!result.workspace_id.to_string().is_empty());
@@ -206,7 +227,7 @@ mod tests {
         let f = fixture().await;
         let status: proto::SyncStatusResult = f
             .client
-            .call(proto::SYNC_STATUS, proto::WsParams { ws: f.root.clone() })
+            .call(proto::SYNC_STATUS, serde_json::json!({}))
             .await
             .unwrap();
         assert!(!status.enabled);
@@ -218,12 +239,12 @@ mod tests {
         let f = fixture().await;
         let enabled: proto::SyncEnableResult = f
             .client
-            .call(proto::SYNC_ENABLE, proto::WsParams { ws: f.root.clone() })
+            .call(proto::SYNC_ENABLE, serde_json::json!({}))
             .await
             .unwrap();
         let status: proto::SyncStatusResult = f
             .client
-            .call(proto::SYNC_STATUS, proto::WsParams { ws: f.root.clone() })
+            .call(proto::SYNC_STATUS, serde_json::json!({}))
             .await
             .unwrap();
 
@@ -236,34 +257,62 @@ mod tests {
         let f = fixture().await;
         let _: proto::Ack = f
             .client
-            .call(proto::SYNC_DISABLE, proto::WsParams { ws: f.root.clone() })
+            .call(proto::SYNC_DISABLE, serde_json::json!({}))
             .await
             .expect("disabling what was never enabled is fine");
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_directory_that_is_not_a_workspace_is_an_invalid_parameter() {
-        let f = fixture().await;
-        let plain = f._tmp.path().join("plain");
-        std::fs::create_dir_all(&plain).unwrap();
-
+    async fn without_a_workspace_sync_is_an_invalid_parameter() {
+        let f = bare().await;
         let err = f
             .client
-            .call::<_, proto::SyncEnableResult>(proto::SYNC_ENABLE, proto::WsParams { ws: plain })
+            .call::<_, proto::SyncEnableResult>(proto::SYNC_ENABLE, serde_json::json!({}))
             .await
             .unwrap_err();
         match err {
             sapphire_ipc::Error::Rpc(e) => {
                 assert_eq!(e.code, sapphire_ipc::codes::INVALID_PARAMS, "{}", e.message);
+                assert!(e.message.contains("workspace select"), "{}", e.message);
             }
             other => panic!("got {other:?}"),
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn enabling_is_remembered_and_selecting_again_resumes_it() {
+        let f = fixture().await;
+        let _: proto::SyncEnableResult = f
+            .client
+            .call(proto::SYNC_ENABLE, serde_json::json!({}))
+            .await
+            .unwrap();
+        let saved = std::fs::read_to_string(f._tmp.path().join("workspace.toml")).unwrap();
+        assert!(saved.contains("sync = true"), "{saved}");
+        // The workspace now has a sync id, so selecting it turns sync on by itself.
+        let _: proto::Ack = f
+            .client
+            .call(proto::SYNC_DISABLE, serde_json::json!({}))
+            .await
+            .unwrap();
+        let again: proto::CurrentWorkspace = f
+            .client
+            .call(
+                proto::WORKSPACE_SELECT,
+                proto::WorkspaceSelectParams {
+                    dir: f.root.clone(),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(again.sync.enabled);
     }
 }
 
 #[cfg(test)]
 mod map_tests {
     use super::*;
+    use crate::sync::SyncRuntime;
     use crate::sync::testing::StubBridge;
     use crate::test_support;
     use sapphire_bridge_api::WorkgroupWorkspaceInfo;
@@ -340,7 +389,16 @@ mod map_tests {
             "/bin/true".into(),
             ManagedBy::Service,
         ));
-        let router = Arc::new(sync_router(runtime, sapphire_ipc::Router::new()));
+        let current = Arc::new(crate::current::Current::new(
+            &CTX,
+            Arc::new(crate::host::WorkspaceHost::new(&CTX)),
+            Some(runtime),
+            crate::selection::SelectionFile::at(tmp.path().join("workspace.toml")),
+        ));
+        let router = Arc::new(sync_router(
+            Arc::clone(&current),
+            crate::current::current_methods(current, sapphire_ipc::Router::new()),
+        ));
 
         let (client_conn, server_conn) = Connection::pair();
         tokio::spawn(async move {
@@ -405,7 +463,7 @@ mod map_tests {
 
         let status: proto::SyncStatusResult = f
             .client
-            .call(proto::SYNC_STATUS, proto::WsParams { ws: f.root.clone() })
+            .call(proto::SYNC_STATUS, serde_json::json!({}))
             .await
             .unwrap();
         assert!(status.enabled, "mapping enabled sync");

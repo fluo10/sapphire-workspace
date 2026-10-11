@@ -4,13 +4,13 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use grain_id::GrainId;
-use sapphire_backend::protocol::{Topology, WorkspaceListEntry};
+use sapphire_backend::protocol::{CurrentWorkspace, Topology};
 use sapphire_bridge_api::{
     EmbedSettingsResult, LOCAL_MODEL, LocalModel, ModelSettings, PeerInfo, RemoteModel, Slot,
     WorkgroupWorkspaceInfo, WorkspaceRoles,
 };
 
-/// A workspace row's state, as one badge.
+/// The workspace's state, as one badge.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Badge {
     /// Synced, with this many other devices in the workgroup.
@@ -33,7 +33,7 @@ pub enum Badge {
 }
 
 impl Badge {
-    /// The text shown in the row.
+    /// The text shown beside the workspace.
     pub fn label(&self) -> String {
         match self {
             Badge::Syncing {
@@ -59,7 +59,7 @@ impl Badge {
 }
 
 /// The badge for `entry`: unreachable beats everything, then not-synced, error, paused.
-pub fn badge(entry: &WorkspaceListEntry) -> Badge {
+pub fn badge(entry: &CurrentWorkspace) -> Badge {
     if !entry.reachable {
         Badge::Unreachable
     } else if !entry.sync.enabled {
@@ -77,16 +77,17 @@ pub fn badge(entry: &WorkspaceListEntry) -> Badge {
     }
 }
 
-/// The workgroup's workspaces of `app_name` that this host does not have, by sync id.
-pub fn remote_only<'a>(
+/// The workgroup's workspaces of `app_name` other than the current one, by sync id.
+pub fn others<'a>(
     ledger: &'a [WorkgroupWorkspaceInfo],
-    local: &[WorkspaceListEntry],
+    current: Option<&CurrentWorkspace>,
     app_name: &str,
 ) -> Vec<&'a WorkgroupWorkspaceInfo> {
+    let mine = current.and_then(|c| c.workspace_id);
     ledger
         .iter()
         .filter(|w| w.app_name == app_name)
-        .filter(|w| !local.iter().any(|l| l.workspace_id == Some(w.workspace_id)))
+        .filter(|w| mine != Some(w.workspace_id))
         .collect()
 }
 
@@ -222,9 +223,13 @@ pub fn short_id(id: &GrainId) -> String {
     id.to_string().chars().take(8).collect()
 }
 
-/// The row's title: its name, else its registry id.
-pub fn display_name(entry: &WorkspaceListEntry) -> String {
-    entry.name.clone().unwrap_or_else(|| entry.id.clone())
+/// The workspace's title: its folder's name.
+pub fn display_name(entry: &CurrentWorkspace) -> String {
+    entry
+        .root
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| entry.root.display().to_string())
 }
 
 // ── embedding ───────────────────────────────────────────────────────────────
@@ -363,10 +368,8 @@ mod tests {
         ws: Option<GrainId>,
         reachable: bool,
         sync: SyncStatusResult,
-    ) -> WorkspaceListEntry {
-        WorkspaceListEntry {
-            id: id.into(),
-            name: None,
+    ) -> CurrentWorkspace {
+        CurrentWorkspace {
             root: PathBuf::from(format!("/x/{id}")),
             reachable,
             workspace_id: ws,
@@ -425,7 +428,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_only_excludes_a_disabled_local_workspace() {
+    fn others_excludes_the_current_workspace_and_other_apps() {
         let mine = GrainId::random();
         let other = GrainId::random();
         let foreign = GrainId::random();
@@ -446,15 +449,11 @@ mod tests {
                 name: "j".into(),
             },
         ];
-        let local = vec![entry(
-            "mine",
-            Some(mine),
-            true,
-            SyncStatusResult::not_synced(),
-        )];
-        let left = remote_only(&ledger, &local, "app");
+        let current = entry("mine", Some(mine), true, SyncStatusResult::not_synced());
+        let left = others(&ledger, Some(&current), "app");
         assert_eq!(left.len(), 1);
         assert_eq!(left[0].workspace_id, other);
+        assert_eq!(others(&ledger, None, "app").len(), 2);
     }
 
     fn peer(id: GrainId, priority: u8) -> PeerInfo {
@@ -615,14 +614,9 @@ mod tests {
     }
 
     #[test]
-    fn display_name_falls_back_to_the_folder_name() {
+    fn display_name_is_the_folder_name() {
         let e = entry("notes-2", None, true, SyncStatusResult::not_synced());
         assert_eq!(display_name(&e), "notes-2");
-        let named = WorkspaceListEntry {
-            name: Some("Notes".into()),
-            ..e
-        };
-        assert_eq!(display_name(&named), "Notes");
     }
 
     #[test]

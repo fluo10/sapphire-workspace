@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use crate::client::{CommandId, FrameworkClient};
 use crate::views::{
     DeviceList, EmbeddingView, ExternalDeviceList, ServiceStatusBanner, ViewCtx, WorkgroupView,
-    WorkspaceList,
+    WorkspacePicker,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -30,7 +30,7 @@ pub struct SyncPanel {
     client: FrameworkClient,
     screen: Screen,
     banner: ServiceStatusBanner,
-    workspaces: WorkspaceList,
+    workspaces: WorkspacePicker,
     devices: DeviceList,
     workgroup: WorkgroupView,
     embedding: EmbeddingView,
@@ -45,7 +45,7 @@ impl SyncPanel {
             client,
             screen: Screen::Workspaces,
             banner: ServiceStatusBanner::default(),
-            workspaces: WorkspaceList::default(),
+            workspaces: WorkspacePicker::default(),
             devices: DeviceList::default(),
             workgroup: WorkgroupView::default(),
             embedding: EmbeddingView::default(),
@@ -97,7 +97,7 @@ impl SyncPanel {
             .exact_size(150.0)
             .show(ui, |ui| {
                 for (screen, label) in [
-                    (Screen::Workspaces, "Workspaces"),
+                    (Screen::Workspaces, "Workspace"),
                     (Screen::Devices, "Devices"),
                     (Screen::Workgroup, "Workgroup"),
                     (Screen::ExternalDevices, "External devices"),
@@ -136,7 +136,7 @@ impl SyncPanel {
 mod tests {
     use super::*;
     use crate::client::{BridgeState, Conn, ServerState, Snapshot};
-    use sapphire_backend::protocol::{StatusReport, SyncStatusResult, WorkspaceListEntry};
+    use sapphire_backend::protocol::{CurrentWorkspace, StatusReport, SyncStatusResult};
     use sapphire_bridge_api::{
         EmbedInfoResult, EmbedNote, EmbedSettingsResult, ExternalDeviceInfo, GrainId, LocalModel,
         ModelSettings, ModelSource, PeerInfo, RemoteModel, Slot, StatusResult, WorkgroupStatus,
@@ -220,14 +220,12 @@ mod tests {
                     managed_by: None,
                     app: vec![],
                 },
-                workspaces: vec![WorkspaceListEntry {
-                    id: "notes".into(),
-                    name: None,
+                current: Some(CurrentWorkspace {
                     root: "/x/notes".into(),
                     reachable: true,
                     workspace_id: None,
                     sync: SyncStatusResult::not_synced(),
-                }],
+                }),
             }),
         }
     }
@@ -237,7 +235,7 @@ mod tests {
         let mut banner = ServiceStatusBanner::default();
         let mut wg = WorkgroupView::default();
         let mut devices = DeviceList::default();
-        let mut workspaces = WorkspaceList::default();
+        let mut workspaces = WorkspacePicker::default();
         let mut embedding = EmbeddingView::default();
         let mut external = ExternalDeviceList::default();
         for _ in 0..2 {

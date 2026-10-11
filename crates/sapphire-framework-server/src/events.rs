@@ -1,61 +1,52 @@
 //! `workspace.subscribe` and the pump that turns backend events into notifications.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use sapphire_backend::protocol as proto;
-use sapphire_backend::{WorkspaceBackend, protocol::Ack};
+use sapphire_backend::protocol::Ack;
 use sapphire_ipc::{PeerHandle, Router, RpcError};
 use tokio::sync::broadcast::error::RecvError;
 
-use crate::handlers::rpc_error;
 use crate::host::WorkspaceHost;
 
 /// Add `workspace.subscribe` to `router`.
 ///
-/// The method opens the named workspace, subscribes to its
-/// [`BackendEvent`](sapphire_backend::BackendEvent) broadcast and spawns a task that
-/// forwards each event to that client as a `workspace.event` notification. The task stops
-/// when the client disconnects — `PeerHandle::notify` fails once the connection is gone —
-/// so a client that comes and goes does not leak tasks.
+/// The method subscribes the client to the host's events — the current workspace's, and
+/// after a switch the next one's (#215) — and spawns a task that forwards each event to
+/// that client as a `workspace.event` notification, naming the root it came from. The task
+/// stops when the client disconnects — `PeerHandle::notify` fails once the connection is
+/// gone — so a client that comes and goes does not leak tasks.
 ///
-/// Subscribing twice from the same connection to the same workspace still acknowledges,
-/// but starts no second pump, so a client cannot double its own event stream.
+/// Subscribing twice from the same connection still acknowledges, but starts no second
+/// pump, so a client cannot double its own event stream. Subscribing needs no workspace:
+/// a client may subscribe before the first one is selected.
 ///
-/// A subscriber that falls more than the backend's event capacity (128) behind loses the
-/// events in between and gets a warning in the server log: treat an event as "something
-/// happened, re-read", not as the change itself.
+/// A subscriber that falls more than the event capacity (128) behind loses the events in
+/// between and gets a warning in the server log: treat an event as "something happened,
+/// re-read", not as the change itself.
 pub fn subscribe_method(host: Arc<WorkspaceHost>, router: Router) -> Router {
-    // Which (client, workspace) pairs already have a pump. A client that subscribes twice
-    // must not receive two copies of every event.
-    let active: Arc<Mutex<HashSet<(u32, PathBuf)>>> = Arc::new(Mutex::new(HashSet::new()));
+    // Which clients already have a pump. A client that subscribes twice must not receive
+    // two copies of every event.
+    let active: Arc<Mutex<HashSet<u32>>> = Arc::new(Mutex::new(HashSet::new()));
 
     router.method(proto::SUBSCRIBE, move |ctx| {
         let host = Arc::clone(&host);
         let active = Arc::clone(&active);
         async move {
-            let p: proto::WsParams = serde_json::from_value(ctx.params.clone())
-                .map_err(|e| RpcError::invalid_params(format!("bad parameters: {e}")))?;
-            let backend = host.backend(&p.ws).await.map_err(|e| rpc_error(&e))?;
-
-            let key = (ctx.peer.client().pid, p.ws.clone());
-            if !active.lock().expect("subscription set").insert(key.clone()) {
-                // Already pumping for this client and workspace.
+            let key = ctx.peer.client().pid;
+            if !active.lock().expect("subscription set").insert(key) {
+                // Already pumping for this client.
                 return serde_json::to_value(Ack {}).map_err(|e| RpcError::internal(e.to_string()));
             }
 
-            let mut events = backend.subscribe();
+            let mut events = host.subscribe();
             let peer: PeerHandle = ctx.peer.clone();
-            let ws = p.ws.clone();
             tokio::spawn(async move {
                 loop {
                     match events.recv().await {
-                        Ok(event) => {
-                            let params = proto::EventParams {
-                                ws: ws.clone(),
-                                event,
-                            };
+                        Ok((ws, event)) => {
+                            let params = proto::EventParams { ws, event };
                             let Ok(value) = serde_json::to_value(params) else {
                                 continue;
                             };
@@ -65,11 +56,7 @@ pub fn subscribe_method(host: Arc<WorkspaceHost>, router: Router) -> Router {
                             }
                         }
                         Err(RecvError::Lagged(missed)) => {
-                            tracing::warn!(
-                                missed,
-                                workspace = %ws.display(),
-                                "a subscriber fell behind and lost events"
-                            );
+                            tracing::warn!(missed, "a subscriber fell behind and lost events");
                         }
                         Err(RecvError::Closed) => break,
                     }
@@ -183,9 +170,16 @@ mod tests {
         let ws = root.canonicalize().unwrap();
 
         let host = Arc::new(WorkspaceHost::new(&CTX));
-        let router = Arc::new(subscribe_method(
+        let current = Arc::new(crate::current::Current::new(
+            &CTX,
             Arc::clone(&host),
-            crate::workspace_router(host),
+            None,
+            crate::selection::SelectionFile::at(tmp.path().join("workspace.toml")),
+        ));
+        current.select(&ws).await.unwrap();
+        let router = Arc::new(subscribe_method(
+            host,
+            crate::current::current_methods(Arc::clone(&current), crate::workspace_router(current)),
         ));
         let (client_conn, server_conn) = Connection::pair();
         tokio::spawn(async move {
@@ -221,7 +215,7 @@ mod tests {
 
         let _: proto::Ack = f
             .client
-            .call(proto::SUBSCRIBE, proto::WsParams { ws: f.ws.clone() })
+            .call(proto::SUBSCRIBE, serde_json::json!({}))
             .await
             .unwrap();
         let _: proto::Ack = f
@@ -229,7 +223,6 @@ mod tests {
             .call(
                 proto::WRITE_FILE,
                 proto::ContentParams {
-                    ws: f.ws.clone(),
                     path: PathBuf::from("a.md"),
                     content: "x".into(),
                 },
@@ -252,17 +245,45 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn subscribing_to_a_directory_that_is_not_a_workspace_is_refused() {
+    async fn a_subscription_follows_a_switch_to_another_workspace() {
         let f = fixture().await;
-        let plain = f._tmp.path().join("plain");
-        std::fs::create_dir_all(&plain).unwrap();
-
-        let err = f
+        let other = f._tmp.path().join("other");
+        std::fs::create_dir_all(other.join(".sapphire-eventtest")).unwrap();
+        let other = other.canonicalize().unwrap();
+        let mut events = f.client.notifications();
+        let _: proto::Ack = f
             .client
-            .call::<_, proto::Ack>(proto::SUBSCRIBE, proto::WsParams { ws: plain })
+            .call(proto::SUBSCRIBE, serde_json::json!({}))
             .await
-            .unwrap_err();
-        assert!(matches!(err, sapphire_ipc::Error::Rpc(_)), "got {err:?}");
+            .unwrap();
+        let _: proto::CurrentWorkspace = f
+            .client
+            .call(
+                proto::WORKSPACE_SELECT,
+                proto::WorkspaceSelectParams { dir: other.clone() },
+            )
+            .await
+            .unwrap();
+        let _: proto::Ack = f
+            .client
+            .call(
+                proto::WRITE_FILE,
+                proto::ContentParams {
+                    path: PathBuf::from("b.md"),
+                    content: "y".into(),
+                },
+            )
+            .await
+            .unwrap();
+        let notification = tokio::time::timeout(Duration::from_secs(5), events.recv())
+            .await
+            .expect("an event within five seconds")
+            .unwrap();
+        let params: proto::EventParams = serde_json::from_value(notification.params).unwrap();
+        assert_eq!(
+            params.ws, other,
+            "the event names the workspace it came from"
+        );
     }
 
     #[tokio::test]
@@ -272,12 +293,12 @@ mod tests {
 
         let _: proto::Ack = f
             .client
-            .call(proto::SUBSCRIBE, proto::WsParams { ws: f.ws.clone() })
+            .call(proto::SUBSCRIBE, serde_json::json!({}))
             .await
             .unwrap();
         let _: proto::Ack = f
             .client
-            .call(proto::SUBSCRIBE, proto::WsParams { ws: f.ws.clone() })
+            .call(proto::SUBSCRIBE, serde_json::json!({}))
             .await
             .unwrap();
 
@@ -286,7 +307,6 @@ mod tests {
             .call(
                 proto::WRITE_FILE,
                 proto::ContentParams {
-                    ws: f.ws.clone(),
                     path: PathBuf::from("a.md"),
                     content: "x".into(),
                 },

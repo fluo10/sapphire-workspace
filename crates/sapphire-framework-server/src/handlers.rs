@@ -8,8 +8,8 @@ use sapphire_ipc::{RequestCtx, Router, RpcError, codes};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
+use crate::current::Current;
 use crate::error::Error;
-use crate::host::WorkspaceHost;
 use crate::sync::SyncRuntime;
 
 /// Turn a server error into a JSON-RPC error.
@@ -24,6 +24,7 @@ pub(crate) fn rpc_error(err: &Error) -> RpcError {
     let caller_error = matches!(
         err,
         Error::UnknownWorkspace(..)
+            | Error::NoWorkspace
             | Error::UnknownWorkspaceName(..)
             | Error::WrongApp { .. }
             | Error::SyncId(..)
@@ -61,15 +62,7 @@ fn ok<T: serde::Serialize>(value: T) -> std::result::Result<Value, RpcError> {
     serde_json::to_value(value).map_err(|e| RpcError::internal(e.to_string()))
 }
 
-/// Every `workspace.*` method except `workspace.subscribe`, which needs the event pump.
-///
-/// A server with sync uses [`workspace_router_with_sync`] instead; this is the variant for
-/// one without, and for tests.
-pub fn workspace_router(host: Arc<WorkspaceHost>) -> Router {
-    workspace_router_with_sync(host, None)
-}
-
-/// The [`workspace_router`] for a server that syncs.
+/// The file methods of `workspace.*`, on the current workspace (#215).
 ///
 /// The three methods that change a file take the exact path: after the write succeeds, the
 /// replica is told to [`scan`], so the change is committed without waiting for the watcher's
@@ -78,25 +71,19 @@ pub fn workspace_router(host: Arc<WorkspaceHost>) -> Router {
 /// scan loses an edit until the next one.
 ///
 /// [`scan`]: SyncRuntime::scan
-pub fn workspace_router_with_sync(
-    host: Arc<WorkspaceHost>,
-    sync: Option<Arc<SyncRuntime>>,
-) -> Router {
-    let read = Arc::clone(&host);
-    let write = Arc::clone(&host);
-    let write_sync = sync.clone();
-    let append = Arc::clone(&host);
-    let append_sync = sync.clone();
-    let delete = Arc::clone(&host);
-    let delete_sync = sync;
-    let list = Arc::clone(&host);
-    let search = Arc::clone(&host);
-    let reindex = Arc::clone(&host);
+pub fn workspace_router(current: Arc<Current>) -> Router {
+    let read = Arc::clone(&current);
+    let write = Arc::clone(&current);
+    let append = Arc::clone(&current);
+    let delete = Arc::clone(&current);
+    let list = Arc::clone(&current);
+    let search = Arc::clone(&current);
+    let reindex = current;
 
     /// Scan `root` after a write, if this server syncs. A failed scan is logged, not
     /// returned: the caller's write succeeded, and reporting a sync problem as a write
     /// failure would make an unrelated outage look like the caller's.
-    async fn scanned(sync: Option<Arc<SyncRuntime>>, root: &std::path::Path, what: &str) {
+    async fn scanned(sync: Option<&Arc<SyncRuntime>>, root: &std::path::Path, what: &str) {
         if let Some(runtime) = sync {
             if let Err(err) = runtime.scan(root).await {
                 tracing::warn!(root = %root.display(), "scan after {what} failed: {err}");
@@ -107,10 +94,10 @@ pub fn workspace_router_with_sync(
 
     Router::new()
         .method(proto::READ_FILE, move |ctx| {
-            let host = Arc::clone(&read);
+            let current = Arc::clone(&read);
             async move {
                 let p: proto::PathParams = params(&ctx)?;
-                let backend = host.backend(&p.ws).await.map_err(|e| rpc_error(&e))?;
+                let backend = current.host().backend().await.map_err(|e| rpc_error(&e))?;
                 let content = backend
                     .read_file(&p.path)
                     .await
@@ -119,52 +106,49 @@ pub fn workspace_router_with_sync(
             }
         })
         .method(proto::WRITE_FILE, move |ctx| {
-            let host = Arc::clone(&write);
-            let sync = write_sync.clone();
+            let current = Arc::clone(&write);
             async move {
                 let p: proto::ContentParams = params(&ctx)?;
-                let backend = host.backend(&p.ws).await.map_err(|e| rpc_error(&e))?;
+                let (root, backend) = current.host().current().await.map_err(|e| rpc_error(&e))?;
                 backend
                     .write_file(&p.path, &p.content)
                     .await
                     .map_err(|e| rpc_error(&Error::Backend(e)))?;
-                scanned(sync, &p.ws, "a write").await;
+                scanned(current.sync(), &root, "a write").await;
                 ok(Ack {})
             }
         })
         .method(proto::APPEND_FILE, move |ctx| {
-            let host = Arc::clone(&append);
-            let sync = append_sync.clone();
+            let current = Arc::clone(&append);
             async move {
                 let p: proto::ContentParams = params(&ctx)?;
-                let backend = host.backend(&p.ws).await.map_err(|e| rpc_error(&e))?;
+                let (root, backend) = current.host().current().await.map_err(|e| rpc_error(&e))?;
                 backend
                     .append_file(&p.path, &p.content)
                     .await
                     .map_err(|e| rpc_error(&Error::Backend(e)))?;
-                scanned(sync, &p.ws, "an append").await;
+                scanned(current.sync(), &root, "an append").await;
                 ok(Ack {})
             }
         })
         .method(proto::DELETE_FILE, move |ctx| {
-            let host = Arc::clone(&delete);
-            let sync = delete_sync.clone();
+            let current = Arc::clone(&delete);
             async move {
                 let p: proto::PathParams = params(&ctx)?;
-                let backend = host.backend(&p.ws).await.map_err(|e| rpc_error(&e))?;
+                let (root, backend) = current.host().current().await.map_err(|e| rpc_error(&e))?;
                 backend
                     .delete_file(&p.path)
                     .await
                     .map_err(|e| rpc_error(&Error::Backend(e)))?;
-                scanned(sync, &p.ws, "a delete").await;
+                scanned(current.sync(), &root, "a delete").await;
                 ok(Ack {})
             }
         })
         .method(proto::LIST_DIR, move |ctx| {
-            let host = Arc::clone(&list);
+            let current = Arc::clone(&list);
             async move {
                 let p: proto::PathParams = params(&ctx)?;
-                let backend = host.backend(&p.ws).await.map_err(|e| rpc_error(&e))?;
+                let backend = current.host().backend().await.map_err(|e| rpc_error(&e))?;
                 let entries = backend
                     .list_dir(&p.path)
                     .await
@@ -176,10 +160,10 @@ pub fn workspace_router_with_sync(
             }
         })
         .method(proto::SEARCH, move |ctx| {
-            let host = Arc::clone(&search);
+            let current = Arc::clone(&search);
             async move {
                 let p: proto::SearchParams = params(&ctx)?;
-                let backend = host.backend(&p.ws).await.map_err(|e| rpc_error(&e))?;
+                let backend = current.host().backend().await.map_err(|e| rpc_error(&e))?;
                 let hits = backend
                     .search(&p.query, p.limit, p.mode)
                     .await
@@ -187,11 +171,10 @@ pub fn workspace_router_with_sync(
                 ok(proto::SearchResult { hits })
             }
         })
-        .method(proto::REINDEX, move |ctx| {
-            let host = Arc::clone(&reindex);
+        .method(proto::REINDEX, move |_| {
+            let current = Arc::clone(&reindex);
             async move {
-                let p: proto::WsParams = params(&ctx)?;
-                let backend = host.backend(&p.ws).await.map_err(|e| rpc_error(&e))?;
+                let backend = current.host().backend().await.map_err(|e| rpc_error(&e))?;
                 let summary = backend
                     .sync()
                     .await
@@ -294,6 +277,10 @@ mod tests {
     /// whole test: the static [`CTX`] is first-writer-wins, so while one test runs, every
     /// other test that would re-point the context's directories must wait.
     async fn fixture() -> Fixture {
+        fixture_selecting(true).await
+    }
+
+    async fn fixture_selecting(select: bool) -> Fixture {
         let lock = test_support::lock();
         let tmp = tempfile::tempdir().unwrap();
         let _env = init_ctx(lock, tmp.path());
@@ -301,8 +288,16 @@ mod tests {
         std::fs::create_dir_all(root.join(".sapphire-handlertest")).unwrap();
         let ws = root.canonicalize().unwrap();
 
-        let host = Arc::new(WorkspaceHost::new(&CTX));
-        let router = Arc::new(workspace_router(host));
+        let current = Arc::new(Current::new(
+            &CTX,
+            Arc::new(crate::host::WorkspaceHost::new(&CTX)),
+            None,
+            crate::selection::SelectionFile::at(tmp.path().join("workspace.toml")),
+        ));
+        if select {
+            current.select(&ws).await.unwrap();
+        }
+        let router = Arc::new(workspace_router(current));
         let (client_conn, server_conn) = Connection::pair();
         tokio::spawn(async move {
             let info = ServerInfo {
@@ -338,7 +333,6 @@ mod tests {
             .call(
                 proto::WRITE_FILE,
                 proto::ContentParams {
-                    ws: f.ws.clone(),
                     path: PathBuf::from("a.md"),
                     content: "# hello".into(),
                 },
@@ -351,7 +345,6 @@ mod tests {
             .call(
                 proto::READ_FILE,
                 proto::PathParams {
-                    ws: f.ws,
                     path: PathBuf::from("a.md"),
                 },
             )
@@ -364,13 +357,11 @@ mod tests {
     async fn appending_adds_to_the_file() {
         let f = fixture().await;
         let write = proto::ContentParams {
-            ws: f.ws.clone(),
             path: PathBuf::from("a.md"),
             content: "one\n".into(),
         };
         let _: proto::Ack = f.client.call(proto::WRITE_FILE, write).await.unwrap();
         let append = proto::ContentParams {
-            ws: f.ws.clone(),
             path: PathBuf::from("a.md"),
             content: "two\n".into(),
         };
@@ -381,7 +372,6 @@ mod tests {
             .call(
                 proto::READ_FILE,
                 proto::PathParams {
-                    ws: f.ws,
                     path: PathBuf::from("a.md"),
                 },
             )
@@ -398,7 +388,6 @@ mod tests {
             .call(
                 proto::WRITE_FILE,
                 proto::ContentParams {
-                    ws: f.ws.clone(),
                     path: PathBuf::from("a.md"),
                     content: "x".into(),
                 },
@@ -410,7 +399,6 @@ mod tests {
             .call(
                 proto::DELETE_FILE,
                 proto::PathParams {
-                    ws: f.ws.clone(),
                     path: PathBuf::from("a.md"),
                 },
             )
@@ -422,7 +410,6 @@ mod tests {
             .call::<_, proto::ReadResult>(
                 proto::READ_FILE,
                 proto::PathParams {
-                    ws: f.ws,
                     path: PathBuf::from("a.md"),
                 },
             )
@@ -440,7 +427,6 @@ mod tests {
             .call(
                 proto::WRITE_FILE,
                 proto::ContentParams {
-                    ws: f.ws.clone(),
                     path: PathBuf::from("a.md"),
                     content: "x".into(),
                 },
@@ -453,7 +439,6 @@ mod tests {
             .call(
                 proto::LIST_DIR,
                 proto::PathParams {
-                    ws: f.ws,
                     path: PathBuf::from("."),
                 },
             )
@@ -485,7 +470,6 @@ mod tests {
             .call(
                 proto::WRITE_FILE,
                 proto::ContentParams {
-                    ws: f.ws.clone(),
                     path: PathBuf::from("a.md"),
                     content: "the quick brown fox".into(),
                 },
@@ -498,7 +482,6 @@ mod tests {
             .call(
                 proto::SEARCH,
                 proto::SearchParams {
-                    ws: f.ws,
                     query: "brown".into(),
                     limit: 10,
                     mode: sapphire_backend::SearchMode::Fts,
@@ -520,7 +503,7 @@ mod tests {
 
         let report: proto::ReindexResult = f
             .client
-            .call(proto::REINDEX, proto::WsParams { ws: f.ws })
+            .call(proto::REINDEX, serde_json::json!({}))
             .await
             .unwrap();
         assert!(report.upserted >= 1, "{report:?}");
@@ -534,7 +517,6 @@ mod tests {
             .call::<_, proto::ReadResult>(
                 proto::READ_FILE,
                 proto::PathParams {
-                    ws: f.ws,
                     path: PathBuf::from("../../etc/passwd"),
                 },
             )
@@ -549,17 +531,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_directory_that_is_not_a_workspace_is_an_invalid_parameter() {
-        let f = fixture().await;
-        let plain = f._tmp.path().join("plain");
-        std::fs::create_dir_all(&plain).unwrap();
-
+    async fn without_a_workspace_every_call_is_an_invalid_parameter() {
+        let f = fixture_selecting(false).await;
         let err = f
             .client
             .call::<_, proto::ReadResult>(
                 proto::READ_FILE,
                 proto::PathParams {
-                    ws: plain,
                     path: PathBuf::from("a.md"),
                 },
             )

@@ -15,7 +15,7 @@ pub use devices::{DeviceList, InviteDialog};
 pub use embedding::EmbeddingView;
 pub use external::ExternalDeviceList;
 pub use workgroup::{JoinDialog, WorkgroupView};
-pub use workspaces::WorkspaceList;
+pub use workspaces::WorkspacePicker;
 
 use crate::client::Snapshot;
 

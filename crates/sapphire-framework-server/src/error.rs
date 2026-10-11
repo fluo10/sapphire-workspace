@@ -23,6 +23,12 @@ pub enum Error {
     #[error("{0} is not a {1} workspace")]
     UnknownWorkspace(std::path::PathBuf, &'static str),
 
+    /// The server has no workspace yet, or the one asked for is no longer current (#215).
+    #[error(
+        "this server has no workspace yet; run `workspace init <dir>` or `workspace select <dir>`"
+    )]
+    NoWorkspace,
+
     /// The workgroup has no workspace with this name or id.
     #[error("the workgroup has no workspace {0}")]
     UnknownWorkspaceName(String),

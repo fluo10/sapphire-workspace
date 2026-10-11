@@ -132,11 +132,12 @@ impl Connections {
             };
             let info: proto::StatusReport =
                 c.call(proto::SERVER_INFO, serde_json::json!({})).await?;
-            let list: proto::WorkspaceListResult =
-                c.call(proto::WORKSPACE_LIST, serde_json::json!({})).await?;
+            let current: proto::WorkspaceCurrentResult = c
+                .call(proto::WORKSPACE_CURRENT, serde_json::json!({}))
+                .await?;
             Ok::<_, sapphire_ipc::Error>(Some(ServerState {
                 info,
-                workspaces: list.workspaces,
+                current: current.workspace,
             }))
         })
         .await;

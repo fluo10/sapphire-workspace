@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use grain_id::GrainId;
-use sapphire_backend::protocol::{StatusReport, WorkspaceListEntry};
+use sapphire_backend::protocol::{CurrentWorkspace, StatusReport};
 use sapphire_bridge_api::{
     BRIDGE_NAME, EmbedRequest, EmbedSettingsResult, ExternalDeviceInfo, ExternalDeviceRequest,
     PeerInfo, StatusResult, WorkgroupWorkspaceInfo, WorkspaceRoles,
@@ -145,8 +145,8 @@ pub struct BridgeState {
 pub struct ServerState {
     /// `server.info`.
     pub info: StatusReport,
-    /// `workspace.list`.
-    pub workspaces: Vec<WorkspaceListEntry>,
+    /// `workspace.current`: the one workspace the server serves, if it has one (#215).
+    pub current: Option<CurrentWorkspace>,
 }
 
 /// Both processes, as of the last refresh.
@@ -219,35 +219,30 @@ pub enum Command {
         /// `0..=255`; 0 opts the device out of the election.
         priority: u8,
     },
-    /// Create (or adopt) a workspace in `dir`, optionally syncing it.
+    /// Create (or adopt) a workspace in `dir` and switch the server to it, optionally
+    /// syncing it.
     WorkspaceInit {
         /// The workspace directory.
         dir: PathBuf,
         /// Enable sync right after.
         sync: bool,
     },
-    /// Start syncing.
-    SyncEnable {
-        /// The workspace root.
-        root: PathBuf,
+    /// Switch the server to the existing workspace in `dir`.
+    WorkspaceSelect {
+        /// The workspace's root.
+        dir: PathBuf,
     },
-    /// Stop syncing.
-    SyncDisable {
-        /// The workspace root.
-        root: PathBuf,
-    },
+    /// Start syncing the current workspace.
+    SyncEnable,
+    /// Stop syncing the current workspace.
+    SyncDisable,
     /// Bring a workgroup workspace to `dir`, creating the folder and initialising it as a
-    /// workspace first if needed.
+    /// workspace first if needed, and switch the server to it.
     WorkspaceMap {
         /// The workgroup workspace to map.
         workspace_id: GrainId,
         /// Where it goes on this host.
         dir: PathBuf,
-    },
-    /// Drop from this host's list.
-    WorkspaceForget {
-        /// The host registry id.
-        id: String,
     },
     /// Run the target's `service install`.
     ServiceInstall(ServiceTarget),

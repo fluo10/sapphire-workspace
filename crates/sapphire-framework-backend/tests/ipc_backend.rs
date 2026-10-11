@@ -64,6 +64,18 @@ async fn fixture(tmp: &Path) -> (Endpoint, PathBuf, std::process::Child) {
     (endpoint, root, child)
 }
 
+/// Make `ws` the server's workspace, as a CLI's `workspace select` does.
+async fn select(backend: &IpcBackend, ws: &Path) {
+    let _: sapphire_backend::protocol::CurrentWorkspace = backend
+        .client()
+        .call(
+            sapphire_backend::protocol::WORKSPACE_SELECT,
+            sapphire_backend::protocol::WorkspaceSelectParams { dir: ws.to_owned() },
+        )
+        .await
+        .unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn an_ipc_backend_reads_back_what_it_wrote() {
     let tmp = tempfile::tempdir().unwrap();
@@ -74,10 +86,11 @@ async fn an_ipc_backend_reads_back_what_it_wrote() {
         "sapphire-servertest",
         "test",
         env!("CARGO_PKG_VERSION"),
-        ws,
     )
     .await
     .unwrap();
+    select(&backend, &ws).await;
+    assert_eq!(backend.current().await.unwrap().unwrap().root, ws);
 
     backend
         .write_file(Path::new("a.md"), "# hello")
@@ -114,11 +127,11 @@ async fn events_reach_a_subscriber_of_an_ipc_backend() {
             "sapphire-servertest",
             "test",
             env!("CARGO_PKG_VERSION"),
-            ws,
         )
         .await
         .unwrap(),
     );
+    select(&backend, &ws).await;
 
     // `subscribe` is synchronous, so asking the server to start sending is a separate call.
     backend.start_events().await.unwrap();

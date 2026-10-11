@@ -46,6 +46,21 @@ fn fixture(tmp: &Path) -> (Endpoint, PathBuf, std::process::Child) {
 }
 
 /// Wait until the server is listening on `endpoint`.
+/// Make `ws` the server's workspace, as a client does once.
+async fn select(endpoint: &Endpoint, ws: &Path) {
+    let (client, _) = connect_or_absent(endpoint, "sapphire-servertest", client_info())
+        .await
+        .unwrap()
+        .unwrap();
+    let _: proto::CurrentWorkspace = client
+        .call(
+            proto::WORKSPACE_SELECT,
+            proto::WorkspaceSelectParams { dir: ws.to_owned() },
+        )
+        .await
+        .unwrap();
+}
+
 async fn wait_until_listening(endpoint: &Endpoint) {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
     while !sapphire_ipc::probe(endpoint).await.unwrap() {
@@ -90,11 +105,11 @@ async fn eight_concurrent_clients_all_write_successfully() {
     let tmp = tempfile::tempdir().unwrap();
     let (endpoint, ws, mut server) = fixture(tmp.path());
     wait_until_listening(&endpoint).await;
+    select(&endpoint, &ws).await;
 
     let mut tasks = Vec::new();
     for n in 0..8u32 {
         let endpoint = endpoint.clone();
-        let ws = ws.clone();
         tasks.push(tokio::spawn(async move {
             let (client, _) = connect_or_absent(&endpoint, "sapphire-servertest", client_info())
                 .await
@@ -104,7 +119,6 @@ async fn eight_concurrent_clients_all_write_successfully() {
                 .call(
                     proto::WRITE_FILE,
                     proto::ContentParams {
-                        ws,
                         path: PathBuf::from(format!("note-{n}.md")),
                         content: format!("written by client {n}"),
                     },
@@ -133,6 +147,7 @@ async fn a_long_lived_client_and_a_one_shot_client_coexist() {
     let tmp = tempfile::tempdir().unwrap();
     let (endpoint, ws, mut server) = fixture(tmp.path());
     wait_until_listening(&endpoint).await;
+    select(&endpoint, &ws).await;
 
     // The MCP server: connects and stays.
     let (long_lived, _) = connect_or_absent(&endpoint, "sapphire-servertest", client_info())
@@ -143,7 +158,6 @@ async fn a_long_lived_client_and_a_one_shot_client_coexist() {
         .call(
             proto::WRITE_FILE,
             proto::ContentParams {
-                ws: ws.clone(),
                 path: PathBuf::from("from-mcp.md"),
                 content: "agent".into(),
             },
@@ -161,7 +175,6 @@ async fn a_long_lived_client_and_a_one_shot_client_coexist() {
             .call(
                 proto::WRITE_FILE,
                 proto::ContentParams {
-                    ws: ws.clone(),
                     path: PathBuf::from("from-cli.md"),
                     content: "human".into(),
                 },
@@ -175,7 +188,6 @@ async fn a_long_lived_client_and_a_one_shot_client_coexist() {
         .call(
             proto::READ_FILE,
             proto::PathParams {
-                ws,
                 path: PathBuf::from("from-cli.md"),
             },
         )
