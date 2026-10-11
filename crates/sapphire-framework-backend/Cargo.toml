@@ -13,9 +13,9 @@ default = ["redb-store"]
 redb-store = ["sapphire-workspace/redb-store"]
 
 [dependencies]
-sapphire-workspace = { package = "sapphire-framework-workspace", version = "0.14.0", path = "../sapphire-framework-workspace", default-features = false }
+sapphire-workspace = { package = "sapphire-framework-workspace", version = "0.15.0", path = "../sapphire-framework-workspace", default-features = false }
 sapphire-server-api = { package = "sapphire-framework-server-api", version = "4.0.0", path = "../sapphire-framework-server-api" }
-sapphire-ipc = { package = "sapphire-framework-ipc", version = "0.14.0", path = "../sapphire-framework-ipc" }
+sapphire-ipc = { package = "sapphire-framework-ipc", version = "0.15.0", path = "../sapphire-framework-ipc" }
 tokio = { workspace = true, features = ["rt", "sync", "macros"] }
 async-trait.workspace = true
 thiserror.workspace = true
@@ -27,7 +27,7 @@ indexmap = { workspace = true }
 grain-id.workspace = true
 
 [dev-dependencies]
-sapphire-framework-server = { version = "0.14.0", path = "../sapphire-framework-server", features = ["test-util"] }
+sapphire-framework-server = { version = "0.15.0", path = "../sapphire-framework-server", features = ["test-util"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net"] }
 tempfile = "3"
 toml.workspace = true

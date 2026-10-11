@@ -43,17 +43,17 @@ redb-store = [
 ]
 
 [dependencies]
-sapphire-framework-workspace = { version = "0.14.0", path = "../sapphire-framework-workspace", optional = true, default-features = false }
-sapphire-framework-retrieve = { version = "0.14.0", path = "../sapphire-framework-retrieve", optional = true, default-features = false }
-sapphire-framework-track = { version = "0.14.0", path = "../sapphire-framework-track", optional = true }
-sapphire-framework-sync = { version = "0.14.0", path = "../sapphire-framework-sync", optional = true }
-sapphire-framework-session = { version = "0.14.0", path = "../sapphire-framework-session", optional = true }
-sapphire-framework-ipc = { version = "0.14.0", path = "../sapphire-framework-ipc", optional = true }
-sapphire-framework-server = { version = "0.14.0", path = "../sapphire-framework-server", optional = true }
-sapphire-framework-registry = { version = "0.14.0", path = "../sapphire-framework-registry", optional = true }
-sapphire-framework-bridge = { version = "0.14.0", path = "../sapphire-framework-bridge", optional = true }
-sapphire-framework-bridge-embed = { version = "0.14.0", path = "../sapphire-framework-bridge-embed", optional = true }
-sapphire-framework-backend = { version = "0.14.0", path = "../sapphire-framework-backend", optional = true, default-features = false }
-sapphire-framework-gui = { version = "0.14.0", path = "../sapphire-framework-gui", optional = true }
-sapphire-framework-keys = { version = "0.14.0", path = "../sapphire-framework-keys", optional = true }
-sapphire-framework-service = { version = "0.14.0", path = "../sapphire-framework-service", optional = true }
+sapphire-framework-workspace = { version = "0.15.0", path = "../sapphire-framework-workspace", optional = true, default-features = false }
+sapphire-framework-retrieve = { version = "0.15.0", path = "../sapphire-framework-retrieve", optional = true, default-features = false }
+sapphire-framework-track = { version = "0.15.0", path = "../sapphire-framework-track", optional = true }
+sapphire-framework-sync = { version = "0.15.0", path = "../sapphire-framework-sync", optional = true }
+sapphire-framework-session = { version = "0.15.0", path = "../sapphire-framework-session", optional = true }
+sapphire-framework-ipc = { version = "0.15.0", path = "../sapphire-framework-ipc", optional = true }
+sapphire-framework-server = { version = "0.15.0", path = "../sapphire-framework-server", optional = true }
+sapphire-framework-registry = { version = "0.15.0", path = "../sapphire-framework-registry", optional = true }
+sapphire-framework-bridge = { version = "0.15.0", path = "../sapphire-framework-bridge", optional = true }
+sapphire-framework-bridge-embed = { version = "0.15.0", path = "../sapphire-framework-bridge-embed", optional = true }
+sapphire-framework-backend = { version = "0.15.0", path = "../sapphire-framework-backend", optional = true, default-features = false }
+sapphire-framework-gui = { version = "0.15.0", path = "../sapphire-framework-gui", optional = true }
+sapphire-framework-keys = { version = "0.15.0", path = "../sapphire-framework-keys", optional = true }
+sapphire-framework-service = { version = "0.15.0", path = "../sapphire-framework-service", optional = true }
